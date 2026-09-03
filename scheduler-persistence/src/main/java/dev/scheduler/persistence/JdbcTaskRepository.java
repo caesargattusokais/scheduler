@@ -1,0 +1,51 @@
+package dev.scheduler.persistence;
+import dev.scheduler.core.Task;
+import java.util.List;
+import java.util.Optional;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.core.RowMapper;
+import org.springframework.jdbc.support.GeneratedKeyHolder;
+import org.springframework.jdbc.support.KeyHolder;
+
+public class JdbcTaskRepository implements TaskRepository {
+  private final JdbcTemplate jdbc;
+  public JdbcTaskRepository(JdbcTemplate jdbc) { this.jdbc = jdbc; }
+
+  private static final RowMapper<Task> MAP = (rs, i) -> new Task(
+      rs.getLong("id"), rs.getString("name"), rs.getString("kind"),
+      rs.getString("handler_ref"), rs.getString("cron"),
+      rs.getInt("shard_count"), rs.getInt("timeout_seconds"),
+      rs.getInt("max_retries"), rs.getLong("backoff_ms"),
+      rs.getString("retryable_failure_pattern"), rs.getInt("max_active_concurrent"),
+      rs.getBoolean("enabled"), rs.getBoolean("paused"));
+
+  @Override public Task create(Task t) {
+    KeyHolder kh = new GeneratedKeyHolder();
+    jdbc.update(con -> {
+      var ps = con.prepareStatement("""
+        INSERT INTO app_task (name, kind, handler_ref, cron, shard_count, timeout_seconds,
+                              max_retries, backoff_ms, retryable_failure_pattern, max_active_concurrent)
+        VALUES (?,?,?,?,?,?,?,?,?,?)""",
+          new String[]{"id"});
+      ps.setString(1, t.name()); ps.setString(2, t.kind()); ps.setString(3, t.handlerRef());
+      ps.setString(4, t.cron()); ps.setInt(5, t.shardCount()); ps.setInt(6, t.timeoutSeconds());
+      ps.setInt(7, t.maxRetries()); ps.setLong(8, t.backoffMs());
+      ps.setString(9, t.retryableFailurePattern()); ps.setInt(10, t.maxActiveConcurrent());
+      return ps;
+    }, kh);
+    return new Task(kh.getKey().longValue(), t.name(), t.kind(), t.handlerRef(), t.cron(),
+        t.shardCount(), t.timeoutSeconds(), t.maxRetries(), t.backoffMs(),
+        t.retryableFailurePattern(), t.maxActiveConcurrent(), true, false);
+  }
+
+  @Override public Optional<Task> findById(long id) {
+    return jdbc.query("SELECT * FROM app_task WHERE id=?", MAP, id).stream().findFirst();
+  }
+  @Override public List<Task> findCronEnabled() {
+    return jdbc.query("SELECT * FROM app_task WHERE enabled AND NOT paused AND cron IS NOT NULL", MAP);
+  }
+  @Override public List<Task> findAll() { return jdbc.query("SELECT * FROM app_task ORDER BY id", MAP); }
+  @Override public void setPaused(long id, boolean paused) {
+    jdbc.update("UPDATE app_task SET paused=?, updated_at=now() WHERE id=?", paused, id);
+  }
+}
