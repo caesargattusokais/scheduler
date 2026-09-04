@@ -8,6 +8,7 @@ import dev.scheduler.core.ExecutionStatus;
 import dev.scheduler.core.Task;
 import dev.scheduler.persistence.ExecutionRepository;
 import dev.scheduler.persistence.JdbcExecutionRepository;
+import dev.scheduler.persistence.JdbcShardRepository;
 import dev.scheduler.persistence.JdbcTaskRepository;
 import dev.scheduler.persistence.TaskRepository;
 import dev.scheduler.server.retry.FailureResolver;
@@ -68,8 +69,11 @@ class ReconcilerTest {
   }
 
   private Reconciler reconciler() {
+    // M3 R1:FailureResolver 现作用对象为 shard。M2 reconciler 仍驱动 execution 生命周期(Task 6 才迁),
+    // 此处仅把构造参数由 ExecutionRepository 换为 ShardRepository 以通过编译;运行时 execution id 喂入
+    // shard-arity resolver 不命中任何 shard 行 → 静默 no-op,故本类断言按 Task 5 plan-documented red 保留。
     return new Reconciler(tasks, executions,
-        new FailureResolver(executions, new RetryPolicy(), CLOCK), "reconciler");
+        new FailureResolver(new JdbcShardRepository(jdbc), new RetryPolicy(), CLOCK), "reconciler");
   }
 
   private Execution byId(long id) {

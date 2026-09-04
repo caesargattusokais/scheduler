@@ -96,10 +96,10 @@ public class Beans {
     return new RetryPolicy();
   }
 
-  /** 失败判定(FAILED 落库 + 重试/死信分流);单例,Task 5 reconciler 复用同一实例。 */
+  /** 失败判定(FAILED 落库 + 重试/死信分流);单例,Task 5 reconciler 复用同一实例。M3:作用对象为 shard。 */
   @Bean
-  FailureResolver failureResolver(ExecutionRepository execs, RetryPolicy retryPolicy, Clock clock) {
-    return new FailureResolver(execs, retryPolicy, clock);
+  FailureResolver failureResolver(ShardRepository shards, RetryPolicy retryPolicy, Clock clock) {
+    return new FailureResolver(shards, retryPolicy, clock);
   }
 
   /** 本节点稳定的执行者标识,流入认领与每次 markStatus(审计"谁做的")。 */
@@ -109,10 +109,10 @@ public class Beans {
   }
 
   @Bean
-  ExecutorWorker executorWorker(TaskRepository tasks, ExecutionRepository execs,
+  ExecutorWorker executorWorker(TaskRepository tasks, ShardRepository shards,
                                 HandlerRegistry handlers, String schedulerWorkerId,
                                 FailureResolver failureResolver, Clock clock) {
-    return new ExecutorWorker(tasks, execs, handlers, schedulerWorkerId, failureResolver, clock);
+    return new ExecutorWorker(tasks, shards, handlers, schedulerWorkerId, failureResolver, clock);
   }
 
   /**
