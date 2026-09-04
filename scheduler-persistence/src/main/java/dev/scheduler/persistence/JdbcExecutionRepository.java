@@ -146,4 +146,17 @@ public class JdbcExecutionRepository implements ExecutionRepository {
       }
     });
   }
+
+  @Override public boolean requestCancel(long id) {
+    // 仅 RUNNING 生效且不动状态(取消请求非状态迁移,真实转 CANCELED 由 worker markStatus 落)。
+    // CAS on status='RUNNING':0 行=DUE/终态或竞态被 claim 走,返回 false,不落 outcome。
+    return jdbc.update(
+        "UPDATE execution SET cancel_requested=true WHERE id=? AND status='RUNNING'", id) == 1;
+  }
+
+  @Override public boolean isCancelRequested(long id) {
+    Boolean b = jdbc.queryForObject("SELECT cancel_requested FROM execution WHERE id=?",
+        Boolean.class, id);
+    return b != null && b;
+  }
 }

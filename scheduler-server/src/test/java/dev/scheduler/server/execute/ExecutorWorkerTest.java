@@ -24,6 +24,7 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CancellationException;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -40,6 +41,16 @@ class ExecutorWorkerTest extends AbstractExecutorWorkerTest {
     RecordingHandler(boolean fail) { this.fail = fail; }
     @Override public String ref() { return "rec"; }
     @Override public void handle(HandlerContext ctx) { calls.add(ctx); if (fail) throw new RuntimeException("boom"); }
+  }
+
+  /** 始终抛取消信号的 handler,验证协作取消走 CANCELED 而非常规失败判定。 */
+  static class CancellingHandler implements ExecutionHandler {
+    final List<HandlerContext> calls = new ArrayList<>();
+    @Override public String ref() { return "cancel"; }
+    @Override public void handle(HandlerContext ctx) {
+      calls.add(ctx);
+      throw new CancellationException("cancel me");
+    }
   }
 
   /** 固定时钟:重试测试据此断言 next_retry_at,避免依赖实时时钟。 */
@@ -205,6 +216,66 @@ class ExecutorWorkerTest extends AbstractExecutorWorkerTest {
     assertEquals(ExecutionStatus.RUNNING, running.status()); // 他人拥有的 execution 未被本 worker 改动
     Execution due = executions.findById(dueId).orElseThrow();
     assertEquals(ExecutionStatus.DUE, due.status()); // 未认领 → 仍 DUE,绝不回写
+  }
+
+  @Test void cancelRequestedBeforeRun_marksCanceled_handlerNeverCalled() {
+    var rec = new RecordingHandler(false);
+    var registry = new MapHandlerRegistry(List.of(() -> rec));
+    long taskId = createTask("rec", 1);
+    // 预置 DUE 且 cancel_requested=true:worker 认领后运行前检查即取消,不调度 handler。
+    jdbc.update("""
+      INSERT INTO execution (task_id, status, idempotency_key, shard_count, cancel_requested)
+      VALUES (?, 'DUE', ?, 1, true)""",
+        taskId, "k-cancel-before");
+    long execId = jdbc.queryForObject(
+        "SELECT id FROM execution WHERE idempotency_key='k-cancel-before'", Long.class);
+
+    boolean processed = worker(registry).workOne();
+
+    assertTrue(processed);
+    Execution e = executions.findById(execId).orElseThrow();
+    assertEquals(ExecutionStatus.CANCELED, e.status(), "运行前已请求取消 → CANCELED");
+    assertEquals(0, rec.calls.size(), "已取消的候选不应被调度 handler");
+    assertEquals(1L, outcomeCount(execId, "CANCELED"));
+  }
+
+  @Test void handlerCancellation_marksCanceled_noRetry() {
+    var rec = new CancellingHandler();
+    var registry = new MapHandlerRegistry(List.of(() -> rec));
+    long taskId = createTask("cancel", 2, 1000, null, 1); // 即使任务可重试,取消也不走重试
+    long execId = executions.createDue(Execution.ofDue(taskId, "k-cancel-run", 1));
+
+    boolean processed = worker(registry).workOne();
+
+    assertTrue(processed);
+    Execution e = executions.findById(execId).orElseThrow();
+    assertEquals(ExecutionStatus.CANCELED, e.status(), "取消信号映射 CANCELED 而非 FAILED");
+    assertEquals(1, rec.calls.size());
+    assertEquals(0L, outcomeCount(execId, "DUE"), "取消不调度重试,无 DUE outcome");
+    assertEquals(0L, outcomeCount(execId, "FAILED"), "取消不落 FAILED");
+  }
+
+  @Test void handlerRunsNormally_butCancelRequestedMidRun_marksCanceled() {
+    long taskId = createTask("scripted", 1);
+    long execId = executions.createDue(Execution.ofDue(taskId, "k-midrun", 1));
+    var mid = new RecordingHandler(false);
+    var scripted = new ExecutionHandler() {
+      @Override public String ref() { return "scripted"; }
+      @Override public void handle(HandlerContext ctx) {
+        executions.requestCancel(execId); // 运行期间经仓库置位
+        mid.handle(ctx); // 然后正常返回
+      }
+    };
+    var registry = new MapHandlerRegistry(List.of(() -> scripted));
+
+    boolean processed = worker(registry).workOne();
+
+    assertTrue(processed);
+    Execution e = executions.findById(execId).orElseThrow();
+    assertEquals(ExecutionStatus.CANCELED, e.status(), "运行期间被请求取消 → 正常返回后复查仍落 CANCELED");
+    assertEquals(1, mid.calls.size(), "handler 确已正常运行(非运行前取消)");
+    assertEquals(1L, outcomeCount(execId, "CANCELED"));
+    assertEquals(0L, outcomeCount(execId, "SUCCESS"), "不会同时落 SUCCESS");
   }
 
   @Test void noWork_emptyTables_returnsFalse() {

@@ -35,6 +35,11 @@ class JdbcExecutionRepositoryTest extends AbstractPostgresTest {
         "SELECT dead_letter FROM execution WHERE id=?", Boolean.class, executionId));
   }
 
+  private boolean cancelRequested(long executionId) {
+    return Boolean.TRUE.equals(jdbc.queryForObject(
+        "SELECT cancel_requested FROM execution WHERE id=?", Boolean.class, executionId));
+  }
+
   private long failedExecution(int maxActiveConcurrent, String key) {
     long taskId = newTask(maxActiveConcurrent);
     long id = execRepo.createDue(ofDue(taskId, key));
@@ -190,5 +195,48 @@ class JdbcExecutionRepositoryTest extends AbstractPostgresTest {
     execRepo.markDeadLetter(id, "nope");
 
     assertFalse(deadLetter(id));
+  }
+
+  @Test void requestCancelSetsFlagOnRunningOnly_noOutcome() {
+    long taskId = newTask(8);
+    long id = execRepo.createDue(ofDue(taskId, "t12:k1"));
+    execRepo.claim(id, taskId, "w1", Instant.now().plusSeconds(60), 8); // -> RUNNING
+
+    assertTrue(execRepo.requestCancel(id));
+    assertTrue(cancelRequested(id), "cancel_requested 标志必须置位");
+    assertEquals(ExecutionStatus.RUNNING, execRepo.findById(id).get().status(),
+        "取消请求非状态迁移,仍 RUNNING");
+    assertEquals(1, outcomes(id), "取消请求不落 outcome(真实转 CANCELED 时才落)");
+  }
+
+  @Test void requestCancelOnDueReturnsFalse() {
+    long taskId = newTask(8);
+    long id = execRepo.createDue(ofDue(taskId, "t13:k1")); // DUE,非 RUNNING
+
+    assertFalse(execRepo.requestCancel(id), "DUE 不可请求协作取消");
+    assertFalse(cancelRequested(id));
+  }
+
+  @Test void requestCancelOnTerminalReturnsFalse() {
+    long taskId = newTask(8);
+    long id = execRepo.createDue(ofDue(taskId, "t14:k1"));
+    execRepo.claim(id, taskId, "w1", Instant.now().plusSeconds(60), 8);
+    execRepo.markStatus(id, ExecutionStatus.SUCCESS, "w1", "done"); // SUCCESS 终态
+
+    assertFalse(execRepo.requestCancel(id), "终态不可请求协作取消");
+  }
+
+  @Test void isCancelRequestedDefaultsFalseAndReadsTrue() {
+    long taskId = newTask(8);
+    long id = execRepo.createDue(ofDue(taskId, "t15:k1"));
+    assertFalse(cancelRequestedViaRepo(id), "新建行 cancel_requested 列默认 false");
+
+    execRepo.claim(id, taskId, "w1", Instant.now().plusSeconds(60), 8);
+    execRepo.requestCancel(id);
+    assertTrue(cancelRequestedViaRepo(id));
+  }
+
+  private boolean cancelRequestedViaRepo(long executionId) {
+    return execRepo.isCancelRequested(executionId);
   }
 }

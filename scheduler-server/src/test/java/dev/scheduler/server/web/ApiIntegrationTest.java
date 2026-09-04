@@ -189,7 +189,7 @@ class ApiIntegrationTest {
   }
 
   @Test
-  void cancelDue_setsCanceled_runningIs409() throws Exception {
+  void cancelDue_setsCanceled() throws Exception {
     long id = postTask("cancel-task");
     MvcResult r = mvc.perform(post("/api/v1/tasks/" + id + "/trigger"))
         .andExpect(status().isCreated()).andReturn();
@@ -200,6 +200,38 @@ class ApiIntegrationTest {
         .andExpect(jsonPath("$.status").value("CANCELED"));
     assertEquals("CANCELED", jdbc.queryForObject(
         "SELECT status FROM execution WHERE id=?", String.class, execId));
+  }
+
+  @Test
+  void cancelRunning_setsCancelRequestedFlag_returns202() throws Exception {
+    long id = postTask("cancel-running-task");
+    // 直接 SQL 预置 RUNNING:worker 同步跑完 DemoHandler 会立即转 SUCCESS,借 trigger→claim 无法保持
+    // RUNNING 态,故确定性直插 RUNNING 行避免 mid-run 竞态。
+    jdbc.update("""
+        INSERT INTO execution (task_id, status, idempotency_key, shard_count, worker_id, lease_until)
+        VALUES (?, 'RUNNING', 'running-cancel', 1, 'w1', now() + interval '60 seconds')""", id);
+    long execId = jdbc.queryForObject(
+        "SELECT id FROM execution WHERE idempotency_key='running-cancel'", Long.class);
+
+    mvc.perform(post("/api/v1/executions/" + execId + "/cancel"))
+        .andExpect(status().isAccepted())
+        .andExpect(jsonPath("$.status").value("RUNNING")); // 202 返回现态,取消请求非状态迁移
+    assertEquals(Boolean.TRUE, jdbc.queryForObject(
+        "SELECT cancel_requested FROM execution WHERE id=?", Boolean.class, execId),
+        "RUNNING → cancel 置 cancel_requested=true,供 worker 协作退出");
+  }
+
+  @Test
+  void cancelSuccess_returnsConflict() throws Exception {
+    long id = postTask("cancel-success-task");
+    jdbc.update("""
+        INSERT INTO execution (task_id, status, idempotency_key, shard_count, worker_id, finished_at)
+        VALUES (?, 'SUCCESS', 'success-cancel', 1, 'w1', now())""", id);
+    long execId = jdbc.queryForObject(
+        "SELECT id FROM execution WHERE idempotency_key='success-cancel'", Long.class);
+
+    mvc.perform(post("/api/v1/executions/" + execId + "/cancel"))
+        .andExpect(status().isConflict()); // 终态不可取消
   }
 
   private long postTask(String name) throws Exception {

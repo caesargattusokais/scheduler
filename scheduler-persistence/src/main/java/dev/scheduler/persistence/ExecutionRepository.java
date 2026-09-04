@@ -20,6 +20,12 @@ public interface ExecutionRepository {
   void scheduleRetry(long id, Instant retryAt, String detail);
   void markDeadLetter(long id, String detail);
 
+  /** 协作取消请求:仅置 cancel_requested 标志(不动状态),仅 RUNNING 生效;非 RUNNING 返回 false。不落 outcome。 */
+  boolean requestCancel(long id);
+
+  /** worker 轮询该行是否已被请求取消;列默认 false。 */
+  boolean isCancelRequested(long id);
+
   /** 某任务下租约已过期(lease_until <= DB now)且仍 RUNNING 的孤儿执行;由 Reconciler 逐任务回收。 */
   List<ExpiredRun> findExpiredRunning(long taskId);
 }

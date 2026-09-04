@@ -5,11 +5,13 @@ import dev.scheduler.core.Task;
 import dev.scheduler.persistence.ExecutionRepository;
 import dev.scheduler.persistence.TaskRepository;
 import dev.scheduler.server.handler.ExecutionHandler;
+import dev.scheduler.server.handler.CancellationToken;
 import dev.scheduler.server.handler.HandlerContext;
 import dev.scheduler.server.handler.HandlerRegistry;
 import dev.scheduler.server.retry.FailureResolver;
 import java.time.Clock;
 import java.time.Instant;
+import java.util.concurrent.CancellationException;
 
 /**
  * 执行器工作循环:为每个任务找一个 DUE 候选、原子认领、按 handlerRef 派发 handler、写回结果与
@@ -52,11 +54,25 @@ public class ExecutorWorker {
         failureResolver.handle(t, cand.get().id(), cand.get().attempt() + 1, workerId, e.getMessage());
         return true;
       }
+      // 运行前检查:已被请求取消则直接落 CANCELED,不再调度 handler(协作取消前置路径)。
+      if (execs.isCancelRequested(cand.get().id())) {
+        execs.markStatus(cand.get().id(), ExecutionStatus.CANCELED, workerId, "cancelled before run");
+        return true;
+      }
+      CancellationToken token = new CancellationToken(execs.isCancelRequested(cand.get().id()));
       try {
-        h.handle(new HandlerContext(cand.get().id(), cand.get().args()));
-        execs.markStatus(cand.get().id(), ExecutionStatus.SUCCESS, workerId, "ok");
+        h.handle(new HandlerContext(cand.get().id(), cand.get().args(), token));
+        // 正常返回后:若期间被请求取消,落 CANCELED;否则 SUCCESS。
+        if (execs.isCancelRequested(cand.get().id())) {
+          execs.markStatus(cand.get().id(), ExecutionStatus.CANCELED, workerId, "cancelled after run");
+        } else {
+          execs.markStatus(cand.get().id(), ExecutionStatus.SUCCESS, workerId, "ok");
+        }
+      } catch (CancellationException cex) {
+        // 协作取消信号:distinct 路径,不路由到 failureResolver(不重试/不死信)。
+        execs.markStatus(cand.get().id(), ExecutionStatus.CANCELED, workerId, "cancelled by handler");
       } catch (Throwable err) {
-        // 失败走统一判定:应重试则调度重试,否则 FAILED + 死信。
+        // 普通失败走统一判定:应重试则调度重试,否则 FAILED + 死信。
         failureResolver.handle(t, cand.get().id(), cand.get().attempt() + 1, workerId,
             String.valueOf(err));
       }

@@ -17,7 +17,8 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.server.ResponseStatusException;
 
-/** 执行控制面(spec §5.1):列表/详情/取消。取消在 M1 仅作用于 DUE(RUNNING 取消语义属 M2)。 */
+/** 执行控制面(spec §5.1):列表/详情/取消。取消:DUE 直接转 CANCELED;RUNNING 置 cancel_requested
+ *  协作取消(返回 202);终态(SUCCESS/FAILED)不可取消(409)。 */
 @RestController
 @RequestMapping("/api/v1/executions")
 public class ExecutionController {
@@ -65,7 +66,15 @@ public class ExecutionController {
     return executions.findById(id).orElseThrow(() -> notFound("execution " + id));
   }
 
-  /** 取消 DUE 的 execution 到 CANCELED;RUNNING 的协作取消在 M2 处理,此处返回 409。 */
+  /**
+   * 取消 execution:
+   * <ul>
+   *   <li>DUE → 直接转 CANCELED,返回 200。</li>
+   *   <li>RUNNING → 置 cancel_requested 协作取消(不动状态,由 worker 经 token 协作退出),返回 202 + 现态。</li>
+   *   <li>已 CANCELED → 幂等 200。</li>
+   *   <li>其他终态(SUCCESS/FAILED)→ 409,不可取消。</li>
+   * </ul>
+   */
   @PostMapping("/{id}/cancel")
   public ResponseEntity<Execution> cancel(@PathVariable long id) {
     Execution e = executions.findById(id).orElseThrow(() -> notFound("execution " + id));
@@ -76,8 +85,14 @@ public class ExecutionController {
       executions.markStatus(id, ExecutionStatus.CANCELED, workerId, "cancel via api");
       return ResponseEntity.ok(executions.findById(id).orElseThrow(() -> notFound("execution " + id)));
     }
+    if (e.status() == ExecutionStatus.RUNNING) {
+      // 协作取消:仅置 cancel_requested 标志(真实转 CANCELED 由 worker 落),返回 202 + 现态。
+      executions.requestCancel(id);
+      return ResponseEntity.accepted()
+          .body(executions.findById(id).orElseThrow(() -> notFound("execution " + id)));
+    }
     throw new ResponseStatusException(HttpStatus.CONFLICT,
-        "only DUE executions can be cancelled in M1; RUNNING-cancel is an M2 concern (current=" + e.status() + ")");
+        "execution " + id + " is " + e.status() + " and cannot be cancelled (only DUE or RUNNING can)");
   }
 
   private static ResponseStatusException notFound(String what) {
