@@ -61,10 +61,8 @@
         <artifactId>maven-surefire-plugin</artifactId>
         <configuration>
           <systemPropertyVariables>
-            <!-- docker-java's transport defaults to Docker API v1.32, which modern
-                 engines (Docker >= 28, min supported API 1.40) reject with HTTP 400.
-                 Pin a supported floor so Testcontainers can connect on Windows. -->
-            <api.version>1.40</api.version>
+            <!-- 值定义在根 pom 的 <api.version>,见其注释。 -->
+            <api.version>${api.version}</api.version>
           </systemPropertyVariables>
         </configuration>
       </plugin>

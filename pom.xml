@@ -16,6 +16,9 @@
     <maven.compiler.release>21</maven.compiler.release>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <spring-boot.version>3.2.5</spring-boot.version>
+    <!-- docker-java transport 默认 Docker API v1.32,现代引擎(>=28,min 1.40)会 HTTP 400。
+         Windows Testcontainers 需此下限;单一来源定义,子模块 surefire 引用该值。 -->
+    <api.version>1.40</api.version>
   </properties>
   <dependencyManagement>
     <dependencies>
