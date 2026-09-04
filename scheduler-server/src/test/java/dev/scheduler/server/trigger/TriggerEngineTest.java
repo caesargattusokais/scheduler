@@ -51,7 +51,7 @@ class TriggerEngineTest extends AbstractTriggerEngineTest {
       assertEquals(1, countExecutions(taskId));
       Execution due = executions.findCandidate(taskId).orElseThrow();
       assertEquals("DUE", due.status().name());
-      assertEquals(IdempotencyKeys.forTrigger(taskId, FIRED, 0), due.idempotencyKey());
+      assertEquals(IdempotencyKeys.forTrigger(taskId, FIRED), due.idempotencyKey());
     } finally { leader.close(); }
   }
 

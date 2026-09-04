@@ -33,6 +33,15 @@ class SchemaSmokeTest {
     assertColumnType("dead_letter");
   }
 
+  @Test void shardingTablesExist() {
+    var jdbc = jdbc();
+    Integer n = jdbc.queryForObject(
+        "SELECT count(*) FROM information_schema.tables WHERE table_schema='public'"
+            + " AND table_name IN ('execution_shard', 'execution_shard_outcome')",
+        Integer.class);
+    assertEquals(2, n, "V3 must create execution_shard and execution_shard_outcome");
+  }
+
   private void assertColumnType(String column) {
     String dataType = jdbc().queryForObject(
         "SELECT data_type FROM information_schema.columns"

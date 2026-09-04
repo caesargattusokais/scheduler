@@ -39,7 +39,7 @@ public class TriggerEngine {
       // 饱和任务的积压由 claim 侧的 CAS+配额(active.c < maxConcurrent)负责消化。
       if (fired != null && !fired.isAfter(now)) { // 该分钟窗内含一个 tick
         executions.createDue(Execution.ofDue(t.id(),
-            IdempotencyKeys.forTrigger(t.id(), fired.toInstant(), 0), t.shardCount()));
+            IdempotencyKeys.forTrigger(t.id(), fired.toInstant()), t.shardCount()));
       }
     }
   }
