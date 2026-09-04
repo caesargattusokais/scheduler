@@ -151,11 +151,11 @@ public class Beans {
     return new WorkLoop(worker);
   }
 
-  /** 对账器:单例,复用共享 FailureResolver(同一重试判定,worker 与 reconciler 无漂移)。 */
+  /** 对账器:单例,复用共享 FailureResolver(同一重试判定,worker 与 reconciler 无漂移)。M3:作用对象为 shard。 */
   @Bean
-  Reconciler reconciler(TaskRepository tasks, ExecutionRepository execs,
+  Reconciler reconciler(TaskRepository tasks, ShardRepository shards,
                         FailureResolver failureResolver) {
-    return new Reconciler(tasks, execs, failureResolver, "reconciler");
+    return new Reconciler(tasks, shards, failureResolver, "reconciler");
   }
 
   @Bean

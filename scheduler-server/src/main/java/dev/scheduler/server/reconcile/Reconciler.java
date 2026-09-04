@@ -1,51 +1,73 @@
 package dev.scheduler.server.reconcile;
 
 import dev.scheduler.core.ExecutionStatus;
+import dev.scheduler.core.Shard;
 import dev.scheduler.core.Task;
-import dev.scheduler.persistence.ExecutionRepository;
-import dev.scheduler.persistence.ExecutionRepository.ExpiredRun;
+import dev.scheduler.persistence.ShardRepository;
+import dev.scheduler.persistence.ShardRepository.ExpiredShard;
 import dev.scheduler.persistence.TaskRepository;
 import dev.scheduler.server.retry.FailureResolver;
+import java.util.List;
 
 /**
- * 对账器:回收租约过期的孤儿 RUNNING(id 已认领却迟迟未回写)。
- * scanOnce 逐任务查出 lease_until <= DB now() 的 RUNNING,再委托共享 FailureResolver 做
- * 「落 FAILED + 重试/死信」的统一判定——与 worker 共用同一套重试决策,避免两套漂移。
- * leader 门控不在此处(由 ReconcileLoop.tick 在 scan 前把关),这里只做回收。
+ * 对账器:回收租约过期的孤儿 RUNNING shard(id 已认领却迟迟未回写),并对已收敛的父级做终态汇聚。
+ * scanOnce 做两趟:
+ *   (1) 孤儿回收——逐任务查出 lease_until <= DB now() 仍 RUNNING 的 shard,委托共享 FailureResolver 做
+ *       「落 FAILED + 重试/死信/FAIL_FAST」的统一判定——与 worker 共用同一套判定,避免两套漂移。
+ *   (2) 父级汇聚——对待汇聚的父级(parentsNeedingAggregation)按兄弟终态结果推导父终态(SUCCESS/FAILED/CANCELED)。
+ * leader 门控不在此处(由 ReconcileLoop.tick 在 scan 前把关),这里只做回收/汇聚。
  */
 public class Reconciler {
   private final TaskRepository tasks;
-  private final ExecutionRepository execs;
+  private final ShardRepository shards;
   private final FailureResolver failureResolver;
   private final String workerId;
 
-  public Reconciler(TaskRepository tasks, ExecutionRepository execs,
+  public Reconciler(TaskRepository tasks, ShardRepository shards,
                     FailureResolver failureResolver, String workerId) {
     this.tasks = tasks;
-    this.execs = execs;
+    this.shards = shards;
     this.failureResolver = failureResolver;
     this.workerId = workerId;
   }
 
   /**
-   * 对账扫描一次:为每个任务捞出所有租约已过期的 RUNNING(孤儿),逐条按重试策略回收为失败并返回过期行数。
+   * 对账扫描一次,返回本趟回收的孤儿 shard 数。两趟固定顺序:先孤儿回收,再父级终态汇聚。
    * 租约判定用 DB now()(服务器时钟一致,与本机墙钟无关)。
    */
   public int scanOnce() {
-    int total = 0;
+    int reclaimed = 0;
     for (Task task : tasks.findAll()) {
-      for (ExpiredRun run : execs.findExpiredRunning(task.id())) {
+      for (ExpiredShard run : shards.findExpiredRunning(task.id())) {
         try {
-          if (execs.markStatus(run.id(), ExecutionStatus.FAILED, workerId, "lease expired")) {
+          if (shards.markStatus(run.id(), ExecutionStatus.FAILED, workerId, "lease expired")) {
             // 孤儿 RUNNING 已 claim(status=attempt+1 过),故本行 attempt 即本次运行号,原样传入(不加 1)。
             failureResolver.handle(task, run.id(), run.attempt(), "lease expired");
-            total++;
+            reclaimed++;
           }
         } catch (IllegalStateException alreadyMovedOn) {
-          // 快照后该行已被 owner 抢先完成 → 已迁移,跳过,不中止整批回收。
+          // 快照后该行已被 owner 抢先完成(或已非法迁移)→ 已迁移,跳过这一行,不中止整批回收。
         }
       }
     }
-    return total;
+    aggregateParents();
+    return reclaimed;
+  }
+
+  /** 父级汇聚:对每个有待汇聚的父,全部兄弟终态后才推导父终态并落库。finalizeParent CAS-0 → 已推进,幂等跳过。 */
+  private void aggregateParents() {
+    for (long pid : shards.parentsNeedingAggregation()) {
+      List<Shard> parent = shards.findShards(pid);
+      if (parent.isEmpty() || !parent.stream().allMatch(s -> s.status().isTerminal())) {
+        continue; // 仍有兄弟未终态 → 父保持 DUE,待下趟。
+      }
+      boolean anyFailed = parent.stream().anyMatch(s -> s.status() == ExecutionStatus.FAILED);
+      ExecutionStatus parentTerminal = anyFailed ? ExecutionStatus.FAILED
+          : parent.stream().anyMatch(s -> s.status() == ExecutionStatus.CANCELED)
+              ? ExecutionStatus.CANCELED : ExecutionStatus.SUCCESS;
+      String detail = anyFailed ? "shard failed"
+          : (parentTerminal == ExecutionStatus.CANCELED ? "shard cancelled" : "all shards ok");
+      shards.finalizeParent(pid, parentTerminal, detail);
+    }
   }
 }

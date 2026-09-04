@@ -35,7 +35,9 @@ public class FailureResolver {
           clock.instant().plusMillis(retryPolicy.delayMs(task.backoffMs(), attempt)), detail);
     } else {
       shards.markDeadLetter(shardId, "dlq:" + detail);
+      // FAIL_FAST(§5):分片进入 DLQ 即意味着该批已失败,协作取消同父仍在 RUNNING/DUE 的兄弟,
+      // 避免整批空耗。仅处于 DLQ 分支时触发(仍可重试的分片不取消兄弟)。
+      shards.cancelSiblings(shardId, "fail_fast");
     }
-    // FAIL_FAST lands in Task 6.
   }
 }
