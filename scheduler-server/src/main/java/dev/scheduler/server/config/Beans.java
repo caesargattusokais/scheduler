@@ -12,6 +12,9 @@ import dev.scheduler.server.handler.HandlerRegistry;
 import dev.scheduler.server.handler.MapHandlerRegistry;
 import dev.scheduler.server.leader.AdvisoryLockLeaderElection;
 import dev.scheduler.server.leader.LeaderElection;
+import dev.scheduler.server.reconcile.Reconciler;
+import dev.scheduler.server.retry.FailureResolver;
+import dev.scheduler.server.retry.RetryPolicy;
 import dev.scheduler.server.trigger.TriggerEngine;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.binder.MeterBinder;
@@ -80,6 +83,18 @@ public class Beans {
     return new TriggerEngine(tasks, execs, leader, clock);
   }
 
+  /** 重试决策纯类:只判定"应否重试/退避多久",不含 DB 与时钟。 */
+  @Bean
+  RetryPolicy retryPolicy() {
+    return new RetryPolicy();
+  }
+
+  /** 失败判定(FAILED 落库 + 重试/死信分流);单例,Task 5 reconciler 复用同一实例。 */
+  @Bean
+  FailureResolver failureResolver(ExecutionRepository execs, RetryPolicy retryPolicy, Clock clock) {
+    return new FailureResolver(execs, retryPolicy, clock);
+  }
+
   /** 本节点稳定的执行者标识,流入认领与每次 markStatus(审计"谁做的")。 */
   @Bean
   String schedulerWorkerId(@Value("${scheduler.worker-id:}") String configured) {
@@ -88,8 +103,9 @@ public class Beans {
 
   @Bean
   ExecutorWorker executorWorker(TaskRepository tasks, ExecutionRepository execs,
-                                HandlerRegistry handlers, String schedulerWorkerId) {
-    return new ExecutorWorker(tasks, execs, handlers, schedulerWorkerId);
+                                HandlerRegistry handlers, String schedulerWorkerId,
+                                FailureResolver failureResolver, Clock clock) {
+    return new ExecutorWorker(tasks, execs, handlers, schedulerWorkerId, failureResolver, clock);
   }
 
   /**
@@ -128,6 +144,19 @@ public class Beans {
     return new WorkLoop(worker);
   }
 
+  /** 对账器:单例,复用共享 FailureResolver(同一重试判定,worker 与 reconciler 无漂移)。 */
+  @Bean
+  Reconciler reconciler(TaskRepository tasks, ExecutionRepository execs,
+                        FailureResolver failureResolver) {
+    return new Reconciler(tasks, execs, failureResolver, "reconciler");
+  }
+
+  @Bean
+  @ConditionalOnProperty(name = "scheduler.reconcile.enabled", havingValue = "true", matchIfMissing = true)
+  ReconcileLoop reconcileLoop(Reconciler reconciler, LeaderElection leader) {
+    return new ReconcileLoop(reconciler, leader);
+  }
+
   public static final class ScanLoop {
     private static final Logger log = LoggerFactory.getLogger(ScanLoop.class);
     private final TriggerEngine engine;
@@ -160,6 +189,28 @@ public class Beans {
         worker.workOne();
       } catch (Throwable t) {
         log.warn("executor work loop tick failed; continuing next tick", t);
+      }
+    }
+  }
+
+  /** 对账循环:leader 门控在 scan 之前(与 TriggerEngine 同),失败兜底不杀线程。 */
+  public static final class ReconcileLoop {
+    private static final Logger log = LoggerFactory.getLogger(ReconcileLoop.class);
+    private final Reconciler reconciler;
+    private final LeaderElection leader;
+
+    ReconcileLoop(Reconciler reconciler, LeaderElection leader) {
+      this.reconciler = reconciler;
+      this.leader = leader;
+    }
+
+    @Scheduled(fixedDelayString = "${scheduler.reconcile.delay-ms:30000}")
+    public void tick() {
+      if (!leader.isLeader()) return;
+      try {
+        reconciler.scanOnce();
+      } catch (Throwable t) {
+        log.warn("reconcile loop tick failed; continuing next tick", t);
       }
     }
   }

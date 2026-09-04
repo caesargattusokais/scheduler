@@ -4,6 +4,7 @@ import dev.scheduler.core.Execution;
 import dev.scheduler.core.ExecutionStatus;
 import dev.scheduler.core.ExecutionTransitions;
 import java.time.Instant;
+import java.util.List;
 import java.util.Optional;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -45,8 +46,10 @@ public class JdbcExecutionRepository implements ExecutionRepository {
   }
 
   @Override public Optional<Execution> findCandidate(long taskId) {
+    // 重试闸:仅当 next_retry_at 为空或已到期待时才视为可领取(否则被重试调度待到点才放行)。
     return jdbc.query(
-        "SELECT * FROM execution WHERE task_id=? AND status='DUE' ORDER BY id LIMIT 1",
+        "SELECT * FROM execution WHERE task_id=? AND status='DUE'"
+            + " AND (next_retry_at IS NULL OR next_retry_at <= now()) ORDER BY id LIMIT 1",
         MAP, taskId).stream().findFirst();
   }
 
@@ -84,7 +87,14 @@ public class JdbcExecutionRepository implements ExecutionRepository {
     return c == null ? 0 : c;
   }
 
-  @Override public void markStatus(long id, ExecutionStatus to, String workerId, String detail) {
+  @Override public List<ExpiredRun> findExpiredRunning(long taskId) {
+    return jdbc.query(
+        "SELECT id, attempt FROM execution WHERE task_id=? AND status='RUNNING'"
+            + " AND lease_until <= now()",
+        (rs, i) -> new ExpiredRun(rs.getLong("id"), rs.getInt("attempt")), taskId);
+  }
+
+  @Override public boolean markStatus(long id, ExecutionStatus to, String workerId, String detail) {
     Execution cur = findById(id).orElseThrow(() -> new IllegalStateException("no execution " + id));
     if (!ExecutionTransitions.canTransition(cur.status(), to)) {
       throw new IllegalStateException("illegal transition " + cur.status() + " -> " + to);
@@ -92,6 +102,7 @@ public class JdbcExecutionRepository implements ExecutionRepository {
     // 事务内以"读取到的旧状态"做原子 CAS:若 0 行,说明行已被其他动作(如 worker 恰在此间 claim 成
     // RUNNING 的 cancel)改走,cancel-claim 竞态视为良性,不落误导性 outcome 静默返回;非法路径仍由
     // 上面的 read-validate 先行拦截。
+    final boolean[] ok = {false};
     tx.executeWithoutResult(s -> {
       int updated = jdbc.update("""
         UPDATE execution SET status=?, worker_id=COALESCE(?, worker_id),
@@ -104,6 +115,98 @@ public class JdbcExecutionRepository implements ExecutionRepository {
       }
       jdbc.update("INSERT INTO execution_outcome (execution_id, status, detail) VALUES (?,?,?)",
           id, to.name(), detail);
+      ok[0] = true;
     });
+    return ok[0];
+  }
+
+  @Override public boolean markStatusOwned(long id, ExecutionStatus to, String ownerWorkerId, String detail) {
+    Execution cur = findById(id).orElseThrow(() -> new IllegalStateException("no execution " + id));
+    if (!ExecutionTransitions.canTransition(cur.status(), to)) return false; // 行已在他处终态 → stale,静默
+    final boolean[] ok = {false};
+    tx.executeWithoutResult(s -> {
+      int updated = jdbc.update("""
+        UPDATE execution SET status=?, worker_id=COALESCE(?, worker_id),
+          finished_at=CASE WHEN ? IN ('SUCCESS','FAILED','CANCELED') THEN now() ELSE finished_at END
+          WHERE id=? AND status=? AND worker_id=?""",
+          to.name(), ownerWorkerId, to.name(), id, cur.status().name(), ownerWorkerId);
+      if (updated == 0) {
+        log.debug("markStatusOwned lost ownership race: execution {} no longer owned by {}; "
+            + "suppressing outcome", id, ownerWorkerId);
+        return;
+      }
+      jdbc.update("INSERT INTO execution_outcome (execution_id, status, detail) VALUES (?,?,?)",
+          id, to.name(), detail);
+      ok[0] = true;
+    });
+    return ok[0];
+  }
+
+  @Override public void scheduleRetry(long id, Instant retryAt, String detail) {
+    // FAILED -> DUE,期待值时延由调用方(RetryPolicy,注入 clock)预先算好,仓库只写值。
+    // CAS on status='FAILED':0 行=竞态/非 FAILED,静默跳过,不落误导性 outcome。
+    java.sql.Timestamp ts = java.sql.Timestamp.from(retryAt);
+    tx.executeWithoutResult(s -> {
+      int updated = jdbc.update(
+          "UPDATE execution SET status='DUE', next_retry_at=? WHERE id=? AND status='FAILED'",
+          ts, id);
+      if (updated == 0) {
+        log.debug("scheduleRetry lost CAS race: execution {} no longer FAILED; "
+            + "suppressing outcome", id);
+        return;
+      }
+      jdbc.update("INSERT INTO execution_outcome (execution_id, status, detail) VALUES (?,?,?)",
+          id, "DUE", detail);
+    });
+  }
+
+  @Override public void markDeadLetter(long id, String detail) {
+    // 仅置 dead_letter 标记,不动 status,故无 outcome 行。
+    tx.executeWithoutResult(s -> {
+      int updated = jdbc.update(
+          "UPDATE execution SET dead_letter=true WHERE id=? AND status='FAILED'", id);
+      if (updated == 0) {
+        log.debug("markDeadLetter lost CAS race: execution {} no longer FAILED; skipping (detail: {})",
+            id, detail);
+      }
+    });
+  }
+
+  @Override public boolean requestCancel(long id) {
+    // 仅 RUNNING 生效且不动状态(取消请求非状态迁移,真实转 CANCELED 由 worker markStatus 落)。
+    // CAS on status='RUNNING':0 行=DUE/终态或竞态被 claim 走,返回 false,不落 outcome。
+    return jdbc.update(
+        "UPDATE execution SET cancel_requested=true WHERE id=? AND status='RUNNING'", id) == 1;
+  }
+
+  @Override public boolean isCancelRequested(long id) {
+    Boolean b = jdbc.queryForObject("SELECT cancel_requested FROM execution WHERE id=?",
+        Boolean.class, id);
+    return b != null && b;
+  }
+
+  @Override public List<Execution> findDeadLetters() {
+    // DLQ 读取:FAILED 且已置 dead_letter 标记,按 id 升序。
+    return jdbc.query(
+        "SELECT * FROM execution WHERE status='FAILED' AND dead_letter ORDER BY id", MAP);
+  }
+
+  @Override public boolean requeue(long id) {
+    // 手动重新入队:FAILD → DUE,复位 attempt/next_retry_at/dead_letter。dead_letter 仅是标记非闸门,
+    // CAS 只 on status='FAILED':0 行=已非 FAILED(竞态/终态)时视为丢失,静默返回 false,不落误导性 outcome。
+    final boolean[] ok = {false};
+    tx.executeWithoutResult(s -> {
+      int updated = jdbc.update(
+          "UPDATE execution SET status='DUE', attempt=0, next_retry_at=NULL, dead_letter=false "
+              + "WHERE id=? AND status='FAILED'", id);
+      if (updated == 0) {
+        log.debug("requeue lost CAS race: execution {} no longer FAILED; suppressing outcome", id);
+        return;
+      }
+      jdbc.update("INSERT INTO execution_outcome (execution_id, status, detail) VALUES (?,?,?)",
+          id, "DUE", "requeue");
+      ok[0] = true;
+    });
+    return ok[0];
   }
 }
