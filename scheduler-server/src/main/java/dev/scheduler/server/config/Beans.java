@@ -119,14 +119,15 @@ public class Beans {
    * 每任务指标(§5.2):为每个任务各注册一条 series,任一带 task_id 标签,
    * 避免单个热点任务掩盖被饿死的任务的可见性。
    * 已知限制:新创建的任务要等下一次重启才出现 series(M1 接受此重启边界)。
+   * M3:指标口径切到 execution_shard——active 按 RUNNING shard 计数,队龄取最老 DUE shard 的父 created_at。
    */
   @Bean
-  MeterBinder schedulerMetrics(TaskRepository tasks, ExecutionRepository execs, JdbcTemplate jdbc) {
+  MeterBinder schedulerMetrics(TaskRepository tasks, ShardRepository shards, JdbcTemplate jdbc) {
     return registry -> {
       for (Task t : tasks.findAll()) {
         long taskId = t.id();
         String name = t.name();
-        Gauge.builder("scheduler_active_runs", () -> execs.countActive(taskId))
+        Gauge.builder("scheduler_active_runs", () -> (double) shards.countActive(taskId))
             .tag("task_id", Long.toString(taskId))
             .tag("task_name", name)
             .register(registry);
@@ -223,9 +224,14 @@ public class Beans {
   }
 
   private static double dueQueueMaxAgeSeconds(JdbcTemplate jdbc, long taskId) {
+    // execution_shard 无 created_at:父与 shard 同事务创建、shard id 单调,故取该任务最小的 DUE shard id,
+    // 其父 execution.created_at 恰为该最老 DUE shard 的年龄。无 DUE shard → 子查询 NULL → 归 0.0。
     Double v = jdbc.queryForObject(
-        "SELECT EXTRACT(EPOCH FROM (now() - COALESCE(MAX(created_at), now())))::float8 "
-            + "FROM execution WHERE status='DUE' AND task_id=?", Double.class, taskId);
+        "SELECT EXTRACT(EPOCH FROM (now() - ("
+            + "SELECT e.created_at FROM execution e"
+            + " JOIN execution_shard s ON e.id=s.execution_id"
+            + " WHERE s.status='DUE' AND e.task_id=? ORDER BY s.id LIMIT 1)))::float8",
+        Double.class, taskId);
     return v == null ? 0.0 : v;
   }
 
