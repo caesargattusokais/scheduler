@@ -106,4 +106,34 @@ public class JdbcExecutionRepository implements ExecutionRepository {
           id, to.name(), detail);
     });
   }
+
+  @Override public void scheduleRetry(long id, Instant retryAt, String workerId, String detail) {
+    // FAILED -> DUE,期待值时延由调用方(RetryPolicy,注入 clock)预先算好,仓库只写值。
+    // CAS on status='FAILED':0 行=竞态/非 FAILED,静默跳过,不落误导性 outcome。
+    java.sql.Timestamp ts = java.sql.Timestamp.from(retryAt);
+    tx.executeWithoutResult(s -> {
+      int updated = jdbc.update(
+          "UPDATE execution SET status='DUE', next_retry_at=? WHERE id=? AND status='FAILED'",
+          ts, id);
+      if (updated == 0) {
+        log.debug("scheduleRetry lost CAS race: execution {} no longer FAILED (by {}); "
+            + "suppressing outcome", id, workerId);
+        return;
+      }
+      jdbc.update("INSERT INTO execution_outcome (execution_id, status, detail) VALUES (?,?,?)",
+          id, "DUE", detail);
+    });
+  }
+
+  @Override public void markDeadLetter(long id, String detail) {
+    // 仅置 dead_letter 标记,不动 status,故无 outcome 行。
+    tx.executeWithoutResult(s -> {
+      int updated = jdbc.update(
+          "UPDATE execution SET dead_letter=true WHERE id=? AND status='FAILED'", id);
+      if (updated == 0) {
+        log.debug("markDeadLetter lost CAS race: execution {} no longer FAILED; skipping (detail: {})",
+            id, detail);
+      }
+    });
+  }
 }

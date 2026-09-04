@@ -30,6 +30,19 @@ class JdbcExecutionRepositoryTest extends AbstractPostgresTest {
         "SELECT count(*) FROM execution_outcome WHERE execution_id=?", Integer.class, executionId);
   }
 
+  private boolean deadLetter(long executionId) {
+    return Boolean.TRUE.equals(jdbc.queryForObject(
+        "SELECT dead_letter FROM execution WHERE id=?", Boolean.class, executionId));
+  }
+
+  private long failedExecution(int maxActiveConcurrent, String key) {
+    long taskId = newTask(maxActiveConcurrent);
+    long id = execRepo.createDue(ofDue(taskId, key));
+    execRepo.claim(id, taskId, "w1", Instant.now().plusSeconds(60), maxActiveConcurrent);
+    execRepo.markStatus(id, ExecutionStatus.FAILED, "w1", "boom");
+    return id;
+  }
+
   @Test void createDueIsIdempotent() {
     long taskId = newTask(8);
     String key = "t1:k1";
@@ -104,5 +117,57 @@ class JdbcExecutionRepositoryTest extends AbstractPostgresTest {
     // DUE -> NOT_CREATED also illegal
     assertThrows(IllegalStateException.class,
         () -> execRepo.markStatus(id, ExecutionStatus.NOT_CREATED, "w1", "nope"));
+  }
+
+  @Test void scheduleRetryMovesFailedToDueWithDelayAndOutcome() {
+    long id = failedExecution(8, "t8:k1");
+    Instant retryAt = Instant.now().plusSeconds(10);
+
+    execRepo.scheduleRetry(id, retryAt, "w2", "boom");
+
+    Execution e = execRepo.findById(id).get();
+    assertEquals(ExecutionStatus.DUE, e.status());
+    assertNotNull(e.nextRetryAt(), "next_retry_at must be written");
+    assertTrue(e.nextRetryAt().isAfter(Instant.now().minusSeconds(1)));
+    assertTrue(e.nextRetryAt().isBefore(Instant.now().plusSeconds(20)), "delay ~10s");
+    assertEquals(1, e.attempt(), "attempt must not change on retry");
+    assertEquals("w1", e.workerId(), "worker_id must stay with the failing worker");
+    // claim RUNNING outcome + FAILED outcome + DUE retry outcome
+    assertEquals(3, outcomes(id));
+    Integer dueOutcomes = jdbc.queryForObject(
+        "SELECT count(*) FROM execution_outcome WHERE execution_id=? AND status='DUE' AND detail='boom'",
+        Integer.class, id);
+    assertEquals(1, dueOutcomes, "retry must append a DUE outcome carrying the original failure detail");
+  }
+
+  @Test void scheduleRetryOnNonFailedIsSilentNoOutcome() {
+    long taskId = newTask(8);
+    long id = execRepo.createDue(ofDue(taskId, "t9:k1"));
+    execRepo.claim(id, taskId, "w1", Instant.now().plusSeconds(60), 8); // -> RUNNING, not FAILED
+
+    execRepo.scheduleRetry(id, Instant.now().plusSeconds(10), "w2", "boom");
+
+    assertEquals(ExecutionStatus.RUNNING, execRepo.findById(id).get().status());
+    assertEquals(1, outcomes(id), "CAS 0 rows: no extra outcome");
+  }
+
+  @Test void markDeadLetterSetsFlagOnFailed() {
+    long id = failedExecution(8, "t10:k1");
+    int before = outcomes(id);
+
+    execRepo.markDeadLetter(id, "unrecoverable");
+
+    assertTrue(deadLetter(id));
+    assertEquals(before, outcomes(id), "dead_letter is not a status transition: no outcome row");
+  }
+
+  @Test void markDeadLetterOnNonFailedDoesNothing() {
+    long taskId = newTask(8);
+    long id = execRepo.createDue(ofDue(taskId, "t11:k1"));
+    execRepo.claim(id, taskId, "w1", Instant.now().plusSeconds(60), 8); // RUNNING, not FAILED
+
+    execRepo.markDeadLetter(id, "nope");
+
+    assertFalse(deadLetter(id));
   }
 }
