@@ -3,12 +3,11 @@ package dev.scheduler.server.web;
 import dev.scheduler.core.Execution;
 import dev.scheduler.core.ExecutionStatus;
 import dev.scheduler.persistence.ExecutionRepository;
-import java.util.ArrayList;
+import dev.scheduler.server.service.ExecutionQueryService;
 import java.util.List;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.jdbc.core.RowMapper;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -24,46 +23,24 @@ import org.springframework.web.server.ResponseStatusException;
 public class ExecutionController {
 
   private final ExecutionRepository executions;
-  private final JdbcTemplate jdbc;
+  private final ExecutionQueryService queryService;
   private final String workerId;
 
   public ExecutionController(ExecutionRepository executions, JdbcTemplate jdbc, String schedulerWorkerId) {
     this.executions = executions;
-    this.jdbc = jdbc;
+    this.queryService = new ExecutionQueryService(jdbc, executions);
     this.workerId = schedulerWorkerId;
   }
-
-  static final RowMapper<Execution> ROW = (rs, i) -> new Execution(
-      rs.getLong("id"), rs.getLong("task_id"),
-      ExecutionStatus.valueOf(rs.getString("status")), rs.getString("idempotency_key"),
-      rs.getString("args"), rs.getInt("shard_index"), rs.getInt("shard_count"),
-      rs.getInt("attempt"), rs.getString("worker_id"),
-      rs.getTimestamp("lease_until") != null ? rs.getTimestamp("lease_until").toInstant() : null,
-      rs.getTimestamp("next_retry_at") != null ? rs.getTimestamp("next_retry_at").toInstant() : null,
-      rs.getTimestamp("started_at") != null ? rs.getTimestamp("started_at").toInstant() : null,
-      rs.getTimestamp("finished_at") != null ? rs.getTimestamp("finished_at").toInstant() : null,
-      rs.getString("result_payload"));
 
   @GetMapping
   public List<Execution> list(@RequestParam(required = false) Long taskId,
                               @RequestParam(required = false) String status) {
-    StringBuilder sql = new StringBuilder("SELECT * FROM execution WHERE true");
-    List<Object> args = new ArrayList<>();
-    if (taskId != null) {
-      sql.append(" AND task_id=?");
-      args.add(taskId);
-    }
-    if (status != null && !status.isBlank()) {
-      sql.append(" AND status=?");
-      args.add(status);
-    }
-    sql.append(" ORDER BY id DESC");
-    return jdbc.query(sql.toString(), ROW, args.toArray());
+    return queryService.list(taskId, status);
   }
 
   @GetMapping("/{id}")
   public Execution get(@PathVariable long id) {
-    return executions.findById(id).orElseThrow(() -> notFound("execution " + id));
+    return queryService.get(id).orElseThrow(() -> notFound("execution " + id));
   }
 
   /** DLQ 列表:FAILED 且已置 dead_letter 标记的执行,按 id 升序;空 → 200 []。 */
