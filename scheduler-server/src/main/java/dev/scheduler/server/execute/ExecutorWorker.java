@@ -50,13 +50,16 @@ public class ExecutorWorker {
       try {
         h = handlers.get(t.handlerRef());
       } catch (IllegalArgumentException e) {
-        // 未注册 handler 也是失败,走统一失败判定(cand 持 claim 前的尝试号,本次为 +1)。
-        failureResolver.handle(t, cand.get().id(), cand.get().attempt() + 1, workerId, e.getMessage());
+        // 未注册 handler 也是失败。仅当本 worker 仍是该行持有者(回写成功)时才判重试/死信;
+        // 若回写被 ownership 守卫拦截(行已被他方接管),则静默放弃,不调度。
+        if (execs.markStatusOwned(cand.get().id(), ExecutionStatus.FAILED, workerId, e.getMessage())) {
+          failureResolver.handle(t, cand.get().id(), cand.get().attempt() + 1, e.getMessage());
+        }
         return true;
       }
       // 运行前检查:已被请求取消则直接落 CANCELED,不再调度 handler(协作取消前置路径)。
       if (execs.isCancelRequested(cand.get().id())) {
-        execs.markStatus(cand.get().id(), ExecutionStatus.CANCELED, workerId, "cancelled before run");
+        execs.markStatusOwned(cand.get().id(), ExecutionStatus.CANCELED, workerId, "cancelled before run");
         return true;
       }
       CancellationToken token = new CancellationToken(execs.isCancelRequested(cand.get().id()));
@@ -64,17 +67,20 @@ public class ExecutorWorker {
         h.handle(new HandlerContext(cand.get().id(), cand.get().args(), token));
         // 正常返回后:若期间被请求取消,落 CANCELED;否则 SUCCESS。
         if (execs.isCancelRequested(cand.get().id())) {
-          execs.markStatus(cand.get().id(), ExecutionStatus.CANCELED, workerId, "cancelled after run");
+          execs.markStatusOwned(cand.get().id(), ExecutionStatus.CANCELED, workerId, "cancelled after run");
         } else {
-          execs.markStatus(cand.get().id(), ExecutionStatus.SUCCESS, workerId, "ok");
+          execs.markStatusOwned(cand.get().id(), ExecutionStatus.SUCCESS, workerId, "ok");
         }
       } catch (CancellationException cex) {
         // 协作取消信号:distinct 路径,不路由到 failureResolver(不重试/不死信)。
-        execs.markStatus(cand.get().id(), ExecutionStatus.CANCELED, workerId, "cancelled by handler");
+        execs.markStatusOwned(cand.get().id(), ExecutionStatus.CANCELED, workerId, "cancelled by handler");
       } catch (Throwable err) {
-        // 普通失败走统一判定:应重试则调度重试,否则 FAILED + 死信。
-        failureResolver.handle(t, cand.get().id(), cand.get().attempt() + 1, workerId,
-            String.valueOf(err));
+        // 普通失败走统一判定:应重试则调度重试,否则 FAILED + 死信。ownership 守卫失败(stale)则整个重试/
+        // 死信决策一并抑制,避免 double-completion / spurious-failure。
+        String detail = String.valueOf(err);
+        if (execs.markStatusOwned(cand.get().id(), ExecutionStatus.FAILED, workerId, detail)) {
+          failureResolver.handle(t, cand.get().id(), cand.get().attempt() + 1, detail);
+        }
       }
       return true;
     }

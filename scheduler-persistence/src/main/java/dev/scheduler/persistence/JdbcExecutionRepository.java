@@ -94,7 +94,7 @@ public class JdbcExecutionRepository implements ExecutionRepository {
         (rs, i) -> new ExpiredRun(rs.getLong("id"), rs.getInt("attempt")), taskId);
   }
 
-  @Override public void markStatus(long id, ExecutionStatus to, String workerId, String detail) {
+  @Override public boolean markStatus(long id, ExecutionStatus to, String workerId, String detail) {
     Execution cur = findById(id).orElseThrow(() -> new IllegalStateException("no execution " + id));
     if (!ExecutionTransitions.canTransition(cur.status(), to)) {
       throw new IllegalStateException("illegal transition " + cur.status() + " -> " + to);
@@ -102,6 +102,7 @@ public class JdbcExecutionRepository implements ExecutionRepository {
     // 事务内以"读取到的旧状态"做原子 CAS:若 0 行,说明行已被其他动作(如 worker 恰在此间 claim 成
     // RUNNING 的 cancel)改走,cancel-claim 竞态视为良性,不落误导性 outcome 静默返回;非法路径仍由
     // 上面的 read-validate 先行拦截。
+    final boolean[] ok = {false};
     tx.executeWithoutResult(s -> {
       int updated = jdbc.update("""
         UPDATE execution SET status=?, worker_id=COALESCE(?, worker_id),
@@ -114,7 +115,31 @@ public class JdbcExecutionRepository implements ExecutionRepository {
       }
       jdbc.update("INSERT INTO execution_outcome (execution_id, status, detail) VALUES (?,?,?)",
           id, to.name(), detail);
+      ok[0] = true;
     });
+    return ok[0];
+  }
+
+  @Override public boolean markStatusOwned(long id, ExecutionStatus to, String ownerWorkerId, String detail) {
+    Execution cur = findById(id).orElseThrow(() -> new IllegalStateException("no execution " + id));
+    if (!ExecutionTransitions.canTransition(cur.status(), to)) return false; // 行已在他处终态 → stale,静默
+    final boolean[] ok = {false};
+    tx.executeWithoutResult(s -> {
+      int updated = jdbc.update("""
+        UPDATE execution SET status=?, worker_id=COALESCE(?, worker_id),
+          finished_at=CASE WHEN ? IN ('SUCCESS','FAILED','CANCELED') THEN now() ELSE finished_at END
+          WHERE id=? AND status=? AND worker_id=?""",
+          to.name(), ownerWorkerId, to.name(), id, cur.status().name(), ownerWorkerId);
+      if (updated == 0) {
+        log.debug("markStatusOwned lost ownership race: execution {} no longer owned by {}; "
+            + "suppressing outcome", id, ownerWorkerId);
+        return;
+      }
+      jdbc.update("INSERT INTO execution_outcome (execution_id, status, detail) VALUES (?,?,?)",
+          id, to.name(), detail);
+      ok[0] = true;
+    });
+    return ok[0];
   }
 
   @Override public void scheduleRetry(long id, Instant retryAt, String detail) {

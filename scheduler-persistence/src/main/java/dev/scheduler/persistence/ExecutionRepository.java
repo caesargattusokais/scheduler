@@ -16,7 +16,14 @@ public interface ExecutionRepository {
                 Instant leaseUntil, int maxConcurrent);
   Optional<Execution> findById(long id);
   long countActive(long taskId);
-  void markStatus(long id, ExecutionStatus to, String workerId, String detail);
+  /** 显式状态迁移(非持有者专属):对账回收/控制台取消用。CAS 0 行=行已被他方改走 → 静默返回 false,不落误导性 outcome。 */
+  boolean markStatus(long id, ExecutionStatus to, String workerId, String detail);
+  /**
+   * 持有着专属的终态回写:worker 用它写回自己的成功/失败/取消。除要求状态可迁移外,还要求行仍归
+   * {@code ownerWorkerId} 所有(worker_id 匹配)。若行已不在可迁移状态或已被他方(如 reconciler 回收后
+   * 另一 worker 重新认领)接管 → 返回 false 且不落 outcome,静默丢弃该次回写。
+   */
+  boolean markStatusOwned(long id, ExecutionStatus to, String ownerWorkerId, String detail);
   void scheduleRetry(long id, Instant retryAt, String detail);
   void markDeadLetter(long id, String detail);
 

@@ -187,6 +187,35 @@ class ExecutorWorkerTest extends AbstractExecutorWorkerTest {
     assertEquals(0L, outcomeCount(execId, "DUE"));
   }
 
+  @Test void staleOwnerCannotClobberReownedRow_guardSuppressesWritebackAndRetry() {
+    // handler 运行期间模拟真实竞态:reconciler 回收过期租约(FAILED + 重试→DUE),随后 worker-b 重新
+    // 认领该行(→ RUNNING owned by worker-b)。worker-a 的迟回收写 markStatusOwned(FAILED) 必须被
+    // ownership 守卫拦截:不覆盖 worker-b 的 RUNNING,也不调度任何重试(零 DUE outcome)。
+    long taskId = createTask("reclaim", 2, 1000, null, 1); // maxRetries=2:若无守卫,迟回收写会落 DUE
+    long execId = executions.createDue(Execution.ofDue(taskId, "k-stale-owner", 1));
+    Instant lease = Instant.now().plusSeconds(60);
+    var reclaiming = new ExecutionHandler() {
+      @Override public String ref() { return "reclaim"; }
+      @Override public void handle(HandlerContext ctx) {
+        // 模拟 reconciler 回收:落 FAILED 后经重试决策回 DUE(此处直接 raw 复位,不落重试 outcome,从而让
+        // "零 DUE outcome" 断言只反映 worker-a 的迟回收写是否被抑制),再被 worker-b 重新认领。
+        executions.markStatus(execId, ExecutionStatus.FAILED, "reconciler", "lease expired");
+        jdbc.update("UPDATE execution SET status='DUE', next_retry_at=NULL WHERE id=?", execId);
+        executions.claim(execId, taskId, "worker-b", lease, 1);
+        throw new RuntimeException("boom");
+      }
+    };
+    var registry = new MapHandlerRegistry(List.of(() -> reclaiming));
+
+    boolean processed = worker(registry).workOne();
+
+    assertTrue(processed);
+    Execution e = executions.findById(execId).orElseThrow();
+    assertEquals(ExecutionStatus.RUNNING, e.status(), "stale worker 的回写不得覆盖 worker-b 的 RUNNING");
+    assertEquals("worker-b", e.workerId(), "行仍归重新认领的 worker-b 所有,未被 worker-a 改动");
+    assertEquals(0L, outcomeCount(execId, "DUE"), "被守卫拦截的回写 → 不调度重试,零 DUE outcome");
+  }
+
   @Test void unclaimedExecution_neverMutatedByThisWorker() {
     var rec = new RecordingHandler(false);
     var registry = new MapHandlerRegistry(List.of(() -> rec));

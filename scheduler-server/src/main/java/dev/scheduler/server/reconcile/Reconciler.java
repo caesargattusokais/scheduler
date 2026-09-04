@@ -1,5 +1,6 @@
 package dev.scheduler.server.reconcile;
 
+import dev.scheduler.core.ExecutionStatus;
 import dev.scheduler.core.Task;
 import dev.scheduler.persistence.ExecutionRepository;
 import dev.scheduler.persistence.ExecutionRepository.ExpiredRun;
@@ -34,9 +35,15 @@ public class Reconciler {
     int total = 0;
     for (Task task : tasks.findAll()) {
       for (ExpiredRun run : execs.findExpiredRunning(task.id())) {
-        // 孤儿 RUNNING 已 claim(status=attempt+1 过),故本行 attempt 即本次运行号,原样传入(不加 1)。
-        failureResolver.handle(task, run.id(), run.attempt(), workerId, "lease expired");
-        total++;
+        try {
+          if (execs.markStatus(run.id(), ExecutionStatus.FAILED, workerId, "lease expired")) {
+            // 孤儿 RUNNING 已 claim(status=attempt+1 过),故本行 attempt 即本次运行号,原样传入(不加 1)。
+            failureResolver.handle(task, run.id(), run.attempt(), "lease expired");
+            total++;
+          }
+        } catch (IllegalStateException alreadyMovedOn) {
+          // 快照后该行已被 owner 抢先完成 → 已迁移,跳过,不中止整批回收。
+        }
       }
     }
     return total;

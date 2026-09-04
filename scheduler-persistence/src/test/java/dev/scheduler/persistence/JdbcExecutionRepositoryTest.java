@@ -133,6 +133,52 @@ class JdbcExecutionRepositoryTest extends AbstractPostgresTest {
     assertTrue(execRepo.findById(id).get().finishedAt() != null);
   }
 
+  @Test void markStatusOwnedWrongOwner_isSuppressedNoOutcome_noClobber() {
+    long taskId = newTask(8);
+    long id = execRepo.createDue(ofDue(taskId, "t6a:k1"));
+    execRepo.claim(id, taskId, "w1", Instant.now().plusSeconds(60), 8); // -> RUNNING, worker_id=w1
+
+    boolean ok = execRepo.markStatusOwned(id, ExecutionStatus.SUCCESS, "w2", "stale done");
+
+    assertFalse(ok, "owner mismatch → 守卫必须拦截回写");
+    Execution e = execRepo.findById(id).get();
+    assertEquals(ExecutionStatus.RUNNING, e.status(), "非持有者的回写不得改动行状态");
+    assertEquals("w1", e.workerId(), "非持有者的回写不得改动 owner");
+    assertEquals(0, successOutcomes(id), "被守卫拦截 → 不落 SUCCESS outcome");
+  }
+
+  @Test void markStatusOwnedCorrectOwner_transitionsWithSingleOutcome() {
+    long taskId = newTask(8);
+    long id = execRepo.createDue(ofDue(taskId, "t6b:k1"));
+    execRepo.claim(id, taskId, "w1", Instant.now().plusSeconds(60), 8); // -> RUNNING, worker_id=w1
+
+    boolean ok = execRepo.markStatusOwned(id, ExecutionStatus.SUCCESS, "w1", "done");
+
+    assertTrue(ok, "持有者自身回写应成功");
+    Execution e = execRepo.findById(id).get();
+    assertEquals(ExecutionStatus.SUCCESS, e.status());
+    assertEquals(1, successOutcomes(id), "恰一条 SUCCESS outcome");
+    assertNotNull(e.finishedAt(), "终态必须写 finished_at");
+  }
+
+  @Test void markStatusOwnedOnAlreadyTerminal_isSuppressedNoSecondOutcome() {
+    long taskId = newTask(8);
+    long id = execRepo.createDue(ofDue(taskId, "t6c:k1"));
+    execRepo.claim(id, taskId, "w1", Instant.now().plusSeconds(60), 8);
+    execRepo.markStatus(id, ExecutionStatus.SUCCESS, "w1", "done"); // 已 SUCCESS 终态
+
+    boolean ok = execRepo.markStatusOwned(id, ExecutionStatus.SUCCESS, "w1", "again");
+
+    assertFalse(ok, "非可迁移(SUCCESS→SUCCESS)→ 守卫返回 false");
+    assertEquals(1, successOutcomes(id), "不得再落第二条 outcome");
+  }
+
+  private int successOutcomes(long executionId) {
+    return jdbc.queryForObject(
+        "SELECT count(*) FROM execution_outcome WHERE execution_id=? AND status='SUCCESS'",
+        Integer.class, executionId);
+  }
+
   @Test void illegalTransitionThrows() {
     long taskId = newTask(8);
     long id = execRepo.createDue(ofDue(taskId, "t7:k1"));
