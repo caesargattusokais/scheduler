@@ -12,6 +12,6 @@ public interface ExecutionRepository {
   Optional<Execution> findById(long id);
   long countActive(long taskId);
   void markStatus(long id, ExecutionStatus to, String workerId, String detail);
-  void scheduleRetry(long id, Instant retryAt, String workerId, String detail);
+  void scheduleRetry(long id, Instant retryAt, String detail);
   void markDeadLetter(long id, String detail);
 }

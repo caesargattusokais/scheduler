@@ -123,7 +123,7 @@ class JdbcExecutionRepositoryTest extends AbstractPostgresTest {
     long id = failedExecution(8, "t8:k1");
     Instant retryAt = Instant.now().plusSeconds(10);
 
-    execRepo.scheduleRetry(id, retryAt, "w2", "boom");
+    execRepo.scheduleRetry(id, retryAt, "boom");
 
     Execution e = execRepo.findById(id).get();
     assertEquals(ExecutionStatus.DUE, e.status());
@@ -145,7 +145,7 @@ class JdbcExecutionRepositoryTest extends AbstractPostgresTest {
     long id = execRepo.createDue(ofDue(taskId, "t9:k1"));
     execRepo.claim(id, taskId, "w1", Instant.now().plusSeconds(60), 8); // -> RUNNING, not FAILED
 
-    execRepo.scheduleRetry(id, Instant.now().plusSeconds(10), "w2", "boom");
+    execRepo.scheduleRetry(id, Instant.now().plusSeconds(10), "boom");
 
     assertEquals(ExecutionStatus.RUNNING, execRepo.findById(id).get().status());
     assertEquals(1, outcomes(id), "CAS 0 rows: no extra outcome");

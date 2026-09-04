@@ -107,7 +107,7 @@ public class JdbcExecutionRepository implements ExecutionRepository {
     });
   }
 
-  @Override public void scheduleRetry(long id, Instant retryAt, String workerId, String detail) {
+  @Override public void scheduleRetry(long id, Instant retryAt, String detail) {
     // FAILED -> DUE,期待值时延由调用方(RetryPolicy,注入 clock)预先算好,仓库只写值。
     // CAS on status='FAILED':0 行=竞态/非 FAILED,静默跳过,不落误导性 outcome。
     java.sql.Timestamp ts = java.sql.Timestamp.from(retryAt);
@@ -116,8 +116,8 @@ public class JdbcExecutionRepository implements ExecutionRepository {
           "UPDATE execution SET status='DUE', next_retry_at=? WHERE id=? AND status='FAILED'",
           ts, id);
       if (updated == 0) {
-        log.debug("scheduleRetry lost CAS race: execution {} no longer FAILED (by {}); "
-            + "suppressing outcome", id, workerId);
+        log.debug("scheduleRetry lost CAS race: execution {} no longer FAILED; "
+            + "suppressing outcome", id);
         return;
       }
       jdbc.update("INSERT INTO execution_outcome (execution_id, status, detail) VALUES (?,?,?)",
