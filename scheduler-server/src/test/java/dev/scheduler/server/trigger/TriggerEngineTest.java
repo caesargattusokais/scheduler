@@ -81,7 +81,7 @@ class TriggerEngineTest extends AbstractTriggerEngineTest {
     } finally { leader.close(); }
   }
 
-  @Test void activeConcurrencyQuota_blocksNewDue() {
+  @Test void saturatedTask_stillBacklogsDue_butUnclaimable() {
     var leader = new AdvisoryLockLeaderElection(jdbc);
     try {
       long taskId = createTask(CRON_EVERY_5, /* maxActiveConcurrent */ 1);
@@ -94,7 +94,13 @@ class TriggerEngineTest extends AbstractTriggerEngineTest {
 
       var engine = new TriggerEngine(tasks, executions, leader, FIXED_CLOCK);
       engine.scanOnce();
-      assertEquals(1, countExecutions(taskId)); // 配额已占满,不新建
+      // §2.4 背压:配额占满也仍下发一条 DUE(积压),绝不静默丢 tick
+      assertEquals(2, countExecutions(taskId));
+      Execution backlog = executions.findCandidate(taskId).orElseThrow();
+      assertEquals("DUE", backlog.status().name());
+      // 该积压 DUE 因配额已满,claim 侧拒绝提升 → 仍是 DUE
+      assertFalse(executions.claim(backlog.id(), taskId, "w", Instant.now().plusSeconds(60), 1));
+      assertEquals("DUE", executions.findById(backlog.id()).get().status().name());
     } finally { leader.close(); }
   }
 

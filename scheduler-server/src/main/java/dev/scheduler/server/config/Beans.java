@@ -1,5 +1,6 @@
 package dev.scheduler.server.config;
 
+import dev.scheduler.core.Task;
 import dev.scheduler.persistence.ExecutionRepository;
 import dev.scheduler.persistence.JdbcExecutionRepository;
 import dev.scheduler.persistence.JdbcTaskRepository;
@@ -91,13 +92,26 @@ public class Beans {
     return new ExecutorWorker(tasks, execs, handlers, schedulerWorkerId);
   }
 
-  /** 两个核心指标:每任务活跃数总和 + DUE 队列最深年龄;来自真实仓库/DB,不在内存造假。 */
+  /**
+   * 每任务指标(§5.2):为每个任务各注册一条 series,任一带 task_id 标签,
+   * 避免单个热点任务掩盖被饿死的任务的可见性。
+   * 已知限制:新创建的任务要等下一次重启才出现 series(M1 接受此重启边界)。
+   */
   @Bean
   MeterBinder schedulerMetrics(TaskRepository tasks, ExecutionRepository execs, JdbcTemplate jdbc) {
     return registry -> {
-      Gauge.builder("scheduler_active_runs", () -> totalActiveRuns(tasks, execs)).register(registry);
-      Gauge.builder("scheduler_due_queue_max_age_seconds", () -> dueQueueMaxAgeSeconds(jdbc))
-          .register(registry);
+      for (Task t : tasks.findAll()) {
+        long taskId = t.id();
+        String name = t.name();
+        Gauge.builder("scheduler_active_runs", () -> execs.countActive(taskId))
+            .tag("task_id", Long.toString(taskId))
+            .tag("task_name", name)
+            .register(registry);
+        Gauge.builder("scheduler_due_queue_max_age_seconds", () -> dueQueueMaxAgeSeconds(jdbc, taskId))
+            .tag("task_id", Long.toString(taskId))
+            .tag("task_name", name)
+            .register(registry);
+      }
     };
   }
 
@@ -150,14 +164,10 @@ public class Beans {
     }
   }
 
-  private static long totalActiveRuns(TaskRepository tasks, ExecutionRepository execs) {
-    return tasks.findAll().stream().mapToLong(t -> execs.countActive(t.id())).sum();
-  }
-
-  private static double dueQueueMaxAgeSeconds(JdbcTemplate jdbc) {
+  private static double dueQueueMaxAgeSeconds(JdbcTemplate jdbc, long taskId) {
     Double v = jdbc.queryForObject(
         "SELECT EXTRACT(EPOCH FROM (now() - COALESCE(MAX(created_at), now())))::float8 "
-            + "FROM execution WHERE status='DUE'", Double.class);
+            + "FROM execution WHERE status='DUE' AND task_id=?", Double.class, taskId);
     return v == null ? 0.0 : v;
   }
 

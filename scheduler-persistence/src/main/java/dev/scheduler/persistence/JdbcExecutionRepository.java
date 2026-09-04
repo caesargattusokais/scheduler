@@ -5,12 +5,15 @@ import dev.scheduler.core.ExecutionStatus;
 import dev.scheduler.core.ExecutionTransitions;
 import java.time.Instant;
 import java.util.Optional;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
 public class JdbcExecutionRepository implements ExecutionRepository {
+  private static final Logger log = LoggerFactory.getLogger(JdbcExecutionRepository.class);
   private final JdbcTemplate jdbc;
   private final TransactionTemplate tx;
 
@@ -86,11 +89,19 @@ public class JdbcExecutionRepository implements ExecutionRepository {
     if (!ExecutionTransitions.canTransition(cur.status(), to)) {
       throw new IllegalStateException("illegal transition " + cur.status() + " -> " + to);
     }
+    // 事务内以"读取到的旧状态"做原子 CAS:若 0 行,说明行已被其他动作(如 worker 恰在此间 claim 成
+    // RUNNING 的 cancel)改走,cancel-claim 竞态视为良性,不落误导性 outcome 静默返回;非法路径仍由
+    // 上面的 read-validate 先行拦截。
     tx.executeWithoutResult(s -> {
-      jdbc.update("""
+      int updated = jdbc.update("""
         UPDATE execution SET status=?, worker_id=COALESCE(?, worker_id),
           finished_at=CASE WHEN ? IN ('SUCCESS','FAILED','CANCELED') THEN now() ELSE finished_at END
-          WHERE id=?""", to.name(), workerId, to.name(), id);
+          WHERE id=? AND status=?""", to.name(), workerId, to.name(), id, cur.status().name());
+      if (updated == 0) {
+        log.debug("markStatus lost CAS race: execution {} no longer {} (owner/status changed); "
+            + "suppressing outcome", id, cur.status().name());
+        return;
+      }
       jdbc.update("INSERT INTO execution_outcome (execution_id, status, detail) VALUES (?,?,?)",
           id, to.name(), detail);
     });

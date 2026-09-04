@@ -9,7 +9,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 public class AdvisoryLockLeaderElection implements LeaderElection {
   private static final Logger log = LoggerFactory.getLogger(AdvisoryLockLeaderElection.class);
   private static final long LOCK_KEY = 0x5343484544L; // "SCHED"
-  private final Connection lockConnection;
+  private Connection lockConnection;
   private final boolean leader;
 
   public AdvisoryLockLeaderElection(JdbcTemplate jdbc) {
@@ -23,6 +23,9 @@ public class AdvisoryLockLeaderElection implements LeaderElection {
         acquired = rs.getBoolean(1);
       }
     } catch (SQLException e) {
+      if (c != null) {
+        try { c.close(); } catch (SQLException ignored) { /* best-effort */ }
+      }
       throw new IllegalStateException("failed to acquire advisory lock", e);
     }
     if (acquired) {
@@ -38,13 +41,15 @@ public class AdvisoryLockLeaderElection implements LeaderElection {
 
   @Override public boolean isLeader() { return leader; }
 
-  /** Release the session advisory lock and its dedicated connection. */
+  /** Release the session advisory lock and its dedicated connection. Idempotent: second call no-ops. */
   public void close() {
     if (lockConnection == null) return;
-    try { lockConnection.createStatement().execute("SELECT pg_advisory_unlock(" + LOCK_KEY + ")"); }
+    final Connection c = lockConnection;
+    lockConnection = null; // 先置空,保证可重入(第二次 close 走上方短路直接返回)
+    try { c.createStatement().execute("SELECT pg_advisory_unlock(" + LOCK_KEY + ")"); }
     catch (SQLException e) { log.warn("failed to release advisory lock", e); }
     finally {
-      try { lockConnection.close(); }
+      try { c.close(); }
       catch (SQLException e) { log.warn("failed to close lock connection", e); }
     }
   }

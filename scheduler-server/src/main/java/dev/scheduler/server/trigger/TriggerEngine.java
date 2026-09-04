@@ -26,7 +26,7 @@ public class TriggerEngine {
     this.clock = clock;
   }
 
-  /** 扫描一次:仅 leader;对 enabled 且非 paused、分钟窗内有 tick、且配额有余的任务各登记一条 DUE。 */
+  /** 扫描一次:仅 leader;对 enabled 且非 paused、分钟窗内有 tick 的任务各登记一条 DUE(不设配额闸)。 */
   public void scanOnce() {
     if (!leader.isLeader()) return; // 非 leader 节点不得创建执行
     // Spring 6 CronExpression.next 只接受 Temporal(ZonedDateTime/LocalDateTime),不接受 Instant。
@@ -35,11 +35,11 @@ public class TriggerEngine {
     for (Task t : tasks.findCronEnabled()) {
       var cron = CronExpression.parse(t.cron());
       ZonedDateTime fired = cron.next(now.minusSeconds(61));
+      // 命中即无条件下发 DUE(背压 §2.4):不在此处做配额拦截,避免丢弃 tick;
+      // 饱和任务的积压由 claim 侧的 CAS+配额(active.c < maxConcurrent)负责消化。
       if (fired != null && !fired.isAfter(now)) { // 该分钟窗内含一个 tick
-        if (executions.countActive(t.id()) < t.maxActiveConcurrent()) { // 配额有余
-          executions.createDue(Execution.ofDue(t.id(),
-              IdempotencyKeys.forTrigger(t.id(), fired.toInstant(), 0), t.shardCount()));
-        }
+        executions.createDue(Execution.ofDue(t.id(),
+            IdempotencyKeys.forTrigger(t.id(), fired.toInstant(), 0), t.shardCount()));
       }
     }
   }

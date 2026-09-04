@@ -15,6 +15,8 @@ import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
+import org.flywaydb.core.Flyway;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -25,6 +27,7 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Primary;
 import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.web.servlet.MockMvc;
@@ -78,6 +81,9 @@ class ApiIntegrationTest {
   @Autowired TriggerEngine triggerEngine;
   @Autowired ExecutorWorker executorWorker;
 
+  /** 上下文启动(绑定时刻)前就存在的任务 id,用于断言 per-task 指标 series。 */
+  private static long METRICS_TASK_ID;
+
   @TestConfiguration
   static class TestClockConfig {
     @Bean
@@ -85,6 +91,26 @@ class ApiIntegrationTest {
     Clock testClock() {
       return ApiIntegrationTest.CLOCK;
     }
+  }
+
+  /**
+   * 指标在上下文启动(绑定时刻)为当时的每个任务各注册一条 series;此后新建的任务要等下次重启才有
+   * series(§5.2 已知重启边界)。因此这里在共享上下文创建前(静态 @BeforeAll,镜像 AbstractPostgresTest
+   * 的 Flyway+裸 JDBC)先落一条 disabled 任务,保证其 tagged series 在绑定时刻确定存在。
+   */
+  @BeforeAll
+  static void seedMetricsTaskBeforeContext() {
+    Flyway.configure().dataSource(PG.getJdbcUrl(), PG.getUsername(), PG.getPassword()).load().migrate();
+    // JdbcTemplate over DriverManagerDataSource 每次操作自借自还连接,无需(也不能)关闭 DataSource 本身。
+    JdbcTemplate j = new JdbcTemplate(
+        new DriverManagerDataSource(PG.getJdbcUrl(), PG.getUsername(), PG.getPassword()));
+      j.update("""
+        INSERT INTO app_task (name, kind, handler_ref, cron, shard_count, timeout_seconds,
+          max_retries, backoff_ms, max_active_concurrent, enabled, paused)
+        VALUES (?, 'cron', 'demo', ?, 1, 300, 0, 1000, 1, false, false)""",
+          "metrics-seed-task", "0 */5 * * * *");
+      METRICS_TASK_ID = j.queryForObject("SELECT id FROM app_task WHERE name=?",
+          Long.class, "metrics-seed-task");
   }
 
   @BeforeEach
@@ -155,9 +181,11 @@ class ApiIntegrationTest {
     String prom = mvc.perform(get("/actuator/prometheus"))
         .andExpect(status().isOk())
         .andReturn().getResponse().getContentAsString();
-    assertTrue(prom.contains("scheduler_active_runs"), "missing scheduler_active_runs in prometheus");
-    assertTrue(prom.contains("scheduler_due_queue_max_age_seconds"),
-        "missing scheduler_due_queue_max_age_seconds in prometheus");
+    // 断言绑定时刻存活任务的 tagged series(task_id 标签存在),而非仅裸指标名。
+    assertTrue(prom.contains("scheduler_active_runs{task_id=\"" + METRICS_TASK_ID + "\","),
+        "missing per-task scheduler_active_runs{task_id=...} series in prometheus:\n" + prom);
+    assertTrue(prom.contains("scheduler_due_queue_max_age_seconds{task_id=\"" + METRICS_TASK_ID + "\","),
+        "missing per-task scheduler_due_queue_max_age_seconds{task_id=...} series in prometheus:\n" + prom);
   }
 
   @Test
