@@ -45,8 +45,10 @@ public class JdbcExecutionRepository implements ExecutionRepository {
   }
 
   @Override public Optional<Execution> findCandidate(long taskId) {
+    // 重试闸:仅当 next_retry_at 为空或已到期待时才视为可领取(否则被重试调度待到点才放行)。
     return jdbc.query(
-        "SELECT * FROM execution WHERE task_id=? AND status='DUE' ORDER BY id LIMIT 1",
+        "SELECT * FROM execution WHERE task_id=? AND status='DUE'"
+            + " AND (next_retry_at IS NULL OR next_retry_at <= now()) ORDER BY id LIMIT 1",
         MAP, taskId).stream().findFirst();
   }
 

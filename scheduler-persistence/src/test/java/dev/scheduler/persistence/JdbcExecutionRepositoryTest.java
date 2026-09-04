@@ -63,6 +63,27 @@ class JdbcExecutionRepositoryTest extends AbstractPostgresTest {
     assertEquals(ExecutionStatus.DUE, cand.get().status());
   }
 
+  @Test void findCandidateSkipsDueRowWhoseRetryAtIsInFuture() {
+    long taskId = newTask(8);
+    // 一条 next_retry_at 在未来(now()+1h)的 DUE:未到重试时间,不应被 findCandidate 返回
+    jdbc.update(
+        "INSERT INTO execution (task_id, status, idempotency_key, shard_count, next_retry_at) "
+            + "VALUES (?, 'DUE', ?, 1, now() + interval '1 hour')",
+        taskId, "t8:futureretry");
+
+    assertTrue(execRepo.findCandidate(taskId).isEmpty(),
+        "a DUE row with next_retry_at in the future must not be returned by findCandidate");
+  }
+
+  @Test void findCandidateReturnsDueRowWithNullNextRetryAt() {
+    long taskId = newTask(8);
+    long id = execRepo.createDue(ofDue(taskId, "t8:nullretry")); // next_retry_at 默认 NULL
+
+    var cand = execRepo.findCandidate(taskId);
+    assertTrue(cand.isPresent());
+    assertEquals(id, cand.get().id());
+  }
+
   @Test void claimSucceedsThenSecondFailsAndWritesOutcome() {
     long taskId = newTask(8);
     long id = execRepo.createDue(ofDue(taskId, "t3:k1"));

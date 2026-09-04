@@ -12,6 +12,8 @@ import dev.scheduler.server.handler.HandlerRegistry;
 import dev.scheduler.server.handler.MapHandlerRegistry;
 import dev.scheduler.server.leader.AdvisoryLockLeaderElection;
 import dev.scheduler.server.leader.LeaderElection;
+import dev.scheduler.server.retry.FailureResolver;
+import dev.scheduler.server.retry.RetryPolicy;
 import dev.scheduler.server.trigger.TriggerEngine;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.binder.MeterBinder;
@@ -80,6 +82,18 @@ public class Beans {
     return new TriggerEngine(tasks, execs, leader, clock);
   }
 
+  /** 重试决策纯类:只判定"应否重试/退避多久",不含 DB 与时钟。 */
+  @Bean
+  RetryPolicy retryPolicy() {
+    return new RetryPolicy();
+  }
+
+  /** 失败判定(FAILED 落库 + 重试/死信分流);单例,Task 5 reconciler 复用同一实例。 */
+  @Bean
+  FailureResolver failureResolver(ExecutionRepository execs, RetryPolicy retryPolicy, Clock clock) {
+    return new FailureResolver(execs, retryPolicy, clock);
+  }
+
   /** 本节点稳定的执行者标识,流入认领与每次 markStatus(审计"谁做的")。 */
   @Bean
   String schedulerWorkerId(@Value("${scheduler.worker-id:}") String configured) {
@@ -88,8 +102,9 @@ public class Beans {
 
   @Bean
   ExecutorWorker executorWorker(TaskRepository tasks, ExecutionRepository execs,
-                                HandlerRegistry handlers, String schedulerWorkerId) {
-    return new ExecutorWorker(tasks, execs, handlers, schedulerWorkerId);
+                                HandlerRegistry handlers, String schedulerWorkerId,
+                                FailureResolver failureResolver, Clock clock) {
+    return new ExecutorWorker(tasks, execs, handlers, schedulerWorkerId, failureResolver, clock);
   }
 
   /**

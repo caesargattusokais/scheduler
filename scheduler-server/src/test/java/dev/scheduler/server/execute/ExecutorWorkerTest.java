@@ -2,6 +2,7 @@ package dev.scheduler.server.execute;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import dev.scheduler.core.Execution;
@@ -16,6 +17,11 @@ import dev.scheduler.server.handler.ExecutionHandler;
 import dev.scheduler.server.handler.HandlerContext;
 import dev.scheduler.server.handler.HandlerRegistry;
 import dev.scheduler.server.handler.MapHandlerRegistry;
+import dev.scheduler.server.retry.FailureResolver;
+import dev.scheduler.server.retry.RetryPolicy;
+import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
 import org.junit.jupiter.api.BeforeEach;
@@ -36,7 +42,9 @@ class ExecutorWorkerTest extends AbstractExecutorWorkerTest {
     @Override public void handle(HandlerContext ctx) { calls.add(ctx); if (fail) throw new RuntimeException("boom"); }
   }
 
-  private long createdTaskId;
+  /** 固定时钟:重试测试据此断言 next_retry_at,避免依赖实时时钟。 */
+  private static final Clock CLOCK =
+      Clock.fixed(Instant.parse("2026-01-01T10:00:00Z"), ZoneOffset.UTC);
 
   @BeforeEach void clearTables() {
     jdbc.execute("TRUNCATE execution, execution_outcome, app_task RESTART IDENTITY CASCADE");
@@ -44,9 +52,15 @@ class ExecutorWorkerTest extends AbstractExecutorWorkerTest {
     executions = new JdbcExecutionRepository(jdbc);
   }
 
+  /** 旧 2 参签名委托给新默认:maxRetries=0、backoff=1000ms、pattern=null(即不再重试)。 */
   private long createTask(String handlerRef, int maxActiveConcurrent) {
+    return createTask(handlerRef, 0, 1000, null, maxActiveConcurrent);
+  }
+
+  private long createTask(String handlerRef, int maxRetries, long backoffMs, String pattern,
+                          int maxActiveConcurrent) {
     return tasks.create(new Task(null, "t", "cron", handlerRef, "0 */5 * * * *",
-        1, 300, 0, 1000, null, maxActiveConcurrent, true, false)).id();
+        1, 300, maxRetries, backoffMs, pattern, maxActiveConcurrent, true, false)).id();
   }
 
   private long outcomeCount(long executionId, String status) {
@@ -56,7 +70,8 @@ class ExecutorWorkerTest extends AbstractExecutorWorkerTest {
   }
 
   private ExecutorWorker worker(HandlerRegistry registry) {
-    return new ExecutorWorker(tasks, executions, registry, "worker-a");
+    return new ExecutorWorker(tasks, executions, registry, "worker-a",
+        new FailureResolver(executions, new RetryPolicy(), CLOCK), CLOCK);
   }
 
   @Test void happyPath_claimsRunsAndWritesSuccess() {
@@ -106,6 +121,59 @@ class ExecutorWorkerTest extends AbstractExecutorWorkerTest {
     assertEquals(ExecutionStatus.FAILED, e.status());
     assertEquals(1, rec.calls.size());
     assertEquals(1L, outcomeCount(execId, "FAILED"));
+  }
+
+  @Test void handlerThrowsRetryable_movesToDue_withClockBasedNextRetryAt() {
+    var rec = new RecordingHandler(true);
+    var registry = new MapHandlerRegistry(List.of(() -> rec));
+    long taskId = createTask("rec", 2, 1000, null, 1); // maxRetries=2, 无 pattern, 可重试
+    long execId = executions.createDue(Execution.ofDue(taskId, "k-retry", 1));
+
+    boolean processed = worker(registry).workOne();
+
+    assertTrue(processed);
+    Execution e = executions.findById(execId).orElseThrow();
+    assertEquals(ExecutionStatus.DUE, e.status(), "可重试 → 回到 DUE 待再次认领");
+    assertNotNull(e.nextRetryAt(), "重试必须写入 next_retry_at");
+    assertEquals(CLOCK.instant().plusMillis(1000), e.nextRetryAt(),
+        "next_retry_at 由注入时钟 + 退避(attempt1 backoff=1000ms)算出,而非实时时钟");
+    assertEquals(1L, outcomeCount(execId, "DUE"), "重试落 DUE outcome");
+    assertEquals(1, e.attempt(), "claim 已累加到 1,重试不再改增 attempt");
+    // markStatus(FAILED) 亦落 FAILED outcome;此处仅需验证重试落 DUE 且 next_retry_at 按注入时钟。
+  }
+
+  @Test void handlerThrowsExhausted_failsAndDeadLetters_noDueOutcome() {
+    var rec = new RecordingHandler(true);
+    var registry = new MapHandlerRegistry(List.of(() -> rec));
+    long taskId = createTask("rec", 0, 1000, null, 1); // maxRetries=0 → 耗尽
+    long execId = executions.createDue(Execution.ofDue(taskId, "k-exhaust", 1));
+
+    boolean processed = worker(registry).workOne();
+
+    assertTrue(processed);
+    Execution e = executions.findById(execId).orElseThrow();
+    assertEquals(ExecutionStatus.FAILED, e.status());
+    assertEquals(Boolean.TRUE, jdbc.queryForObject(
+        "SELECT dead_letter FROM execution WHERE id=?", Boolean.class, execId),
+        "重试耗尽 → 置 dead_letter=true");
+    assertEquals(0L, outcomeCount(execId, "DUE"), "耗尽:无 DUE outcome");
+  }
+
+  @Test void handlerThrowsPatternMismatch_failsAndDeadLetters() {
+    var rec = new RecordingHandler(true);
+    var registry = new MapHandlerRegistry(List.of(() -> rec));
+    long taskId = createTask("rec", 2, 1000, "timeout", 1); // pattern 不匹配抛出的 "boom"
+    long execId = executions.createDue(Execution.ofDue(taskId, "k-pattern", 1));
+
+    boolean processed = worker(registry).workOne();
+
+    assertTrue(processed);
+    Execution e = executions.findById(execId).orElseThrow();
+    assertEquals(ExecutionStatus.FAILED, e.status());
+    assertEquals(Boolean.TRUE, jdbc.queryForObject(
+        "SELECT dead_letter FROM execution WHERE id=?", Boolean.class, execId),
+        "pattern 不匹配 → 视为不可重试,置 dead_letter=true");
+    assertEquals(0L, outcomeCount(execId, "DUE"));
   }
 
   @Test void unclaimedExecution_neverMutatedByThisWorker() {

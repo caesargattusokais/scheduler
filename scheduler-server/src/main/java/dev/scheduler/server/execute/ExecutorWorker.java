@@ -7,6 +7,8 @@ import dev.scheduler.persistence.TaskRepository;
 import dev.scheduler.server.handler.ExecutionHandler;
 import dev.scheduler.server.handler.HandlerContext;
 import dev.scheduler.server.handler.HandlerRegistry;
+import dev.scheduler.server.retry.FailureResolver;
+import java.time.Clock;
 import java.time.Instant;
 
 /**
@@ -19,13 +21,18 @@ public class ExecutorWorker {
   private final ExecutionRepository execs;
   private final HandlerRegistry handlers;
   private final String workerId;
+  private final FailureResolver failureResolver;
+  private final Clock clock;
 
   public ExecutorWorker(TaskRepository tasks, ExecutionRepository execs,
-                        HandlerRegistry handlers, String workerId) {
+                        HandlerRegistry handlers, String workerId,
+                        FailureResolver failureResolver, Clock clock) {
     this.tasks = tasks;
     this.execs = execs;
     this.handlers = handlers;
     this.workerId = workerId;
+    this.failureResolver = failureResolver;
+    this.clock = clock;
   }
 
   /** 处理一个 execution,返回是否处理了(找到了候选且认领成功)。 */
@@ -33,7 +40,7 @@ public class ExecutorWorker {
     for (Task t : tasks.findAll()) {
       var cand = execs.findCandidate(t.id());
       if (cand.isEmpty()) continue;
-      Instant lease = Instant.now().plusSeconds(60);
+      Instant lease = clock.instant().plusSeconds(60);
       if (!execs.claim(cand.get().id(), t.id(), workerId, lease, t.maxActiveConcurrent())) {
         continue; // 他人已认领或配额占满 → 未认领成功,绝不回写
       }
@@ -41,15 +48,17 @@ public class ExecutorWorker {
       try {
         h = handlers.get(t.handlerRef());
       } catch (IllegalArgumentException e) {
-        execs.markStatus(cand.get().id(), ExecutionStatus.FAILED, workerId, e.getMessage());
+        // 未注册 handler 也是失败,走统一失败判定(cand 持 claim 前的尝试号,本次为 +1)。
+        failureResolver.handle(t, cand.get().id(), cand.get().attempt() + 1, workerId, e.getMessage());
         return true;
       }
       try {
         h.handle(new HandlerContext(cand.get().id(), cand.get().args()));
         execs.markStatus(cand.get().id(), ExecutionStatus.SUCCESS, workerId, "ok");
       } catch (Throwable err) {
-        execs.markStatus(cand.get().id(), ExecutionStatus.FAILED, workerId,
-            String.valueOf(err.getMessage()));
+        // 失败走统一判定:应重试则调度重试,否则 FAILED + 死信。
+        failureResolver.handle(t, cand.get().id(), cand.get().attempt() + 1, workerId,
+            String.valueOf(err));
       }
       return true;
     }
