@@ -120,6 +120,15 @@ class JdbcShardRepositoryTest extends AbstractPostgresTest {
     }
   }
 
+  /** M3 防御守卫:shardCount=0 会扇出 0 个 shard → 父恒 DUE 无法汇聚,必须拒绝。 */
+  @Test void createParentWithShards_zeroShardCount_throwsIllegalArgumentException() {
+    long taskId = newTask(1, 8);
+
+    assertThrows(IllegalArgumentException.class,
+        () -> shardRepo.createParentWithShards(taskId, "p:zero", 0),
+        "shardCount < 1 必须抛 IllegalArgumentException,不得残留恒 DUE 的父");
+  }
+
   @Test void createParent_shardCountOne_stillParentPlusOneShard() {
     long taskId = newTask(1, 8);
     var parent = shardRepo.createParentWithShards(taskId, "p:k4", 1);

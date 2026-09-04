@@ -153,6 +153,15 @@ class ApiIntegrationTest {
         .andExpect(jsonPath("$.name").value("create-list-task"));
   }
 
+  /** M3 回归:shardCount=0 不得创建任务(否则扇出 0 个 shard → 恒 DUE、无法汇聚终态的父)。 */
+  @Test
+  void createTask_shardCountZero_returnsBadRequest() throws Exception {
+    String body = "{\"name\":\"zero-shard-task\",\"kind\":\"cron\",\"handlerRef\":\"demo\","
+        + "\"cron\":\"" + CRON + "\",\"shardCount\":0}";
+    mvc.perform(post("/api/v1/tasks").contentType(MediaType.APPLICATION_JSON).content(body))
+        .andExpect(status().isBadRequest()); // 镜像 maxRetries/timeout 等校验拒绝路径
+  }
+
   @Test
   void manualTrigger_createsDueExecution() throws Exception {
     long id = postTask("trigger-task");

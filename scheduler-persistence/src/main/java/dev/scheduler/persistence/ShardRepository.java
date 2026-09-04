@@ -10,7 +10,8 @@ import java.util.Optional;
  *  语义逐条镜像 M2 {@link JdbcExecutionRepository} 对应方法,作用对象改为 shard(带 execution_id→task_id 的 JOIN)。 */
 public interface ShardRepository {
 
-  /** 创建父 execution(状态 DUE,幂等 by parentKey)+ 其 N 个 shard。单事务,父重复创建不重复插 shard。 */
+  /** 创建父 execution(状态 DUE,幂等 by parentKey)+ 其 N 个 shard。单事务,父重复创建不重复插 shard。
+   *  {@code shardCount < 1} 抛 IllegalArgumentException("shardCount must be >= 1")(0 扇出会产生恒 DUE 无法汇聚的父)。 */
   Execution createParentWithShards(long taskId, String parentKey, int shardCount);
 
   /** 按父 execution id 读父行。 */

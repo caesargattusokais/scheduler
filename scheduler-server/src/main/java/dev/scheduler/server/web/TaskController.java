@@ -54,6 +54,9 @@ public class TaskController {
     if (req.maxRetries() != null && req.maxRetries() < 0) {
       throw new IllegalArgumentException("maxRetries must be >= 0");
     }
+    if (req.shardCount() != null && req.shardCount() < 1) {
+      throw new IllegalArgumentException("shardCount must be >= 1");
+    }
     Task created = tasks.create(new Task(
         null, req.name(), req.kind() == null ? "cron" : req.kind(), req.handlerRef(), req.cron(),
         req.shardCount() == null ? 1 : req.shardCount(),
