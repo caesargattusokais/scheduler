@@ -12,6 +12,7 @@ import dev.scheduler.server.handler.HandlerRegistry;
 import dev.scheduler.server.handler.MapHandlerRegistry;
 import dev.scheduler.server.leader.AdvisoryLockLeaderElection;
 import dev.scheduler.server.leader.LeaderElection;
+import dev.scheduler.server.reconcile.Reconciler;
 import dev.scheduler.server.retry.FailureResolver;
 import dev.scheduler.server.retry.RetryPolicy;
 import dev.scheduler.server.trigger.TriggerEngine;
@@ -143,6 +144,19 @@ public class Beans {
     return new WorkLoop(worker);
   }
 
+  /** 对账器:单例,复用共享 FailureResolver(同一重试判定,worker 与 reconciler 无漂移)。 */
+  @Bean
+  Reconciler reconciler(TaskRepository tasks, ExecutionRepository execs,
+                        FailureResolver failureResolver) {
+    return new Reconciler(tasks, execs, failureResolver, "reconciler");
+  }
+
+  @Bean
+  @ConditionalOnProperty(name = "scheduler.reconcile.enabled", havingValue = "true", matchIfMissing = true)
+  ReconcileLoop reconcileLoop(Reconciler reconciler, LeaderElection leader) {
+    return new ReconcileLoop(reconciler, leader);
+  }
+
   public static final class ScanLoop {
     private static final Logger log = LoggerFactory.getLogger(ScanLoop.class);
     private final TriggerEngine engine;
@@ -175,6 +189,28 @@ public class Beans {
         worker.workOne();
       } catch (Throwable t) {
         log.warn("executor work loop tick failed; continuing next tick", t);
+      }
+    }
+  }
+
+  /** 对账循环:leader 门控在 scan 之前(与 TriggerEngine 同),失败兜底不杀线程。 */
+  public static final class ReconcileLoop {
+    private static final Logger log = LoggerFactory.getLogger(ReconcileLoop.class);
+    private final Reconciler reconciler;
+    private final LeaderElection leader;
+
+    ReconcileLoop(Reconciler reconciler, LeaderElection leader) {
+      this.reconciler = reconciler;
+      this.leader = leader;
+    }
+
+    @Scheduled(fixedDelayString = "${scheduler.reconcile.delay-ms:30000}")
+    public void tick() {
+      if (!leader.isLeader()) return;
+      try {
+        reconciler.scanOnce();
+      } catch (Throwable t) {
+        log.warn("reconcile loop tick failed; continuing next tick", t);
       }
     }
   }

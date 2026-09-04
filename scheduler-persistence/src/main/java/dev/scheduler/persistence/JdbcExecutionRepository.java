@@ -4,6 +4,7 @@ import dev.scheduler.core.Execution;
 import dev.scheduler.core.ExecutionStatus;
 import dev.scheduler.core.ExecutionTransitions;
 import java.time.Instant;
+import java.util.List;
 import java.util.Optional;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -84,6 +85,13 @@ public class JdbcExecutionRepository implements ExecutionRepository {
         "SELECT count(*) FROM execution WHERE task_id=? AND status='RUNNING' AND lease_until > now()",
         Long.class, taskId);
     return c == null ? 0 : c;
+  }
+
+  @Override public List<ExpiredRun> findExpiredRunning(long taskId) {
+    return jdbc.query(
+        "SELECT id, attempt FROM execution WHERE task_id=? AND status='RUNNING'"
+            + " AND lease_until <= now()",
+        (rs, i) -> new ExpiredRun(rs.getLong("id"), rs.getInt("attempt")), taskId);
   }
 
   @Override public void markStatus(long id, ExecutionStatus to, String workerId, String detail) {
