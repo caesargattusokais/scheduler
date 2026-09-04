@@ -90,6 +90,24 @@ class JdbcShardRepositoryTest extends AbstractPostgresTest {
     assertEquals(3, shardCount(first.id()), "父重复创建不重复插 shard,总数仍 N");
   }
 
+  @Test void createParent_singleTransaction_exactlyOneParentWithNDueShards() {
+    // 回归:M3 spec §2 要求 父 + N 条 execution_shard 单事务原子提交。
+    long taskId = newTask(4, 8);
+
+    var parent = shardRepo.createParentWithShards(taskId, "p:atomic", 4);
+
+    // 恰一条父 execution(原子性守护:不得残留父->shard 间的部分提交)。
+    Integer parentRows = jdbc.queryForObject(
+        "SELECT count(*) FROM execution WHERE idempotency_key=?", Integer.class, "p:atomic");
+    assertEquals(1, parentRows, "fresh key → 恰一条父 execution");
+    // 恰 N 条 shard 且全部 DUE(父 + shard 在单事务内一起提交)。
+    Integer dueShards = jdbc.queryForObject(
+        "SELECT count(*) FROM execution_shard WHERE execution_id=? AND status='DUE'",
+        Integer.class, parent.id());
+    assertEquals(4, dueShards, "单事务提交 N=4 条 DUE shard");
+    assertEquals(4, shardCount(parent.id()), "总 shard 数 = N");
+  }
+
   @Test void findShards_orderedByIndex() {
     long taskId = newTask(4, 8);
     var parent = shardRepo.createParentWithShards(taskId, "p:k3", 4);

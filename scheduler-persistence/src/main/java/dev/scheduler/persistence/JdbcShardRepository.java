@@ -47,14 +47,15 @@ public class JdbcShardRepository implements ShardRepository {
       rs.getString("result_payload"));
 
   @Override public Execution createParentWithShards(long taskId, String parentKey, int shardCount) {
-    // 父 execution:创建(状态 DUE,幂等 by parent_key,works on update 兼容多次扫描)
-    Long parentId = jdbc.queryForObject("""
-      INSERT INTO execution (task_id, status, idempotency_key, shard_index, shard_count)
-      VALUES (?, 'DUE', ?, 0, ?)
-      ON CONFLICT (idempotency_key) DO UPDATE SET idempotency_key = EXCLUDED.idempotency_key
-      RETURNING id""", Long.class, taskId, parentKey, shardCount);
-    final long pid = parentId;
-    tx.executeWithoutResult(s -> {
+    // 单事务内:父 execution 创建(状态 DUE,幂等 by parent_key,works on update 兼容多次扫描)、
+    // existing==0 闸、N 个 shard 批量插入 三者原子提交;中途崩溃不留孤儿父/部分 shard。
+    Long parentId = tx.execute(s -> {
+      Long id = jdbc.queryForObject("""
+        INSERT INTO execution (task_id, status, idempotency_key, shard_index, shard_count)
+        VALUES (?, 'DUE', ?, 0, ?)
+        ON CONFLICT (idempotency_key) DO UPDATE SET idempotency_key = EXCLUDED.idempotency_key
+        RETURNING id""", Long.class, taskId, parentKey, shardCount);
+      final long pid = id;
       int existing = jdbc.queryForObject(
           "SELECT count(*) FROM execution_shard WHERE execution_id=?", Integer.class, pid);
       if (existing == 0) { // 首次物化:插入 N 个 shard(幂等:父重复创建不重复插)
@@ -64,8 +65,10 @@ public class JdbcShardRepository implements ShardRepository {
           java.util.stream.IntStream.range(0, shardCount)
               .mapToObj(i -> new Object[]{pid, i}).toList());
       }
+      return id;
     });
-    return findParent(pid).orElseThrow();
+    // 事务提交后回读创建出的父(same return contract as today)
+    return findParent(parentId).orElseThrow();
   }
 
   @Override public Optional<Execution> findParent(long executionId) {
