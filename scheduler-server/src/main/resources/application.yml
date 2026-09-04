@@ -1,0 +1,33 @@
+spring:
+  application:
+    name: scheduler-node
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/scheduler}
+    username: ${DB_USER:scheduler}
+    password: ${DB_PASSWORD:scheduler}
+  flyway:
+    enabled: true
+  task:
+    scheduling:
+      pool:
+        size: 4
+
+scheduler:
+  worker-id: ${SCHEDULER_WORKER_ID:}
+  loop:
+    scan-delay-ms: 5000
+    work-delay-ms: 100
+
+management:
+  prometheus:
+    metrics:
+      export:
+        enabled: true
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+  metrics:
+    export:
+      prometheus:
+        enabled: true

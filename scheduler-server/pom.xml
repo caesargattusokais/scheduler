@@ -9,6 +9,10 @@
     <version>0.1.0-SNAPSHOT</version>
   </parent>
   <artifactId>scheduler-server</artifactId>
+  <properties>
+    <!-- Spring MVC 用反射取 @PathVariable/@RequestParam 名;自定义 parent(非 boot starter parent)未开,显式补上 -->
+    <maven.compiler.parameters>true</maven.compiler.parameters>
+  </properties>
   <dependencies>
     <dependency>
       <groupId>dev.scheduler</groupId>
@@ -28,8 +32,8 @@
       <artifactId>micrometer-registry-prometheus</artifactId>
     </dependency>
     <dependency>
-      <groupId>org.springframework</groupId>
-      <artifactId>spring-jdbc</artifactId>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-jdbc</artifactId>
     </dependency>
     <dependency>
       <groupId>org.springframework.boot</groupId>
@@ -70,6 +74,14 @@
   </dependencies>
   <build>
     <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-compiler-plugin</artifactId>
+        <configuration>
+          <!-- Spring MVC 用反射取 @PathVariable/@RequestParam 名;自定义 parent(非 boot starter parent)未开,显式补上 -->
+          <parameters>true</parameters>
+        </configuration>
+      </plugin>
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-surefire-plugin</artifactId>

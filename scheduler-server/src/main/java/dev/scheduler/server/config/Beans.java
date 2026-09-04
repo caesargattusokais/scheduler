@@ -1,0 +1,172 @@
+package dev.scheduler.server.config;
+
+import dev.scheduler.persistence.ExecutionRepository;
+import dev.scheduler.persistence.JdbcExecutionRepository;
+import dev.scheduler.persistence.JdbcTaskRepository;
+import dev.scheduler.persistence.TaskRepository;
+import dev.scheduler.server.execute.ExecutorWorker;
+import dev.scheduler.server.handler.DemoHandler;
+import dev.scheduler.server.handler.ExecutionHandler;
+import dev.scheduler.server.handler.HandlerRegistry;
+import dev.scheduler.server.handler.MapHandlerRegistry;
+import dev.scheduler.server.leader.AdvisoryLockLeaderElection;
+import dev.scheduler.server.leader.LeaderElection;
+import dev.scheduler.server.trigger.TriggerEngine;
+import io.micrometer.core.instrument.Gauge;
+import io.micrometer.core.instrument.binder.MeterBinder;
+import java.net.InetAddress;
+import java.time.Clock;
+import java.util.List;
+import java.util.function.Supplier;
+import javax.sql.DataSource;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.scheduling.annotation.Scheduled;
+
+/** 装配 Task 1-9 的既有零件为可运行 Bean 集。 */
+@Configuration
+public class Beans {
+  private static final Logger log = LoggerFactory.getLogger(Beans.class);
+
+  @Bean
+  Clock clock() {
+    return Clock.systemUTC();
+  }
+
+  @Bean
+  JdbcTemplate jdbcTemplate(DataSource ds) {
+    return new JdbcTemplate(ds);
+  }
+
+  @Bean
+  TaskRepository taskRepository(JdbcTemplate jdbc) {
+    return new JdbcTaskRepository(jdbc);
+  }
+
+  @Bean
+  ExecutionRepository executionRepository(JdbcTemplate jdbc) {
+    return new JdbcExecutionRepository(jdbc);
+  }
+
+  @Bean
+  ExecutionHandler demoHandler() {
+    return new DemoHandler();
+  }
+
+  /** 收集全部 ExecutionHandler Bean 并路由 task.handlerRef → handler 实例;handler-ref 未注册在派发时暴露。 */
+  @Bean
+  HandlerRegistry handlerRegistry(List<ExecutionHandler> handlers) {
+    List<Supplier<ExecutionHandler>> suppliers = handlers.stream()
+        .map(h -> (Supplier<ExecutionHandler>) () -> h)
+        .toList();
+    return new MapHandlerRegistry(suppliers);
+  }
+
+  /** 会话级 advisory lock 选主;destroyMethod=close 保证停机时释锁并归还专属连接。 */
+  @Bean(destroyMethod = "close")
+  LeaderElection leaderElection(JdbcTemplate jdbc) {
+    return new AdvisoryLockLeaderElection(jdbc);
+  }
+
+  @Bean
+  TriggerEngine triggerEngine(TaskRepository tasks, ExecutionRepository execs,
+                              LeaderElection leader, Clock clock) {
+    return new TriggerEngine(tasks, execs, leader, clock);
+  }
+
+  /** 本节点稳定的执行者标识,流入认领与每次 markStatus(审计"谁做的")。 */
+  @Bean
+  String schedulerWorkerId(@Value("${scheduler.worker-id:}") String configured) {
+    return configured.isBlank() ? defaultWorkerId() : configured;
+  }
+
+  @Bean
+  ExecutorWorker executorWorker(TaskRepository tasks, ExecutionRepository execs,
+                                HandlerRegistry handlers, String schedulerWorkerId) {
+    return new ExecutorWorker(tasks, execs, handlers, schedulerWorkerId);
+  }
+
+  /** 两个核心指标:每任务活跃数总和 + DUE 队列最深年龄;来自真实仓库/DB,不在内存造假。 */
+  @Bean
+  MeterBinder schedulerMetrics(TaskRepository tasks, ExecutionRepository execs, JdbcTemplate jdbc) {
+    return registry -> {
+      Gauge.builder("scheduler_active_runs", () -> totalActiveRuns(tasks, execs)).register(registry);
+      Gauge.builder("scheduler_due_queue_max_age_seconds", () -> dueQueueMaxAgeSeconds(jdbc))
+          .register(registry);
+    };
+  }
+
+  /** 固定周期触发扫描;#5:每 tick 均兜底,DB 抖动只杀一拍不杀调度线程。 */
+  @Bean
+  @ConditionalOnProperty(name = "scheduler.loop.enabled", havingValue = "true", matchIfMissing = true)
+  ScanLoop scanLoop(TriggerEngine engine) {
+    return new ScanLoop(engine);
+  }
+
+  @Bean
+  @ConditionalOnProperty(name = "scheduler.loop.enabled", havingValue = "true", matchIfMissing = true)
+  WorkLoop workLoop(ExecutorWorker worker) {
+    return new WorkLoop(worker);
+  }
+
+  public static final class ScanLoop {
+    private static final Logger log = LoggerFactory.getLogger(ScanLoop.class);
+    private final TriggerEngine engine;
+
+    ScanLoop(TriggerEngine engine) {
+      this.engine = engine;
+    }
+
+    @Scheduled(fixedDelayString = "${scheduler.loop.scan-delay-ms:5000}")
+    public void tick() {
+      try {
+        engine.scanOnce();
+      } catch (Throwable t) {
+        log.warn("trigger scan loop tick failed; continuing next tick", t);
+      }
+    }
+  }
+
+  public static final class WorkLoop {
+    private static final Logger log = LoggerFactory.getLogger(WorkLoop.class);
+    private final ExecutorWorker worker;
+
+    WorkLoop(ExecutorWorker worker) {
+      this.worker = worker;
+    }
+
+    @Scheduled(fixedDelayString = "${scheduler.loop.work-delay-ms:100}")
+    public void tick() {
+      try {
+        worker.workOne();
+      } catch (Throwable t) {
+        log.warn("executor work loop tick failed; continuing next tick", t);
+      }
+    }
+  }
+
+  private static long totalActiveRuns(TaskRepository tasks, ExecutionRepository execs) {
+    return tasks.findAll().stream().mapToLong(t -> execs.countActive(t.id())).sum();
+  }
+
+  private static double dueQueueMaxAgeSeconds(JdbcTemplate jdbc) {
+    Double v = jdbc.queryForObject(
+        "SELECT EXTRACT(EPOCH FROM (now() - COALESCE(MAX(created_at), now())))::float8 "
+            + "FROM execution WHERE status='DUE'", Double.class);
+    return v == null ? 0.0 : v;
+  }
+
+  private static String defaultWorkerId() {
+    try {
+      return System.getProperty("os.name") + ":" + InetAddress.getLocalHost().getHostName();
+    } catch (Throwable t) {
+      log.warn("could not resolve hostname for worker-id, falling back to nano id", t);
+      return "fallback:" + Long.toUnsignedString(System.nanoTime());
+    }
+  }
+}
