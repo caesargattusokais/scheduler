@@ -9,6 +9,8 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import dev.scheduler.core.Shard;
+import dev.scheduler.persistence.ShardRepository;
 import dev.scheduler.server.execute.ExecutorWorker;
 import dev.scheduler.server.handler.ExecutionHandler;
 import dev.scheduler.server.handler.HandlerContext;
@@ -80,6 +82,7 @@ class ApiIntegrationTest {
   @Autowired MockMvc mvc;
   @Autowired ObjectMapper objectMapper;
   @Autowired JdbcTemplate jdbc;
+  @Autowired ShardRepository shards;
   @Autowired TriggerEngine triggerEngine;
   @Autowired ExecutorWorker executorWorker;
   /** 装配的 flaky handler 单例:"flaky" 任务首调抛错、次调成功;@BeforeEach 重装成 failNext 保持确定性。 */
@@ -126,7 +129,8 @@ class ApiIntegrationTest {
 
   @BeforeEach
   void resetDb() {
-    jdbc.execute("TRUNCATE execution, execution_outcome, app_task RESTART IDENTITY CASCADE");
+    jdbc.execute("TRUNCATE execution, execution_outcome, execution_shard, execution_shard_outcome,"
+        + " app_task RESTART IDENTITY CASCADE");
     CLOCK.now = BASE;
     flakyHandler.failNext = true; // 每个用例从"下一调抛错"确定性起步
   }
@@ -203,109 +207,129 @@ class ApiIntegrationTest {
   @Test
   void cancelDue_setsCanceled() throws Exception {
     long id = postTask("cancel-task");
-    MvcResult r = mvc.perform(post("/api/v1/tasks/" + id + "/trigger"))
-        .andExpect(status().isCreated()).andReturn();
-    long execId = objectMapper.readTree(r.getResponse().getContentAsString()).get("id").asLong();
+    long parentId = triggerParent(id); // 触发扇出 → 父(DUE) + 1 DUE shard,无 RUNNING
+    long shardId = shards.findShards(parentId).get(0).id();
 
-    mvc.perform(post("/api/v1/executions/" + execId + "/cancel"))
+    mvc.perform(post("/api/v1/executions/" + parentId + "/cancel"))
         .andExpect(status().isOk())
-        .andExpect(jsonPath("$.status").value("CANCELED"));
+        .andExpect(jsonPath("$.status").value("CANCELED")); // 无 RUNNING → 直取消,派生父 CANCELED
     assertEquals("CANCELED", jdbc.queryForObject(
-        "SELECT status FROM execution WHERE id=?", String.class, execId));
+        "SELECT status FROM execution_shard WHERE id=?", String.class, shardId),
+        "父直取消 → DUE shard 级联编 CANCELED");
+    assertEquals("CANCELED", jdbc.queryForObject(
+        "SELECT status FROM execution WHERE id=?", String.class, parentId));
   }
 
   @Test
   void cancelRunning_setsCancelRequestedFlag_returns202() throws Exception {
     long id = postTask("cancel-running-task");
-    // 直接 SQL 预置 RUNNING:worker 同步跑完 DemoHandler 会立即转 SUCCESS,借 trigger→claim 无法保持
-    // RUNNING 态,故确定性直插 RUNNING 行避免 mid-run 竞态。
-    jdbc.update("""
-        INSERT INTO execution (task_id, status, idempotency_key, shard_count, worker_id, lease_until)
-        VALUES (?, 'RUNNING', 'running-cancel', 1, 'w1', now() + interval '60 seconds')""", id);
-    long execId = jdbc.queryForObject(
-        "SELECT id FROM execution WHERE idempotency_key='running-cancel'", Long.class);
+    long parentId = triggerParent(id); // 父 header 只存 DUE
+    long shardId = shards.findShards(parentId).get(0).id();
+    // 确定性直插 RUNNING shard(父保持 DUE header):有 RUNNING 片 → 协作取消。
+    jdbc.update("UPDATE execution_shard SET status='RUNNING', worker_id='w1',"
+        + " lease_until=now() + interval '60 seconds' WHERE id=?", shardId);
 
-    mvc.perform(post("/api/v1/executions/" + execId + "/cancel"))
+    mvc.perform(post("/api/v1/executions/" + parentId + "/cancel"))
         .andExpect(status().isAccepted())
-        .andExpect(jsonPath("$.status").value("RUNNING")); // 202 返回现态,取消请求非状态迁移
+        .andExpect(jsonPath("$.status").value("RUNNING")); // 派生:父 DUE + ≥1 RUNNING shard → 读作 RUNNING
     assertEquals(Boolean.TRUE, jdbc.queryForObject(
-        "SELECT cancel_requested FROM execution WHERE id=?", Boolean.class, execId),
-        "RUNNING → cancel 置 cancel_requested=true,供 worker 协作退出");
+        "SELECT cancel_requested FROM execution_shard WHERE id=?", Boolean.class, shardId),
+        "RUNNING shard → cancel 置 cancel_requested=true,供 worker 协作退出");
   }
 
   @Test
   void cancelSuccess_returnsConflict() throws Exception {
     long id = postTask("cancel-success-task");
-    jdbc.update("""
-        INSERT INTO execution (task_id, status, idempotency_key, shard_count, worker_id, finished_at)
-        VALUES (?, 'SUCCESS', 'success-cancel', 1, 'w1', now())""", id);
-    long execId = jdbc.queryForObject(
-        "SELECT id FROM execution WHERE idempotency_key='success-cancel'", Long.class);
+    long parentId = shards.createParentWithShards(id, "succ-p:" + System.nanoTime(), 1).id();
+    // 预置父 header 终态 SUCCESS(父只经汇聚 DUE → 终态;自此不可取消)。
+    jdbc.update("UPDATE execution SET status='SUCCESS', worker_id='w1', finished_at=now() WHERE id=?",
+        parentId);
 
-    mvc.perform(post("/api/v1/executions/" + execId + "/cancel"))
-        .andExpect(status().isConflict()); // 终态不可取消
+    mvc.perform(post("/api/v1/executions/" + parentId + "/cancel"))
+        .andExpect(status().isConflict()); // 终态父不可取消
   }
 
   @Test
   void dlqGetAndRequeue_roundTrip() throws Exception {
     long id = postTask("dlq-task");
-    long execId = seedDeadLetter(id);
+    Shard dlq = seedDeadLetter(id); // 建父 + 1 FAILED dead_letter shard
+    long shardId = dlq.id();
 
-    // GET /dlq → 含该死信
+    // GET /dlq → 含该死信 shard(status FAILED,带父 id + shard_index)
     mvc.perform(get("/api/v1/executions/dlq"))
         .andExpect(status().isOk())
-        .andExpect(jsonPath("$[*].id", hasItem((int) execId)))
-        .andExpect(jsonPath("$[?(@.id == " + execId + ")].status").value("FAILED"));
+        .andExpect(jsonPath("$[*].id", hasItem((int) shardId)))
+        .andExpect(jsonPath("$[0].status").value("FAILED"))
+        .andExpect(jsonPath("$[0].executionId").value(dlq.executionId().intValue()));
 
-    // POST /requeue → 200 + 现态(DUE, attempt=0)
-    mvc.perform(post("/api/v1/executions/" + execId + "/requeue"))
+    // POST /shards/{id}/requeue → 200 + 现态(DUE, attempt=0)
+    mvc.perform(post("/api/v1/executions/shards/" + shardId + "/requeue"))
         .andExpect(status().isOk())
-        .andExpect(jsonPath("$.id").value((int) execId))
+        .andExpect(jsonPath("$.id").value((int) shardId))
         .andExpect(jsonPath("$.status").value("DUE"));
     assertEquals(0, jdbc.queryForObject(
-        "SELECT attempt FROM execution WHERE id=?", Integer.class, execId));
+        "SELECT attempt FROM execution_shard WHERE id=?", Integer.class, shardId));
     assertEquals(Boolean.FALSE, jdbc.queryForObject(
-        "SELECT dead_letter FROM execution WHERE id=?", Boolean.class, execId));
+        "SELECT dead_letter FROM execution_shard WHERE id=?", Boolean.class, shardId));
 
     // GET /dlq → 不再含它
     mvc.perform(get("/api/v1/executions/dlq"))
         .andExpect(status().isOk())
         .andExpect(result -> assertTrue(
             !new String(result.getResponse().getContentAsByteArray())
-                .contains("\"id\":" + execId),
-            "requeue 后该执行不应再出现在 /dlq"));
+                .contains("\"id\":" + shardId),
+            "requeue 后该 shard 不应再出现在 /dlq"));
     assertEquals(0, jdbc.queryForObject(
-        "SELECT count(*) FROM execution WHERE id=? AND status='FAILED' AND dead_letter",
-        Integer.class, execId),
-        "requeue 后该行不再是死信");
+        "SELECT count(*) FROM execution_shard WHERE id=? AND status='FAILED' AND dead_letter",
+        Integer.class, shardId),
+        "requeue 后该 shard 不再是死信");
 
-    // workOne 可成功跑(该执行认证后允许签名,Worker 再把 DUE → SUCCESS)
+    // workOne 可成功跑(requeue 后该 shard DUE 被认领 → shard SUCCESS)
     boolean processed = executorWorker.workOne();
-    assertTrue(processed, "requeued execution should be claimable by the worker");
+    assertTrue(processed, "requeued shard should be claimable by the worker");
     assertEquals("SUCCESS", jdbc.queryForObject(
-        "SELECT status FROM execution WHERE id=?", String.class, execId));
+        "SELECT status FROM execution_shard WHERE id=?", String.class, shardId));
   }
 
   @Test
   void requeueNonFailed_returnsConflict() throws Exception {
     long id = postTask("requeue-conflict-task");
-    jdbc.update("""
-        INSERT INTO execution (task_id, status, idempotency_key, shard_count, worker_id, finished_at)
-        VALUES (?, 'SUCCESS', 'success-requeue', 1, 'w1', now())""", id);
-    long execId = jdbc.queryForObject(
-        "SELECT id FROM execution WHERE idempotency_key='success-requeue'", Long.class);
+    long parentId = shards.createParentWithShards(id, "req-p:" + System.nanoTime(), 1).id();
+    long shardId = shards.findShards(parentId).get(0).id();
+    jdbc.update("UPDATE execution_shard SET status='SUCCESS' WHERE id=?", shardId);
 
-    mvc.perform(post("/api/v1/executions/" + execId + "/requeue"))
+    mvc.perform(post("/api/v1/executions/shards/" + shardId + "/requeue"))
         .andExpect(status().isConflict());
     assertEquals("SUCCESS", jdbc.queryForObject(
-        "SELECT status FROM execution WHERE id=?", String.class, execId),
+        "SELECT status FROM execution_shard WHERE id=?", String.class, shardId),
         "非 FAILED 的 requeue 不得改动行");
   }
 
   @Test
-  void requeueMissingExecution_returnsNotFound() throws Exception {
-    mvc.perform(post("/api/v1/executions/999999/requeue"))
+  void requeueMissingShard_returnsNotFound() throws Exception {
+    mvc.perform(post("/api/v1/executions/shards/999999/requeue"))
         .andExpect(status().isNotFound());
+  }
+
+  /** 详情 = 父 header + 其 shard,派生父 status(非终态父 + RUNNING shard → 读作 RUNNING),且只读不写库。 */
+  @Test
+  void getExecutionDetail_returnsParentAndShards_withDerivedRunningStatus() throws Exception {
+    long id = postTask("detail-task");
+    long parentId = triggerParent(id);
+    long shardId = shards.findShards(parentId).get(0).id();
+    // 预置 1 RUNNING shard → 派生父 RUNNING(父 header 只存 DUE)
+    jdbc.update("UPDATE execution_shard SET status='RUNNING', worker_id='w1',"
+        + " lease_until=now() + interval '60 seconds' WHERE id=?", shardId);
+
+    mvc.perform(get("/api/v1/executions/" + parentId))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.id").value((int) parentId))
+        .andExpect(jsonPath("$.status").value("RUNNING")) // 派生:父 DUE + RUNNING shard
+        .andExpect(jsonPath("$.shardCount").value(1))
+        .andExpect(jsonPath("$.shards.length()").value(1));
+    assertEquals("DUE", jdbc.queryForObject(
+        "SELECT status FROM execution WHERE id=?", String.class, parentId),
+        "派生 RUNNING 仅读取映射,不写库:父仍存 DUE header");
   }
 
   /** M2 重试闭环(DB 时钟控闸):flaky 首调抛错 → 重试落 DUE + next_retry_at;拨后 gate 排除,调回过去重现。 */
@@ -376,34 +400,40 @@ class ApiIntegrationTest {
   @Test
   void workerReclaimsCancelRequestedDue_asCanceled() throws Exception {
     long id = postTask("cancel-coop-task"); // handlerRef=demo 即可,取消发生在运行 handler 之前
-    MvcResult r = mvc.perform(post("/api/v1/tasks/" + id + "/trigger"))
-        .andExpect(status().isCreated()).andReturn();
-    long execId = objectMapper.readTree(r.getResponse().getContentAsString()).get("id").asLong();
+    long parentId = triggerParent(id);
+    long shardId = shards.findShards(parentId).get(0).id();
 
-    // 直接 DB 置 cancel_requested:API 的 requestCancel 仅 RUNNING 生效(已另有端到端用例),此处模拟"已请求取消"
-    // 的 DUE 行,使 workOne 认领后运行前检查命中。
-    jdbc.update("UPDATE execution SET cancel_requested=true WHERE id=?", execId);
+    // 直接 DB 在 DUE shard 上置 cancel_requested:没有 RUNNING 兄弟可被 API requestCancel 置位(已另有
+    // cancelRunning_* 端到端用例),此处模拟"已请求取消"的 DUE shard,使 workOne 认领后运行前检查命中。
+    jdbc.update("UPDATE execution_shard SET cancel_requested=true WHERE id=?", shardId);
 
-    assertTrue(executorWorker.workOne(), "带上 cancel_requested 的 DUE 候选应被认领(运行前取消也属处理)");
-    assertEquals("CANCELED", jdbc.queryForObject("SELECT status FROM execution WHERE id=?", String.class, execId),
-        "运行前检查命中取消请求 → CANCELED(cancelled before run)");
+    assertTrue(executorWorker.workOne(), "带 cancel_requested 的 DUE shard 候选应被认领(运行前取消也属处理)");
+    assertEquals("CANCELED", jdbc.queryForObject(
+        "SELECT status FROM execution_shard WHERE id=?", String.class, shardId),
+        "运行前检查命中取消请求 → shard CANCELED(cancelled before run)");
+    assertEquals("DUE", jdbc.queryForObject(
+        "SELECT status FROM execution WHERE id=?", String.class, parentId),
+        "worker 只写 shard,父 header 保持 DUE");
     assertTrue(jdbc.queryForObject(
-        "SELECT count(*) FROM execution_outcome WHERE execution_id=? AND status='CANCELED'",
-        Long.class, execId) > 0, "协作取消必须落 CANCELED outcome");
+        "SELECT count(*) FROM execution_shard_outcome WHERE shard_id=? AND status='CANCELED'",
+        Long.class, shardId) > 0, "协作取消必须在 shard 落 CANCELED outcome");
   }
 
-  /** 确定性预置一条死信:task 需 max_retries=0 才会 FAILED 即死信。用直插 SELECT-employee 行再置标记。 */
-  private long seedDeadLetter(long taskId) {
-    long execId = jdbc.queryForObject(
-        "INSERT INTO execution (task_id, status, idempotency_key, shard_count, worker_id) "
-            + "VALUES (?, 'FAILED', ?, 1, 'w1') RETURNING id",
-        Long.class, taskId, "dlq-" + execIdKey(taskId));
-    jdbc.update("UPDATE execution SET dead_letter=true WHERE id=?", execId);
-    return execId;
+  /** 触发一次任务(扇出 → 父 header + N 个 DUE shard,shard_count 默认 1),返回父 execution id。 */
+  private long triggerParent(long taskId) throws Exception {
+    MvcResult r = mvc.perform(post("/api/v1/tasks/" + taskId + "/trigger"))
+        .andExpect(status().isCreated()).andReturn();
+    return objectMapper.readTree(r.getResponse().getContentAsString()).get("id").asLong();
   }
 
-  private String execIdKey(long taskId) {
-    return "dlq-key-" + taskId;
+  /** 确定性预置一条死信 shard:建父 + 1 DUE shard(经 createParentWithShards 单事务),再直改 FAILED + dead_letter。
+   *  返回该 shard(带 executionId/父 id)。邻类 ExecutorWorkerTest/ReconcilerTest 用同法(JdbcShardRepository + SQL 变更器)。 */
+  private Shard seedDeadLetter(long taskId) {
+    long parentId = shards.createParentWithShards(taskId, "dlq-p:" + System.nanoTime(), 1).id();
+    long sid = shards.findShards(parentId).get(0).id();
+    jdbc.update("UPDATE execution_shard SET status='FAILED' WHERE id=?", sid);
+    jdbc.update("UPDATE execution_shard SET dead_letter=true WHERE id=?", sid);
+    return shards.findShard(sid).orElseThrow();
   }
 
   private long postTask(String name) throws Exception {

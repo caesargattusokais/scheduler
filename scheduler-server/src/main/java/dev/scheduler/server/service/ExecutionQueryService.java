@@ -2,22 +2,27 @@ package dev.scheduler.server.service;
 
 import dev.scheduler.core.Execution;
 import dev.scheduler.core.ExecutionStatus;
+import dev.scheduler.core.Shard;
 import dev.scheduler.persistence.ExecutionRepository;
+import dev.scheduler.persistence.ShardRepository;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
 
-/** 执行读取服务:承载 GET /executions 的原生 SQL 查询与行映射。只读,无行为改动(自 ExecutionController 单点迁出)。 */
+/** 执行读取服务:承载 GET /executions 的原生 SQL 查询与行映射,以及详情(父 header + 其 shard)。只读,无行为改动。 */
 public class ExecutionQueryService {
 
   private final JdbcTemplate jdbc;
   private final ExecutionRepository executions;
+  private final ShardRepository shards;
 
-  public ExecutionQueryService(JdbcTemplate jdbc, ExecutionRepository executions) {
+  public ExecutionQueryService(JdbcTemplate jdbc, ExecutionRepository executions,
+                               ShardRepository shards) {
     this.jdbc = jdbc;
     this.executions = executions;
+    this.shards = shards;
   }
 
   private static final RowMapper<Execution> ROW = (rs, i) -> new Execution(
@@ -47,8 +52,21 @@ public class ExecutionQueryService {
     return jdbc.query(sql.toString(), ROW, args.toArray());
   }
 
-  /** 执行详情。委托仓储单一来源 findById,不新增第二条查询。 */
-  public Optional<Execution> get(long id) {
-    return executions.findById(id);
+  /** 派生控制面展示的父 status:父非终态(DUE/RUNNING)且 ≥1 RUNNING shard → 读作 RUNNING。读取只映射,不写库。 */
+  public static ExecutionStatus deriveStatus(Execution parent, List<Shard> shards) {
+    ExecutionStatus s = parent.status();
+    if ((s == ExecutionStatus.DUE || s == ExecutionStatus.RUNNING)
+        && shards.stream().anyMatch(sh -> sh.status() == ExecutionStatus.RUNNING)) {
+      return ExecutionStatus.RUNNING;
+    }
+    return s;
+  }
+
+  /** 执行详情:父 header + 其全部分片(按 shard_index 升序)。展示的父 status 为派生值,DB 中父仍存原值。 */
+  public Optional<ExecutionDetail> getDetail(long id) {
+    return executions.findById(id).map(parent -> {
+      List<Shard> ss = shards.findShards(id);
+      return new ExecutionDetail(id, parent.taskId(), deriveStatus(parent, ss), ss.size(), ss);
+    });
   }
 }

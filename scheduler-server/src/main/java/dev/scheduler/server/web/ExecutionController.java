@@ -2,7 +2,10 @@ package dev.scheduler.server.web;
 
 import dev.scheduler.core.Execution;
 import dev.scheduler.core.ExecutionStatus;
+import dev.scheduler.core.Shard;
 import dev.scheduler.persistence.ExecutionRepository;
+import dev.scheduler.persistence.ShardRepository;
+import dev.scheduler.server.service.ExecutionDetail;
 import dev.scheduler.server.service.ExecutionQueryService;
 import java.util.List;
 import org.springframework.http.HttpStatus;
@@ -16,20 +19,23 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.server.ResponseStatusException;
 
-/** 执行控制面(spec §5.1):列表/详情/取消。取消:DUE 直接转 CANCELED;RUNNING 置 cancel_requested
- *  协作取消(返回 202);终态(SUCCESS/FAILED)不可取消(409)。 */
+/** 执行控制面(spec §5.1):列表/详情/取消/死信。
+ *  M3 真正认领/运行单元是 execution_shard;父 execution 为 header(只存 DUE→终态,controller 从不写其 RUNNING)。
+ *  取消:父级联(仍有 RUNNING shard → 协作取消 202,否则直取消 200);详情派生父 status(RUNNING);
+ *  DLQ 列 shard;/shards/{id}/requeue 重排死信 shard(execution 级 requeue 已随 M3 移除)。 */
 @RestController
 @RequestMapping("/api/v1/executions")
 public class ExecutionController {
 
   private final ExecutionRepository executions;
+  private final ShardRepository shards;
   private final ExecutionQueryService queryService;
-  private final String workerId;
 
-  public ExecutionController(ExecutionRepository executions, JdbcTemplate jdbc, String schedulerWorkerId) {
+  public ExecutionController(ExecutionRepository executions, ShardRepository shards,
+                             JdbcTemplate jdbc) {
     this.executions = executions;
-    this.queryService = new ExecutionQueryService(jdbc, executions);
-    this.workerId = schedulerWorkerId;
+    this.shards = shards;
+    this.queryService = new ExecutionQueryService(jdbc, executions, shards);
   }
 
   @GetMapping
@@ -38,39 +44,43 @@ public class ExecutionController {
     return queryService.list(taskId, status);
   }
 
+  /** 详情:父 header + 其分片;展示的父 status 为派生值(非终态父且含 RUNNING shard → 读作 RUNNING)。 */
   @GetMapping("/{id}")
-  public Execution get(@PathVariable long id) {
-    return queryService.get(id).orElseThrow(() -> notFound("execution " + id));
+  public ExecutionDetail get(@PathVariable long id) {
+    return queryService.getDetail(id).orElseThrow(() -> notFound("execution " + id));
   }
 
-  /** DLQ 列表:FAILED 且已置 dead_letter 标记的执行,按 id 升序;空 → 200 []。 */
+  /** DLQ 列表:FAILED 且已标 dead_letter 标记的分片,按 id 升序;空 → 200 []。 */
   @GetMapping("/dlq")
-  public List<Execution> dlq() {
-    return executions.findDeadLetters();
+  public List<Shard> dlq() {
+    return shards.findDeathLetterShards();
   }
 
   /**
-   * DLQ 手动重新入队:FAILED → DUE 复位 attempt=0/next_retry_at=NULL/dead_letter=false,返回 200 + 现态。
-   * 行不存在 → 404;存在但已非 FAILED → 409。
+   * 死信分片手动重新入队:FAILED shard → DUE 复位 attempt=0/next_retry_at=NULL/dead_letter=false,返回 200 + 现态。
+   * 分片不存在 → 404;存在但已非 FAILED → 409。
    */
-  @PostMapping("/{id}/requeue")
-  public ResponseEntity<Execution> requeue(@PathVariable long id) {
-    Execution e = executions.findById(id).orElseThrow(() -> notFound("execution " + id));
-    if (e.status() != ExecutionStatus.FAILED) {
+  @PostMapping("/shards/{shardId}/requeue")
+  public ResponseEntity<Shard> requeue(@PathVariable long shardId) {
+    Shard s = shards.findShard(shardId).orElseThrow(() -> notFound("shard " + shardId));
+    if (s.status() != ExecutionStatus.FAILED) {
       throw new ResponseStatusException(HttpStatus.CONFLICT,
-          "execution " + id + " is " + e.status() + " and cannot be requeued (only FAILED can)");
+          "shard " + shardId + " is " + s.status() + " and cannot be requeued (only FAILED can)");
     }
-    executions.requeue(id);
-    return ResponseEntity.ok(executions.findById(id).orElseThrow(() -> notFound("execution " + id)));
+    shards.requeueShard(shardId);
+    return ResponseEntity.ok(
+        shards.findShard(shardId).orElseThrow(() -> notFound("shard " + shardId)));
   }
 
   /**
-   * 取消 execution:
+   * 父级级联取消(header 语义,父只在 DUE↔终态):
    * <ul>
-   *   <li>DUE → 直接转 CANCELED,返回 200。</li>
-   *   <li>RUNNING → 置 cancel_requested 协作取消(不动状态,由 worker 经 token 协作退出),返回 202 + 现态。</li>
    *   <li>已 CANCELED → 幂等 200。</li>
-   *   <li>其他终态(SUCCESS/FAILED)→ 409,不可取消。</li>
+   *   <li>终态(SUCCESS/FAILED)→ 409,不可取消。</li>
+   *   <li>父非终态(DUE):仍有 RUNNING shard → {@code requestCancelParent} 协作取消(置位 RUNNING 片、
+   *       DUE 片编 CANCELED、父置 cancel_requested),返回 202 + 派生现态(父 DUE + RUNNING 片 → 读作 RUNNING);
+   *       否则 → {@code cancelParentImmediate} 直取消(父 → CANCELED,全部非终态片 → CANCELED),
+   *       返回 200 + 派生现态(CANCELED)。</li>
    * </ul>
    */
   @PostMapping("/{id}/cancel")
@@ -79,18 +89,27 @@ public class ExecutionController {
     if (e.status() == ExecutionStatus.CANCELED) {
       return ResponseEntity.ok(e); // 幂等:已取消
     }
-    if (e.status() == ExecutionStatus.DUE) {
-      executions.markStatus(id, ExecutionStatus.CANCELED, workerId, "cancel via api");
-      return ResponseEntity.ok(executions.findById(id).orElseThrow(() -> notFound("execution " + id)));
+    if (e.status() != ExecutionStatus.DUE) {
+      throw new ResponseStatusException(HttpStatus.CONFLICT,
+          "execution " + id + " is " + e.status() + " and cannot be cancelled (only DUE can)");
     }
-    if (e.status() == ExecutionStatus.RUNNING) {
-      // 协作取消:仅置 cancel_requested 标志(真实转 CANCELED 由 worker 落),返回 202 + 现态。
-      executions.requestCancel(id);
-      return ResponseEntity.accepted()
-          .body(executions.findById(id).orElseThrow(() -> notFound("execution " + id)));
+    if (shards.hasRunningShard(id)) {
+      shards.requestCancelParent(id); // 有 RUNNING 片 → 协作取消
+      return ResponseEntity.accepted().body(derived(id));
     }
-    throw new ResponseStatusException(HttpStatus.CONFLICT,
-        "execution " + id + " is " + e.status() + " and cannot be cancelled (only DUE or RUNNING can)");
+    shards.cancelParentImmediate(id); // 无 RUNNING 片 → 直取消(父 → CANCELED)
+    return ResponseEntity.ok(derived(id));
+  }
+
+  /** 由当前父行 + 其分片派生控制面展示的父 status(读取只映射,不写库)。 */
+  private Execution derived(long id) {
+    Execution parent = executions.findById(id).orElseThrow(() -> notFound("execution " + id));
+    List<Shard> ss = shards.findShards(id);
+    return new Execution(parent.id(), parent.taskId(),
+        ExecutionQueryService.deriveStatus(parent, ss),
+        parent.idempotencyKey(), parent.args(), parent.shardIndex(), parent.shardCount(),
+        parent.attempt(), parent.workerId(), parent.leaseUntil(), parent.nextRetryAt(),
+        parent.startedAt(), parent.finishedAt(), parent.resultPayload());
   }
 
   private static ResponseStatusException notFound(String what) {
