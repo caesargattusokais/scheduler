@@ -66,6 +66,27 @@ public class ExecutionController {
     return executions.findById(id).orElseThrow(() -> notFound("execution " + id));
   }
 
+  /** DLQ 列表:FAILED 且已置 dead_letter 标记的执行,按 id 升序;空 → 200 []。 */
+  @GetMapping("/dlq")
+  public List<Execution> dlq() {
+    return executions.findDeadLetters();
+  }
+
+  /**
+   * DLQ 手动重新入队:FAILED → DUE 复位 attempt=0/next_retry_at=NULL/dead_letter=false,返回 200 + 现态。
+   * 行不存在 → 404;存在但已非 FAILED → 409。
+   */
+  @PostMapping("/{id}/requeue")
+  public ResponseEntity<Execution> requeue(@PathVariable long id) {
+    Execution e = executions.findById(id).orElseThrow(() -> notFound("execution " + id));
+    if (e.status() != ExecutionStatus.FAILED) {
+      throw new ResponseStatusException(HttpStatus.CONFLICT,
+          "execution " + id + " is " + e.status() + " and cannot be requeued (only FAILED can)");
+    }
+    executions.requeue(id);
+    return ResponseEntity.ok(executions.findById(id).orElseThrow(() -> notFound("execution " + id)));
+  }
+
   /**
    * 取消 execution:
    * <ul>

@@ -239,4 +239,53 @@ class JdbcExecutionRepositoryTest extends AbstractPostgresTest {
   private boolean cancelRequestedViaRepo(long executionId) {
     return execRepo.isCancelRequested(executionId);
   }
+
+  @Test void findDeadLettersReturnsOnlyFailedAndDeadLetter_orderedById() {
+    long taskId = newTask(8);
+    // FAILED+dead_letter(应返回)
+    long dead = failedExecution(8, "t16:k1");
+    execRepo.markDeadLetter(dead, "unrecoverable");
+    // FAILED 未置标记(不应返回)
+    long plain = failedExecution(8, "t16:k2");
+    // SUCCESS 终态(不应返回)
+    long success = execRepo.createDue(ofDue(taskId, "t16:k3"));
+    execRepo.claim(success, taskId, "w1", Instant.now().plusSeconds(60), 8);
+    execRepo.markStatus(success, ExecutionStatus.SUCCESS, "w1", "done");
+
+    var dlq = execRepo.findDeadLetters();
+
+    assertEquals(1, dlq.size(), "only the FAILED+dead_letter row is a dead letter");
+    assertEquals(dead, dlq.get(0).id());
+  }
+
+  @Test void requeueMovesFailedDeadLetterToDue_resetAndOutcome() {
+    long id = failedExecution(8, "t17:k1"); // attempt=1 after claim
+    execRepo.markDeadLetter(id, "unrecoverable");
+
+    assertTrue(execRepo.requeue(id));
+
+    Execution e = execRepo.findById(id).get();
+    assertEquals(ExecutionStatus.DUE, e.status());
+    assertEquals(0, e.attempt(), "requeue must reset attempt to 0");
+    assertNull(e.nextRetryAt(), "requeue must clear next_retry_at");
+    assertFalse(deadLetter(id), "requeue must clear dead_letter marker");
+    Integer dueOutcomes = jdbc.queryForObject(
+        "SELECT count(*) FROM execution_outcome WHERE execution_id=? AND status='DUE' AND detail='requeue'",
+        Integer.class, id);
+    assertEquals(1, dueOutcomes, "requeue must append a DUE outcome with detail='requeue'");
+  }
+
+  @Test void requeueOnNonFailedReturnsFalse_noChangeNoOutcome() {
+    long id = failedExecution(8, "t18:k1");
+    execRepo.markDeadLetter(id, "unrecoverable");
+    execRepo.requeue(id); // 先成功入队到 DUE
+    int outcomesBefore = outcomes(id);
+
+    assertFalse(execRepo.requeue(id), "a DUE (non-FAILED) row must not be requeueable");
+
+    assertEquals(ExecutionStatus.DUE, execRepo.findById(id).get().status(),
+        "row must be unchanged after failed requeue");
+    assertEquals(0, execRepo.findById(id).get().attempt());
+    assertEquals(outcomesBefore, outcomes(id), "CAS 0 rows: no extra outcome");
+  }
 }

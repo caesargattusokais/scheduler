@@ -159,4 +159,29 @@ public class JdbcExecutionRepository implements ExecutionRepository {
         Boolean.class, id);
     return b != null && b;
   }
+
+  @Override public List<Execution> findDeadLetters() {
+    // DLQ 读取:FAILED 且已置 dead_letter 标记,按 id 升序。
+    return jdbc.query(
+        "SELECT * FROM execution WHERE status='FAILED' AND dead_letter ORDER BY id", MAP);
+  }
+
+  @Override public boolean requeue(long id) {
+    // 手动重新入队:FAILD → DUE,复位 attempt/next_retry_at/dead_letter。dead_letter 仅是标记非闸门,
+    // CAS 只 on status='FAILED':0 行=已非 FAILED(竞态/终态)时视为丢失,静默返回 false,不落误导性 outcome。
+    final boolean[] ok = {false};
+    tx.executeWithoutResult(s -> {
+      int updated = jdbc.update(
+          "UPDATE execution SET status='DUE', attempt=0, next_retry_at=NULL, dead_letter=false "
+              + "WHERE id=? AND status='FAILED'", id);
+      if (updated == 0) {
+        log.debug("requeue lost CAS race: execution {} no longer FAILED; suppressing outcome", id);
+        return;
+      }
+      jdbc.update("INSERT INTO execution_outcome (execution_id, status, detail) VALUES (?,?,?)",
+          id, "DUE", "requeue");
+      ok[0] = true;
+    });
+    return ok[0];
+  }
 }

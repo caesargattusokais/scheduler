@@ -26,6 +26,14 @@ public interface ExecutionRepository {
   /** worker 轮询该行是否已被请求取消;列默认 false。 */
   boolean isCancelRequested(long id);
 
+  /** DLQ 读取:只返回 FAILED 且已标记 dead_letter 的执行,按 id 升序。 */
+  List<Execution> findDeadLetters();
+
+  /** DLQ 手动重新入队:FAILD → DUE 复位 attempt=0/next_retry_at=NULL/dead_letter=false,同事务落
+   *  DUE(detail='requeue') outcome。CAS on status='FAILED':0 行=已非 FAILED(竞态/终态)时静默返回
+   *  false,不落误导性 outcome。 */
+  boolean requeue(long id);
+
   /** 某任务下租约已过期(lease_until <= DB now)且仍 RUNNING 的孤儿执行;由 Reconciler 逐任务回收。 */
   List<ExpiredRun> findExpiredRunning(long taskId);
 }

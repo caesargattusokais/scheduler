@@ -234,6 +234,82 @@ class ApiIntegrationTest {
         .andExpect(status().isConflict()); // 终态不可取消
   }
 
+  @Test
+  void dlqGetAndRequeue_roundTrip() throws Exception {
+    long id = postTask("dlq-task");
+    long execId = seedDeadLetter(id);
+
+    // GET /dlq → 含该死信
+    mvc.perform(get("/api/v1/executions/dlq"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$[*].id", hasItem((int) execId)))
+        .andExpect(jsonPath("$[?(@.id == " + execId + ")].status").value("FAILED"));
+
+    // POST /requeue → 200 + 现态(DUE, attempt=0)
+    mvc.perform(post("/api/v1/executions/" + execId + "/requeue"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.id").value((int) execId))
+        .andExpect(jsonPath("$.status").value("DUE"));
+    assertEquals(0, jdbc.queryForObject(
+        "SELECT attempt FROM execution WHERE id=?", Integer.class, execId));
+    assertEquals(Boolean.FALSE, jdbc.queryForObject(
+        "SELECT dead_letter FROM execution WHERE id=?", Boolean.class, execId));
+
+    // GET /dlq → 不再含它
+    mvc.perform(get("/api/v1/executions/dlq"))
+        .andExpect(status().isOk())
+        .andExpect(result -> assertTrue(
+            !new String(result.getResponse().getContentAsByteArray())
+                .contains("\"id\":" + execId),
+            "requeue 后该执行不应再出现在 /dlq"));
+    assertEquals(0, jdbc.queryForObject(
+        "SELECT count(*) FROM execution WHERE id=? AND status='FAILED' AND dead_letter",
+        Integer.class, execId),
+        "requeue 后该行不再是死信");
+
+    // workOne 可成功跑(该执行认证后允许签名,Worker 再把 DUE → SUCCESS)
+    boolean processed = executorWorker.workOne();
+    assertTrue(processed, "requeued execution should be claimable by the worker");
+    assertEquals("SUCCESS", jdbc.queryForObject(
+        "SELECT status FROM execution WHERE id=?", String.class, execId));
+  }
+
+  @Test
+  void requeueNonFailed_returnsConflict() throws Exception {
+    long id = postTask("requeue-conflict-task");
+    jdbc.update("""
+        INSERT INTO execution (task_id, status, idempotency_key, shard_count, worker_id, finished_at)
+        VALUES (?, 'SUCCESS', 'success-requeue', 1, 'w1', now())""", id);
+    long execId = jdbc.queryForObject(
+        "SELECT id FROM execution WHERE idempotency_key='success-requeue'", Long.class);
+
+    mvc.perform(post("/api/v1/executions/" + execId + "/requeue"))
+        .andExpect(status().isConflict());
+    assertEquals("SUCCESS", jdbc.queryForObject(
+        "SELECT status FROM execution WHERE id=?", String.class, execId),
+        "非 FAILED 的 requeue 不得改动行");
+  }
+
+  @Test
+  void requeueMissingExecution_returnsNotFound() throws Exception {
+    mvc.perform(post("/api/v1/executions/999999/requeue"))
+        .andExpect(status().isNotFound());
+  }
+
+  /** 确定性预置一条死信:task 需 max_retries=0 才会 FAILED 即死信。用直插 SELECT-employee 行再置标记。 */
+  private long seedDeadLetter(long taskId) {
+    long execId = jdbc.queryForObject(
+        "INSERT INTO execution (task_id, status, idempotency_key, shard_count, worker_id) "
+            + "VALUES (?, 'FAILED', ?, 1, 'w1') RETURNING id",
+        Long.class, taskId, "dlq-" + execIdKey(taskId));
+    jdbc.update("UPDATE execution SET dead_letter=true WHERE id=?", execId);
+    return execId;
+  }
+
+  private String execIdKey(long taskId) {
+    return "dlq-key-" + taskId;
+  }
+
   private long postTask(String name) throws Exception {
     String body = "{\"name\":\"" + name + "\",\"kind\":\"cron\",\"handlerRef\":\"demo\","
         + "\"cron\":\"" + CRON + "\",\"maxActiveConcurrent\":1}";
