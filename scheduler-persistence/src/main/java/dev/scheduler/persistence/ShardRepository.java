@@ -57,4 +57,35 @@ public interface ShardRepository {
 
   /** worker 轮询该 shard 是否已被请求取消;列默认 false。 */
   boolean isCancelRequested(long shardId);
+
+  // ---- Task 3:父汇聚 + FAIL_FAST + 父取消 + DLQ/requeue ----
+
+  /** 待汇聚的父 execution id 列表:父仍 DUE(未终态)且 ≥1 个 shard 已终态(SUCCESS/FAILED/CANCELED)。
+   *  由对账器扫描,依兄弟终态结果决定父级终态。 */
+  List<Long> parentsNeedingAggregation();
+
+  /** 父级终态汇聚:父 CAS on status='DUE'(父只 DUE→终态,从不存 RUNNING),成功后同事务落父 execution_outcome。
+   *  0 行 CAS=父已被他方终态/已推进 → 幂等返回 false,不落误导性 outcome。 */
+  boolean finalizeParent(long parentId, ExecutionStatus terminal, String detail);
+
+  /** FAIL_FAST:兄弟分片失败后,将同父的 RUNNING 兄弟置协作取消信号、DUE 兄弟直接编 CANCELED(+outcome)。
+   *  单事务;以触发失败片 shardId 界定"兄弟"(排除自身)。 */
+  void cancelSiblings(long shardId, String detail);
+
+  /** DUE 父协作取消请求:置位 RUNNING shard 的 cancel_requested、DUE shard 直编 CANCELED(+outcome)、
+   *  父置 cancel_requested。返回事务后是否仍有 RUNNING shard(即是否有 RUNNING 片被置信号)。 */
+  boolean requestCancelParent(long parentId);
+
+  /** DUE 父直取消:RUNNING/DUE 的 shard 全编 CANCELED(+outcome),父置 CANCELED(终态)+outcome。 */
+  void cancelParentImmediate(long parentId);
+
+  /** 该父下是否仍有 RUNNING shard。 */
+  boolean hasRunningShard(long parentId);
+
+  /** DLQ 读:FAILED 且已标 dead_letter 的分片,按 id 升序。 */
+  List<Shard> findDeathLetterShards();
+
+  /** 死信分片重排回队:FAILED → DUE 并重置 attempt/next_retry_at/dead_letter(+DUE outcome)。CAS on status='FAILED':
+   *  0 行=竞态/非 FAILED → 返回 false。 */
+  boolean requeueShard(long shardId);
 }

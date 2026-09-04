@@ -321,4 +321,187 @@ class JdbcShardRepositoryTest extends AbstractPostgresTest {
     jdbc.update("UPDATE execution_shard SET cancel_requested=true WHERE id=?", shard0);
     assertTrue(shardRepo.isCancelRequested(shard0));
   }
+
+  // ---- Task 3:父汇聚 + FAIL_FAST + 父取消 + DLQ/requeue ----
+
+  private String parentStatus(long parentId) {
+    return jdbc.queryForObject("SELECT status FROM execution WHERE id=?", String.class, parentId);
+  }
+
+  private int parentOutcomes(long parentId, String status) {
+    return jdbc.queryForObject(
+        "SELECT count(*) FROM execution_outcome WHERE execution_id=? AND status=?",
+        Integer.class, parentId, status);
+  }
+
+  private boolean parentCancelRequested(long parentId) {
+    return Boolean.TRUE.equals(jdbc.queryForObject(
+        "SELECT cancel_requested FROM execution WHERE id=?", Boolean.class, parentId));
+  }
+
+  /** 构建 3-shard 父:shard0 RUNNING 并回写终态(SUCCESS 或 FAILED),shard1 RUNNING,shard2 DUE。 */
+  private long seededTerminalParent(long taskId) {
+    long parentId = seedParentAndShards(taskId, 3);
+    claimShard(shard(parentId, 0).id(), taskId, "w1", 8);
+    claimShard(shard(parentId, 1).id(), taskId, "w2", 8);
+    return parentId;
+  }
+
+  @Test void aggregateParent_allShardsSuccess_parentSuccess() {
+    long taskId = newTask(3, 8);
+    long parentId = seedParentAndShards(taskId, 3);
+    for (int i = 0; i < 3; i++) {
+      long sid = shard(parentId, i).id();
+      claimShard(sid, taskId, "w"+i, 8);
+      shardRepo.markStatus(sid, ExecutionStatus.SUCCESS, "w"+i, "done");
+    }
+
+    // 全部终态已就位、父仍 DUE → 列在待汇聚
+    assertTrue(shardRepo.parentsNeedingAggregation().contains(parentId),
+        "parent 仍 DUE 且 ≥1 终态 shard → 待汇聚");
+    assertEquals(ExecutionStatus.DUE, ExecutionStatus.valueOf(parentStatus(parentId)));
+
+    assertTrue(shardRepo.finalizeParent(parentId, ExecutionStatus.SUCCESS, "all done"));
+    assertEquals(ExecutionStatus.SUCCESS, ExecutionStatus.valueOf(parentStatus(parentId)));
+    assertNotNull(shardRepo.findParent(parentId).get().finishedAt(), "父终态必须写 finished_at");
+    assertEquals(1, parentOutcomes(parentId, "SUCCESS"), "恰一条父 SUCCESS outcome");
+    assertFalse(shardRepo.parentsNeedingAggregation().contains(parentId),
+        "父已终态 → 不再待汇聚");
+    assertTrue(shardRepo.parentsNeedingAggregation().isEmpty());
+  }
+
+  @Test void aggregateParent_oneFailed_parentFailed() {
+    long taskId = newTask(3, 8);
+    long parentId = seedParentAndShards(taskId, 3);
+    claimShard(shard(parentId, 0).id(), taskId, "w1", 8);
+    shardRepo.markStatus(shard(parentId, 0).id(), ExecutionStatus.FAILED, "w1", "boom");
+    for (int i = 1; i < 3; i++) {
+      long sid = shard(parentId, i).id();
+      claimShard(sid, taskId, "w"+i, 8);
+      shardRepo.markStatus(sid, ExecutionStatus.SUCCESS, "w"+i, "done");
+    }
+
+    assertTrue(shardRepo.parentsNeedingAggregation().contains(parentId));
+    assertTrue(shardRepo.finalizeParent(parentId, ExecutionStatus.FAILED, "boom"));
+    assertEquals(ExecutionStatus.FAILED, ExecutionStatus.valueOf(parentStatus(parentId)));
+    assertEquals(1, parentOutcomes(parentId, "FAILED"));
+  }
+
+  @Test void finalizeParent_idempotent_CAS0Skips() {
+    long taskId = newTask(1, 8);
+    long parentId = seedParentAndShards(taskId, 1);
+    assertTrue(shardRepo.finalizeParent(parentId, ExecutionStatus.SUCCESS, "done"));
+
+    boolean again = shardRepo.finalizeParent(parentId, ExecutionStatus.SUCCESS, "again");
+
+    assertFalse(again, "父已终态(非 DUE)→ CAS 0 行 → 幂等返回 false");
+    assertEquals(1, parentOutcomes(parentId, "SUCCESS"), "不得重复落第二条父 outcome");
+  }
+
+  @Test void failFast_cancelsRunningAndDueSiblings() {
+    long taskId = newTask(3, 8);
+    long parentId = seededTerminalParent(taskId); // shard0, shard1 RUNNING; shard2 DUE
+    long shard0 = shard(parentId, 0).id();
+    long shard1 = shard(parentId, 1).id();
+    long shard2 = shard(parentId, 2).id();
+    shardRepo.markStatus(shard0, ExecutionStatus.FAILED, "w1", "boom"); // 触发失败片(已 FAILED)
+
+    shardRepo.cancelSiblings(shard0, "failfast");
+
+    assertFalse(cancelRequested(shard0), "触发失败片自身不置取消信号");
+    assertTrue(cancelRequested(shard1), "RUNNING 兄弟置协作取消信号");
+    assertEquals(ExecutionStatus.RUNNING, shardRepo.findShard(shard1).get().status(),
+        "RUNNING 兄弟仅置信号,状态仍 RUNNING");
+    assertEquals(ExecutionStatus.CANCELED, shardRepo.findShard(shard2).get().status(),
+        "DUE 兄弟直编 CANCELED");
+    Integer canceledOutcome = jdbc.queryForObject(
+        "SELECT count(*) FROM execution_shard_outcome WHERE shard_id=? AND status='CANCELED' AND detail='failfast'",
+        Integer.class, shard2);
+    assertEquals(1, canceledOutcome, "DUE 兄弟落 CANCELED('failfast') outcome");
+    assertTrue(shardRepo.hasRunningShard(parentId), "shard1 仍 RUNNING → hasRunningShard true");
+  }
+
+  @Test void requestCancelParent_flagsRunningAndCancelsDue() {
+    long taskId = newTask(3, 8);
+    long parentId = seededTerminalParent(taskId); // shard0, shard1 RUNNING; shard2 DUE
+    long shard0 = shard(parentId, 0).id();
+    long shard2 = shard(parentId, 2).id();
+
+    boolean hasRunning = shardRepo.requestCancelParent(parentId);
+
+    assertTrue(hasRunning, "仍有 RUNNING shard 被置信号 → 返回 true");
+    assertTrue(cancelRequested(shard0), "RUNNING shard 置协作取消信号");
+    assertEquals(ExecutionStatus.CANCELED, shardRepo.findShard(shard2).get().status(), "DUE shard 直编 CANCELED");
+    Integer cascade = jdbc.queryForObject(
+        "SELECT count(*) FROM execution_shard_outcome WHERE shard_id=? AND status='CANCELED' AND detail='cascade cancel'",
+        Integer.class, shard2);
+    assertEquals(1, cascade, "DUE shard 落 'cascade cancel' outcome");
+    assertTrue(parentCancelRequested(parentId), "父置 cancel_requested");
+    assertTrue(shardRepo.hasRunningShard(parentId), "RUNNING shard 未立刻终态 → hasRunningShard true");
+  }
+
+  @Test void cancelParentImmediate_cancelsParentAndShards() {
+    long taskId = newTask(3, 8);
+    long parentId = seededTerminalParent(taskId); // shard0, shard1 RUNNING; shard2 DUE
+    long shard1 = shard(parentId, 1).id();
+    long shard2 = shard(parentId, 2).id();
+
+    shardRepo.cancelParentImmediate(parentId);
+
+    assertEquals(ExecutionStatus.CANCELED, ExecutionStatus.valueOf(parentStatus(parentId)), "父直编 CANCELED");
+    assertNotNull(shardRepo.findParent(parentId).get().finishedAt(), "父终态写 finished_at");
+    assertEquals(1, parentOutcomes(parentId, "CANCELED"), "父落 'cancel parent' outcome");
+    assertEquals(ExecutionStatus.CANCELED, shardRepo.findShard(shard1).get().status(), "RUNNING shard 硬取消");
+    assertEquals(ExecutionStatus.CANCELED, shardRepo.findShard(shard2).get().status(), "DUE shard 硬取消");
+    assertFalse(shardRepo.hasRunningShard(parentId), "无可取消的 RUNNING shard → false");
+  }
+
+  @Test void findDeathLetterShards_listsOnlyFailedDeadLetter() {
+    long taskId = newTask(2, 8);
+    long parentId = seedParentAndShards(taskId, 2);
+    // shard0 FAILED+dead_letter(进 DLQ);shard1 仅 FAILED 不标(不进 DLQ)
+    claimShard(shard(parentId, 0).id(), taskId, "w1", 8);
+    shardRepo.markStatus(shard(parentId, 0).id(), ExecutionStatus.FAILED, "w1", "boom");
+    shardRepo.markDeadLetter(shard(parentId, 0).id(), "unrecoverable");
+    claimShard(shard(parentId, 1).id(), taskId, "w2", 8);
+    shardRepo.markStatus(shard(parentId, 1).id(), ExecutionStatus.FAILED, "w2", "transient");
+
+    var dlq = shardRepo.findDeathLetterShards();
+
+    assertEquals(1, dlq.size(), "仅 FAILED 且 dead_letter 的 shard 进 DLQ");
+    assertEquals(shard(parentId, 0).id(), dlq.get(0).id());
+    assertEquals(ExecutionStatus.FAILED, dlq.get(0).status());
+  }
+
+  @Test void requeueShard_movesFailedToDue_reset() {
+    long taskId = newTask(1, 8);
+    long parentId = seedParentAndShards(taskId, 1);
+    long shard0 = shard(parentId, 0).id();
+    claimShard(shard0, taskId, "w1", 8); // attempt -> 1
+    shardRepo.markStatus(shard0, ExecutionStatus.FAILED, "w1", "boom");
+    jdbc.update("UPDATE execution_shard SET dead_letter=true, next_retry_at=now()+interval '10 minutes'"
+        + " WHERE id=?", shard0); // 模拟 DLQ 终末行
+
+    assertTrue(shardRepo.requeueShard(shard0));
+
+    Shard s = shardRepo.findShard(shard0).get();
+    assertEquals(ExecutionStatus.DUE, s.status(), "FAILED → DUE");
+    assertEquals(0, s.attempt(), "attempt 重置为 0");
+    assertNull(s.nextRetryAt(), "next_retry_at 清空");
+    assertFalse(s.deadLetter(), "dead_letter 复位");
+    Integer requeue = jdbc.queryForObject(
+        "SELECT count(*) FROM execution_shard_outcome WHERE shard_id=? AND status='DUE' AND detail='requeue'",
+        Integer.class, shard0);
+    assertEquals(1, requeue, "落 DUE('requeue') outcome");
+  }
+
+  @Test void requeueShardOnNonFailed_false() {
+    long taskId = newTask(1, 8);
+    long parentId = seedParentAndShards(taskId, 1);
+    long shard0 = shard(parentId, 0).id();
+    claimShard(shard0, taskId, "w1", 8); // RUNNING, not FAILED
+
+    assertFalse(shardRepo.requeueShard(shard0), "非 FAILED → CAS 0 行 → false");
+    assertEquals(ExecutionStatus.RUNNING, shardRepo.findShard(shard0).get().status());
+  }
 }

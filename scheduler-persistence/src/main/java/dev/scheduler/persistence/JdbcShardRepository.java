@@ -213,4 +213,113 @@ public class JdbcShardRepository implements ShardRepository {
         Boolean.class, shardId);
     return b != null && b;
   }
+
+  // ---- Task 3:父汇聚 + FAIL_FAST + 父取消 + DLQ/requeue ----
+
+  @Override public List<Long> parentsNeedingAggregation() {
+    return jdbc.query("""
+      SELECT e.id FROM execution e
+       WHERE e.status='DUE'
+         AND EXISTS (SELECT 1 FROM execution_shard s WHERE s.execution_id=e.id
+                     AND s.status IN ('SUCCESS','FAILED','CANCELED'))
+       ORDER BY e.id""", (rs, i) -> rs.getLong("id"));
+  }
+
+  @Override public boolean finalizeParent(long parentId, ExecutionStatus terminal, String detail) {
+    // 父只 DUE→终态(从不存 RUNNING)。CAS on status='DUE':0 行=已被他方终态/已推进 → 幂等返回 false。
+    // tx.execute(callback) 返回 Boolean,保证父 CAS 与父 execution_outcome 原子。
+    return tx.execute(s -> {
+      int updated = jdbc.update(
+          "UPDATE execution SET status=?, finished_at=now() WHERE id=? AND status='DUE'",
+          terminal.name(), parentId);
+      if (updated == 0) return false;
+      jdbc.update("INSERT INTO execution_outcome (execution_id, status, detail) VALUES (?,?,?)",
+          parentId, terminal.name(), detail);
+      return true;
+    });
+  }
+
+  @Override public void cancelSiblings(long shardId, String detail) {
+    // FAIL_FAST:同父其它 shard(排除自身)。RUNNING 兄弟仅置协作取消信号(留在 RUNNING 等 worker 自检退出);
+    // DUE 兄弟直接编 CANCELED(CAS on status='DUE';并发已 claim→RUNNING 的行走上一条 RUNNING 分支)。
+    tx.executeWithoutResult(s -> {
+      jdbc.update("UPDATE execution_shard SET cancel_requested=true"
+          + " WHERE execution_id=(SELECT execution_id FROM execution_shard WHERE id=?)"
+          + " AND id<>? AND status='RUNNING'", shardId, shardId);
+      jdbc.update("""
+        WITH targets AS (
+          SELECT id FROM execution_shard
+           WHERE execution_id=(SELECT execution_id FROM execution_shard WHERE id=?)
+             AND id<>? AND status='DUE')
+        , upd AS (UPDATE execution_shard SET status='CANCELED', finished_at=now()
+                  WHERE id IN (SELECT id FROM targets) RETURNING id)
+        INSERT INTO execution_shard_outcome (shard_id, status, detail)
+        SELECT id, 'CANCELED', ? FROM upd""", shardId, shardId, detail);
+    });
+  }
+
+  @Override public boolean requestCancelParent(long parentId) {
+    // 协作取消请求:置位 RUNNING shard 的取消信号(等 worker 自检回写),DUE shard 直编 CANCELED+outcome,
+    // 父置 cancel_requested。返回事务后是否仍有 RUNNING shard(即本次是否确有 RUNNING 片被置信号)。
+    tx.executeWithoutResult(s -> {
+      jdbc.update("UPDATE execution_shard SET cancel_requested=true WHERE execution_id=? AND status='RUNNING'",
+          parentId);
+      jdbc.update("""
+        WITH targets AS (
+          SELECT id FROM execution_shard WHERE execution_id=? AND status='DUE')
+        , upd AS (UPDATE execution_shard SET status='CANCELED', finished_at=now()
+                  WHERE id IN (SELECT id FROM targets) RETURNING id)
+        INSERT INTO execution_shard_outcome (shard_id, status, detail)
+        SELECT id, 'CANCELED', ? FROM upd""", parentId, "cascade cancel");
+      jdbc.update("UPDATE execution SET cancel_requested=true WHERE id=? AND status='DUE'", parentId);
+    });
+    return hasRunningShard(parentId); // 事务后读
+  }
+
+  @Override public void cancelParentImmediate(long parentId) {
+    // DUE 父直取消(父终态)+ 全部非终态(RUNNING/DUE)shard 一并 CANCELED+outcome。父 CAS 0 行=父已终态,
+    // 不落父 outcome;shard 侧 CTE 对已无非终态片自然 0 行,幂等。
+    tx.executeWithoutResult(s -> {
+      int updated = jdbc.update(
+          "UPDATE execution SET status='CANCELED', finished_at=now() WHERE id=? AND status='DUE'", parentId);
+      if (updated == 1) {
+        jdbc.update("INSERT INTO execution_outcome (execution_id, status, detail) VALUES (?,?,?)",
+            parentId, "CANCELED", "cancel parent");
+      }
+      jdbc.update("""
+        WITH targets AS (
+          SELECT id FROM execution_shard WHERE execution_id=? AND status IN ('DUE','RUNNING'))
+        , upd AS (UPDATE execution_shard SET status='CANCELED', finished_at=now()
+                  WHERE id IN (SELECT id FROM targets) RETURNING id)
+        INSERT INTO execution_shard_outcome (shard_id, status, detail)
+        SELECT id, 'CANCELED', ? FROM upd""", parentId, "cancel parent");
+    });
+  }
+
+  @Override public boolean hasRunningShard(long parentId) {
+    Integer c = jdbc.queryForObject(
+        "SELECT count(*) FROM execution_shard WHERE execution_id=? AND status='RUNNING'",
+        Integer.class, parentId);
+    return c != null && c > 0;
+  }
+
+  @Override public List<Shard> findDeathLetterShards() {
+    return jdbc.query(
+        "SELECT * FROM execution_shard WHERE status='FAILED' AND dead_letter ORDER BY id", MAP);
+  }
+
+  @Override public boolean requeueShard(long shardId) {
+    // FAILED → DUE 并重置 attempt/next_retry_at/dead_letter。CAS on status='FAILED':0 行=竞态/非 FAILED → false。
+    final boolean[] ok = {false};
+    tx.executeWithoutResult(s -> {
+      if (jdbc.update(
+          "UPDATE execution_shard SET status='DUE', attempt=0, next_retry_at=NULL, dead_letter=false"
+              + " WHERE id=? AND status='FAILED'", shardId) == 1) {
+        jdbc.update("INSERT INTO execution_shard_outcome (shard_id, status, detail) VALUES (?,?,?)",
+            shardId, "DUE", "requeue");
+        ok[0] = true;
+      }
+    });
+    return ok[0];
+  }
 }
