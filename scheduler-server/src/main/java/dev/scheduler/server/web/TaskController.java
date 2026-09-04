@@ -2,7 +2,7 @@ package dev.scheduler.server.web;
 
 import dev.scheduler.core.Execution;
 import dev.scheduler.core.Task;
-import dev.scheduler.persistence.ExecutionRepository;
+import dev.scheduler.persistence.ShardRepository;
 import dev.scheduler.persistence.TaskRepository;
 import java.util.List;
 import java.util.UUID;
@@ -22,11 +22,11 @@ import org.springframework.web.server.ResponseStatusException;
 public class TaskController {
 
   private final TaskRepository tasks;
-  private final ExecutionRepository executions;
+  private final ShardRepository shards;
 
-  public TaskController(TaskRepository tasks, ExecutionRepository executions) {
+  public TaskController(TaskRepository tasks, ShardRepository shards) {
     this.tasks = tasks;
-    this.executions = executions;
+    this.shards = shards;
   }
 
   public record CreateTaskRequest(String name, String kind, String handlerRef, String cron,
@@ -94,8 +94,8 @@ public class TaskController {
   public ResponseEntity<Execution> trigger(@PathVariable long id) {
     Task t = requireTask(id);
     String key = "manual:" + t.id() + ":" + UUID.randomUUID();
-    long executionId = executions.createDue(Execution.ofDue(t.id(), key, t.shardCount()));
-    Execution e = executions.findById(executionId).orElseThrow(() -> notFound("execution " + executionId));
+    long pid = shards.createParentWithShards(t.id(), key, t.shardCount()).id();
+    Execution e = shards.findParent(pid).orElseThrow(() -> notFound("execution " + pid));
     return ResponseEntity.status(HttpStatus.CREATED).body(e);
   }
 

@@ -6,10 +6,13 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import dev.scheduler.core.IdempotencyKeys;
 import dev.scheduler.core.Execution;
+import dev.scheduler.core.ExecutionStatus;
 import dev.scheduler.core.Task;
 import dev.scheduler.persistence.ExecutionRepository;
 import dev.scheduler.persistence.JdbcExecutionRepository;
+import dev.scheduler.persistence.JdbcShardRepository;
 import dev.scheduler.persistence.JdbcTaskRepository;
+import dev.scheduler.persistence.ShardRepository;
 import dev.scheduler.persistence.TaskRepository;
 import dev.scheduler.server.leader.AdvisoryLockLeaderElection;
 import java.time.Instant;
@@ -24,16 +27,18 @@ class TriggerEngineTest extends AbstractTriggerEngineTest {
 
   private TaskRepository tasks;
   private ExecutionRepository executions;
+  private ShardRepository shards;
 
   @BeforeEach void clearTables() {
-    jdbc.execute("TRUNCATE execution, execution_outcome, app_task RESTART IDENTITY CASCADE");
+    jdbc.execute("TRUNCATE execution, execution_shard, execution_shard_outcome, execution_outcome, app_task RESTART IDENTITY CASCADE");
     tasks = new JdbcTaskRepository(jdbc);
     executions = new JdbcExecutionRepository(jdbc);
+    shards = new JdbcShardRepository(jdbc);
   }
 
-  private long createTask(String cron, int maxActiveConcurrent) {
+  private long createTask(String cron, int shardCount, int maxActiveConcurrent) {
     return tasks.create(new Task(null, "t", "cron", "demo", cron,
-        1, 300, 0, 1000, null, maxActiveConcurrent, true, false)).id();
+        shardCount, 300, 0, 1000, null, maxActiveConcurrent, true, false)).id();
   }
 
   private long countExecutions(long taskId) {
@@ -41,36 +46,47 @@ class TriggerEngineTest extends AbstractTriggerEngineTest {
         "SELECT count(*) FROM execution WHERE task_id=?", Long.class, taskId);
   }
 
-  @Test void cronTickCreatesExactlyOneDueExecution() {
+  @Test void cronTickCreatesOneParentAndNDueShards() {
     var leader = new AdvisoryLockLeaderElection(jdbc);
     try {
-      long taskId = createTask(CRON_EVERY_5, 1);
-      var engine = new TriggerEngine(tasks, executions, leader, FIXED_CLOCK);
+      long taskId = createTask(CRON_EVERY_5, /* shardCount */ 3, 1);
+      var engine = new TriggerEngine(tasks, executions, shards, leader, FIXED_CLOCK);
       engine.scanOnce();
 
+      // 恰 1 父 execution(不是 N 条平铺 execution)
       assertEquals(1, countExecutions(taskId));
-      Execution due = executions.findCandidate(taskId).orElseThrow();
-      assertEquals("DUE", due.status().name());
-      assertEquals(IdempotencyKeys.forTrigger(taskId, FIRED), due.idempotencyKey());
+      long parentId = executions.findCandidate(taskId).orElseThrow().id();
+      assertEquals(IdempotencyKeys.forTrigger(taskId, FIRED),
+          shards.findParent(parentId).orElseThrow().idempotencyKey());
+      // t.shardCount() 个 DUE shard
+      var shardList = shards.findShards(parentId);
+      assertEquals(3, shardList.size());
+      assertTrue(shardList.stream().allMatch(s -> s.status() == ExecutionStatus.DUE));
     } finally { leader.close(); }
   }
 
-  @Test void rescanIsIdempotent_noDuplicateDue() {
+  @Test void rescanIsIdempotent_noDuplicateParentOrShard() {
     var leader = new AdvisoryLockLeaderElection(jdbc);
     try {
-      long taskId = createTask(CRON_EVERY_5, 1);
-      var engine = new TriggerEngine(tasks, executions, leader, FIXED_CLOCK);
+      long taskId = createTask(CRON_EVERY_5, /* shardCount */ 3, 1);
+      var engine = new TriggerEngine(tasks, executions, shards, leader, FIXED_CLOCK);
       engine.scanOnce();
+      long parentId = executions.findCandidate(taskId).orElseThrow().id();
+      int shardCountAfterFirst = shards.findShards(parentId).size();
+
       engine.scanOnce(); // 同一固定时钟再扫一次
-      assertEquals(1, countExecutions(taskId));
+
+      assertEquals(1, countExecutions(taskId)); // 父不再新增
+      assertEquals(parentId, executions.findCandidate(taskId).orElseThrow().id()); // 仍是同一父
+      assertEquals(shardCountAfterFirst, shards.findShards(parentId).size()); // shard 不增
     } finally { leader.close(); }
   }
 
   @Test void pausedTask_isNotFired() {
     var leader = new AdvisoryLockLeaderElection(jdbc);
     try {
-      long taskId = createTask(CRON_EVERY_5, 1);
-      var engine = new TriggerEngine(tasks, executions, leader, FIXED_CLOCK);
+      long taskId = createTask(CRON_EVERY_5, 1, 1);
+      var engine = new TriggerEngine(tasks, executions, shards, leader, FIXED_CLOCK);
       engine.scanOnce();
       long before = countExecutions(taskId);
       assertTrue(before >= 1);
@@ -84,7 +100,7 @@ class TriggerEngineTest extends AbstractTriggerEngineTest {
   @Test void saturatedTask_stillBacklogsDue_butUnclaimable() {
     var leader = new AdvisoryLockLeaderElection(jdbc);
     try {
-      long taskId = createTask(CRON_EVERY_5, /* maxActiveConcurrent */ 1);
+      long taskId = createTask(CRON_EVERY_5, /* shardCount */ 1, /* maxActiveConcurrent */ 1);
       // 预先放入一条 RUNNING(用与本次 tick 不同的 key,使仅凭幂等键不足以屏蔽新建)
       jdbc.update("""
         INSERT INTO execution (task_id, status, idempotency_key, shard_count, lease_until)
@@ -92,7 +108,7 @@ class TriggerEngineTest extends AbstractTriggerEngineTest {
         taskId, "quota-occupying-key");
       assertEquals(1L, executions.countActive(taskId));
 
-      var engine = new TriggerEngine(tasks, executions, leader, FIXED_CLOCK);
+      var engine = new TriggerEngine(tasks, executions, shards, leader, FIXED_CLOCK);
       engine.scanOnce();
       // §2.4 背压:配额占满也仍下发一条 DUE(积压),绝不静默丢 tick
       assertEquals(2, countExecutions(taskId));
@@ -111,8 +127,8 @@ class TriggerEngineTest extends AbstractTriggerEngineTest {
       var nonLeader = new AdvisoryLockLeaderElection(jdbc); // 当非 leader
       try {
         assertFalse(nonLeader.isLeader());
-        long taskId = createTask(CRON_EVERY_5, 1);
-        var engine = new TriggerEngine(tasks, executions, nonLeader, FIXED_CLOCK);
+        long taskId = createTask(CRON_EVERY_5, 1, 1);
+        var engine = new TriggerEngine(tasks, executions, shards, nonLeader, FIXED_CLOCK);
         engine.scanOnce();
         assertEquals(0, countExecutions(taskId)); // leader 守卫:非 leader 不产生任何执行
       } finally { nonLeader.close(); }

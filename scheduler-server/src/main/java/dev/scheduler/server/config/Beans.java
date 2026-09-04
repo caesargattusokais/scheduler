@@ -3,7 +3,9 @@ package dev.scheduler.server.config;
 import dev.scheduler.core.Task;
 import dev.scheduler.persistence.ExecutionRepository;
 import dev.scheduler.persistence.JdbcExecutionRepository;
+import dev.scheduler.persistence.JdbcShardRepository;
 import dev.scheduler.persistence.JdbcTaskRepository;
+import dev.scheduler.persistence.ShardRepository;
 import dev.scheduler.persistence.TaskRepository;
 import dev.scheduler.server.execute.ExecutorWorker;
 import dev.scheduler.server.handler.DemoHandler;
@@ -58,6 +60,11 @@ public class Beans {
   }
 
   @Bean
+  ShardRepository shardRepository(JdbcTemplate jdbc) {
+    return new JdbcShardRepository(jdbc);
+  }
+
+  @Bean
   ExecutionHandler demoHandler() {
     return new DemoHandler();
   }
@@ -79,8 +86,8 @@ public class Beans {
 
   @Bean
   TriggerEngine triggerEngine(TaskRepository tasks, ExecutionRepository execs,
-                              LeaderElection leader, Clock clock) {
-    return new TriggerEngine(tasks, execs, leader, clock);
+                              ShardRepository shards, LeaderElection leader, Clock clock) {
+    return new TriggerEngine(tasks, execs, shards, leader, clock);
   }
 
   /** 重试决策纯类:只判定"应否重试/退避多久",不含 DB 与时钟。 */

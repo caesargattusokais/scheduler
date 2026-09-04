@@ -1,9 +1,9 @@
 package dev.scheduler.server.trigger;
 
-import dev.scheduler.core.Execution;
 import dev.scheduler.core.IdempotencyKeys;
 import dev.scheduler.core.Task;
 import dev.scheduler.persistence.ExecutionRepository;
+import dev.scheduler.persistence.ShardRepository;
 import dev.scheduler.persistence.TaskRepository;
 import dev.scheduler.server.leader.LeaderElection;
 import java.time.Clock;
@@ -15,13 +15,15 @@ import org.springframework.scheduling.support.CronExpression;
 public class TriggerEngine {
   private final TaskRepository tasks;
   private final ExecutionRepository executions;
+  private final ShardRepository shards;
   private final LeaderElection leader;
   private final Clock clock;
 
   public TriggerEngine(TaskRepository tasks, ExecutionRepository executions,
-                       LeaderElection leader, Clock clock) {
+                       ShardRepository shards, LeaderElection leader, Clock clock) {
     this.tasks = tasks;
     this.executions = executions;
+    this.shards = shards;
     this.leader = leader;
     this.clock = clock;
   }
@@ -38,8 +40,8 @@ public class TriggerEngine {
       // 命中即无条件下发 DUE(背压 §2.4):不在此处做配额拦截,避免丢弃 tick;
       // 饱和任务的积压由 claim 侧的 CAS+配额(active.c < maxConcurrent)负责消化。
       if (fired != null && !fired.isAfter(now)) { // 该分钟窗内含一个 tick
-        executions.createDue(Execution.ofDue(t.id(),
-            IdempotencyKeys.forTrigger(t.id(), fired.toInstant()), t.shardCount()));
+        shards.createParentWithShards(t.id(),
+            IdempotencyKeys.forTrigger(t.id(), fired.toInstant()), t.shardCount());
       }
     }
   }
