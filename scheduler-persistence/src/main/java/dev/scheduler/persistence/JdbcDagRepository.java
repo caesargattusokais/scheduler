@@ -160,8 +160,8 @@ public class JdbcDagRepository implements DagRepository {
         VALUES (?, 'PENDING', ?, ?)
         ON CONFLICT (idempotency_key) DO UPDATE SET idempotency_key = EXCLUDED.idempotency_key
         RETURNING id""", Long.class, dagId, key, reason);
-      int existing = jdbc.queryForObject(
-          "SELECT count(*) FROM dag_run_node WHERE dag_run_id=?", Integer.class, id);
+      long existing = jdbc.queryForObject(
+          "SELECT count(*) FROM dag_run_node WHERE dag_run_id=?", Long.class, id);
       if (existing == 0) { // 首次物化:按定义节点快照 task_id 插入全部 PENDING 节点(重放不重复插)
         List<DagNode> nodes = findNodes(dagId);
         jdbc.batchUpdate("""
