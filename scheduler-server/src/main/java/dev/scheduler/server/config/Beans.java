@@ -1,5 +1,6 @@
 package dev.scheduler.server.config;
 
+import dev.scheduler.core.Dag;
 import dev.scheduler.core.Task;
 import dev.scheduler.persistence.DagRepository;
 import dev.scheduler.persistence.ExecutionRepository;
@@ -148,6 +149,19 @@ public class Beans {
         Gauge.builder("scheduler_due_queue_max_age_seconds", () -> dueQueueMaxAgeSeconds(jdbc, taskId))
             .tag("task_id", Long.toString(taskId))
             .tag("task_name", name)
+            .register(registry);
+      }
+    };
+  }
+
+  /** 每 DAG 指标(spec §6):active 未终态 dag_run 计数。已知重启边界:新 DAG 重启后才有 series(镜像 per-task)。 */
+  @Bean
+  MeterBinder dagMetrics(DagRepository dags) {
+    return registry -> {
+      for (Dag d : dags.findAllDags()) {
+        Gauge.builder("scheduler_dag_runs_active", () -> (double) dags.countActiveRuns(d.id()))
+            .tag("dag_id", Long.toString(d.id()))
+            .tag("dag_name", d.name())
             .register(registry);
       }
     };

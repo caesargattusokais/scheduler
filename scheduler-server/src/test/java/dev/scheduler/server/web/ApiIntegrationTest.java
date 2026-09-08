@@ -63,6 +63,7 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.MOCK,
     properties = {
         "scheduler.loop.enabled=false",
+        "scheduler.dag.enabled=false", // 关闭 DagLoop,消除异步扫描对同步驱动断言(dagEngine.scanOnce)的竞态
         "management.endpoints.web.exposure.include=health,info,prometheus",
         "management.prometheus.metrics.export.enabled=true"
     })
@@ -90,11 +91,17 @@ class ApiIntegrationTest {
   @Autowired ExecutorWorker executorWorker;
   /** 共享 Reconciler Bean(M3:回收孤儿 shard + 父级终态汇聚),由测试同步驱动以推进父终态。 */
   @Autowired Reconciler reconciler;
+  /** M4:工作流 DAG 引擎,由测试同步驱动 scanOnce() 推进节点 spawn/终态派生(镜像 triggerEngine)。 */
+  @Autowired dev.scheduler.server.dag.DagEngine dagEngine;
+  /** M4:工作流 DAG 仓储(建 DAG/触发,以及指标断言复用)。 */
+  @Autowired dev.scheduler.persistence.DagRepository dagRepository;
   /** 装配的 flaky handler 单例:"flaky" 任务首调抛错、次调成功;@BeforeEach 重装成 failNext 保持确定性。 */
   @Autowired FlakyHandler flakyHandler;
 
   /** 上下文启动(绑定时刻)前就存在的任务 id,用于断言 per-task 指标 series。 */
   private static long METRICS_TASK_ID;
+  /** 上下文启动(绑定时刻)前就存在的 DAG id(M4:断言 per-dag scheduler_dag_runs_active series)。 */
+  private static long METRICS_DAG_ID;
 
   @TestConfiguration
   static class TestClockConfig {
@@ -130,6 +137,16 @@ class ApiIntegrationTest {
           "metrics-seed-task", "0 */5 * * * *");
       METRICS_TASK_ID = j.queryForObject("SELECT id FROM app_task WHERE name=?",
           Long.class, "metrics-seed-task");
+      // M4:同样在绑定时刻前落一条(引用新指标任务的)PENDING 可达 DAG,保证 scheduler_dag_runs_active 的
+      // tagged series 在上下文绑定那一刻确定存在(镜像 per-task 的重启边界)。disabled 以免被扫描误触发。
+      j.update("""
+        INSERT INTO app_dag (id, name, cron, enabled, paused)
+        VALUES (?, 'metrics-seed-dag', ?, false, false)""",
+          Long.MAX_VALUE / 2, "0 */5 * * * *");
+      METRICS_DAG_ID = j.queryForObject("SELECT id FROM app_dag WHERE name=?",
+          Long.class, "metrics-seed-dag");
+      j.update("INSERT INTO app_dag_node (dag_id, node_key, task_id, sort_order) VALUES (?, 'A', ?, 0)",
+          METRICS_DAG_ID, METRICS_TASK_ID);
   }
 
   @BeforeEach
@@ -542,11 +559,164 @@ class ApiIntegrationTest {
         "父直取消 → 全部 DUE shard 级联 CANCELED");
   }
 
+  // ---- M4:工作流 DAG 控制面 E2E ----
+
+  /** M4:建含环 DAG(A→B→C→A)→ 仓储 DFS 校验拒绝 → 400。 */
+  @Test
+  void dag_cycleCreation_rejected400() throws Exception {
+    long t = postTask("cycle-task");
+    mvc.perform(post("/api/v1/dags").contentType(MediaType.APPLICATION_JSON)
+        .content(dagBody("cycle-dag", new long[]{t, t, t}, new String[]{"A", "B", "C"},
+            new String[][]{{"A", "B"}, {"B", "C"}, {"C", "A"}})))
+        .andExpect(status().isBadRequest());
+  }
+
+  /** M4:线性 A→B 全成功端到端。真实触发 + 同步驱动(dagEngine.scanOnce → worker.workOne → reconciler.scanOnce)。
+   *  跨周期收敛:节点只在"其上游 SUCCESS 之后的下一次 scan"才 spawn,故 A 终态后需多一次 scan 才生成 B。 */
+  @Test
+  void dagLinear_e2e_runsToSuccess() throws Exception {
+    long t = postTask("linear-task"); // demo handler, shardCount 1
+    long dagId = postDag("linear-dag", new long[]{t, t}, new String[]{"A", "B"},
+        new String[][]{{"A", "B"}});
+    pauseDag(dagId);                 // 暂停:剔除 cron 触发(CLOCK 钉在 10:05 tick,否则 scanOnce 会再建一条调度 run)
+    long runId = triggerDag(dagId);  // 仅手动 run,幂等可断言 1 条
+
+    dagEngine.scanOnce();            // A 是根(无上游)→ spawn A → RUNNING;B 等上游(PENDING)
+
+    dagEngine.scanOnce();            // A 是根(无上游)→ spawn A → RUNNING;B 等上游(PENDING)
+    assertTrue(executorWorker.workOne(), "A 的 shard 应被认领并跑成功");
+    reconciler.scanOnce();           // 汇聚 A 的父 execution → SUCCESS
+    dagEngine.scanOnce();            // A 由 shards 派生 SUCCESS;B 仍 PENDING(本周期上游快照 RUNNING)
+    dagEngine.scanOnce();            // B 上游 SUCCESS → spawn B → RUNNING
+    assertTrue(executorWorker.workOne(), "B 的 shard 应被认领并跑成功");
+    reconciler.scanOnce();           // 汇聚 B 的父 execution → SUCCESS
+    dagEngine.scanOnce();            // B 派生 SUCCESS → 全节点终态 → dag_run SUCCESS
+
+    mvc.perform(get("/api/v1/dags/runs").param("dagId", String.valueOf(dagId)))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.length()").value(1));
+
+    mvc.perform(get("/api/v1/dags/runs/" + runId))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.status").value("SUCCESS"))
+        .andExpect(jsonPath("$.nodes.length()").value(2))
+        .andExpect(jsonPath("$.nodes[0].node.status").value("SUCCESS"))
+        .andExpect(jsonPath("$.nodes[1].node.status").value("SUCCESS"));
+  }
+
+  /** M4:上游 A(flaky,maxRetries=0)首调耗尽失败 → 下游 B 被 SKIPPED(绝不 spawn,惰性验证)→ dag_run FAILED。 */
+  @Test
+  void dagLinear_failedUpstream_skipsDownstream_failed() throws Exception {
+    long t = postTaskWithRetry("dag-fail-task", "flaky", 0, 1000, ""); // 首调抛错 → 耗尽 FAILED
+    long dagId = postDag("fail-dag", new long[]{t, t}, new String[]{"A", "B"},
+        new String[][]{{"A", "B"}});
+    pauseDag(dagId);                 // 暂停:剔除 cron 触发,只留本次手动 run
+    long runId = triggerDag(dagId);
+
+    dagEngine.scanOnce();            // spawn A → RUNNING
+    assertTrue(executorWorker.workOne(), "A 的 shard 应被认领并耗尽失败");
+    reconciler.scanOnce();           // 汇聚 A 的父 → FAILED
+    dagEngine.scanOnce();            // A 派生 FAILED(本周期于 A 的 RUNNING 快照,不连锁)
+    dagEngine.scanOnce();            // B 上游 FAILED → SKIPPED → 全节点终态 → dag_run FAILED
+
+    mvc.perform(get("/api/v1/dags/runs/" + runId))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.status").value("FAILED"))
+        .andExpect(jsonPath("$.nodes.length()").value(2))
+        .andExpect(jsonPath("$.nodes[0].node.status").value("FAILED"))
+        .andExpect(jsonPath("$.nodes[1].node.status").value("SKIPPED"))
+        .andExpect(jsonPath("$.nodes[1].shards.length()").value(0)); // B 从未 spawn → 空 shards
+  }
+
+  /** M4:取消级联端点。scanOnce 后:A 已 spawn(RUNNING,其父 DUE shard 无 RUNNING→直取消),B 仍 PENDING。
+   *  cancel → A/B 全 CANCELED,A 的父 execution shard 级联 CANCELED,dag_run 终态 CANCELED。 */
+  @Test
+  void dagCancel_cascadesToNodesAndExecution() throws Exception {
+    long t = postTask("cancel-dag-task");
+    long dagId = postDag("cancel-dag", new long[]{t, t}, new String[]{"A", "B"},
+        new String[][]{{"A", "B"}});
+    pauseDag(dagId);                 // 暂停:剔除 cron 触发,只留本次手动 run
+    long runId = triggerDag(dagId);
+    dagEngine.scanOnce(); // spawn A → RUNNING;B 仍 PENDING
+
+    mvc.perform(post("/api/v1/dags/runs/" + runId + "/cancel"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.status").value("CANCELED"))
+        .andExpect(jsonPath("$.nodes.length()").value(2))
+        .andExpect(jsonPath("$.nodes[0].node.status").value("CANCELED"))
+        .andExpect(jsonPath("$.nodes[1].node.status").value("CANCELED"));
+
+    // 已 spawn 节点 A 的父 execution 的最早 shard 被级联直取消 → CANCELED(无 RUNNING shard → cancelParentImmediate)
+    assertEquals(0L, jdbc.queryForObject(
+        "SELECT count(*) FROM execution_shard es WHERE es.execution_id = ("
+        + " SELECT execution_id FROM dag_run_node WHERE dag_run_id=? AND node_key='A')"
+        + " AND es.status <> 'CANCELED'", Long.class, runId),
+        "A 的父执行 shard 应全部级联 CANCELED");
+  }
+
+  /** M4:每 DAG 指标。绑定时刻前 seed 的 METRICS_DAG 由 @BeforeAll 预注册 series(@BeforeEach 仅清 app_task /
+   *  app_dag_node,app_dag 头是父表不受 CASCADE truncate);此处重载 task 行与节点引用,触发一条 PENDING
+   *  dag_run → scheduler_dag_runs_active 按非终态 dag_run 计数 = 1。 */
+  @Test
+  void prometheus_dagRunActiveMetric() throws Exception {
+    jdbc.update("INSERT INTO app_task (id, name, kind, handler_ref, cron, shard_count, enabled, paused)"
+        + " VALUES (?, 'metrics-seed-task', 'cron', 'demo', ?, 1, false, false)",
+        METRICS_TASK_ID, "0 */5 * * * *");
+    jdbc.update("INSERT INTO app_dag_node (dag_id, node_key, task_id, sort_order) VALUES (?, 'A', ?, 0)",
+        METRICS_DAG_ID, METRICS_TASK_ID);
+    dagRepository.createManualRun(METRICS_DAG_ID); // 一条 PENDING → active 计数 = 1
+
+    String prom = mvc.perform(get("/actuator/prometheus"))
+        .andExpect(status().isOk())
+        .andReturn().getResponse().getContentAsString();
+    assertTrue(prom.contains("scheduler_dag_runs_active{dag_id=\"" + METRICS_DAG_ID + "\","),
+        "missing per-dag scheduler_dag_runs_active{dag_id=...} series in prometheus:\n" + prom);
+    assertEquals(1.0, promDagGauge(prom, "scheduler_dag_runs_active", METRICS_DAG_ID), 0.0,
+        "scheduler_dag_runs_active 应计该 dag 非终态 dag_run 数(1 条 PENDING)");
+  }
+
   /** 触发一次任务(扇出 → 父 header + N 个 DUE shard,shard_count 默认 1),返回父 execution id。 */
   private long triggerParent(long taskId) throws Exception {
     MvcResult r = mvc.perform(post("/api/v1/tasks/" + taskId + "/trigger"))
         .andExpect(status().isCreated()).andReturn();
     return objectMapper.readTree(r.getResponse().getContentAsString()).get("id").asLong();
+  }
+
+  /** 暂停一个 DAG:勿让 cron(CLOCK 钉在 10:05 tick)在 scanOnce 里额外建调度 run,只留手动 run(断言计数确定性)。 */
+  private void pauseDag(long dagId) throws Exception {
+    mvc.perform(post("/api/v1/dags/" + dagId + "/pause")).andExpect(status().isOk());
+  }
+
+  /** 手动触发一个 DAG:建 dag_run + 全 PENDING 节点,返回 run id(镜像 DagController.trigger)。 */
+  private long triggerDag(long dagId) throws Exception {
+    MvcResult r = mvc.perform(post("/api/v1/dags/" + dagId + "/trigger"))
+        .andExpect(status().isCreated()).andReturn();
+    return objectMapper.readTree(r.getResponse().getContentAsString()).get("id").asLong();
+  }
+
+  /** 建 DAG(nodeKeys 各引用 taskIds 对应任务;edges 为 from/to 键对),期望 201,返回 dag id。 */
+  private long postDag(String name, long[] taskIds, String[] nodeKeys, String[][] edges) throws Exception {
+    MvcResult r = mvc.perform(post("/api/v1/dags").contentType(MediaType.APPLICATION_JSON)
+        .content(dagBody(name, taskIds, nodeKeys, edges)))
+        .andExpect(status().isCreated()).andReturn();
+    return objectMapper.readTree(r.getResponse().getContentAsString()).get("id").asLong();
+  }
+
+  /** POST /dags 请求体;edges 为 null 表示无边。 */
+  private String dagBody(String name, long[] taskIds, String[] nodeKeys, String[][] edges) {
+    StringBuilder nodes = new StringBuilder();
+    for (int i = 0; i < nodeKeys.length; i++) {
+      if (i > 0) nodes.append(",");
+      nodes.append("{\"nodeKey\":\"").append(nodeKeys[i]).append("\",\"taskId\":").append(taskIds[i]).append("}");
+    }
+    StringBuilder eb = new StringBuilder();
+    if (edges != null) {
+      for (int i = 0; i < edges.length; i++) {
+        if (i > 0) eb.append(",");
+        eb.append("{\"from\":\"").append(edges[i][0]).append("\",\"to\":\"").append(edges[i][1]).append("\"}");
+      }
+    }
+    return "{\"name\":\"" + name + "\",\"cron\":\"" + CRON + "\",\"nodes\":[" + nodes + "],\"edges\":[" + eb + "]}";
   }
 
   /** 确定性预置一条死信 shard:建父 + 1 DUE shard(经 createParentWithShards 单事务),再直改 FAILED + dead_letter。
@@ -602,6 +772,17 @@ class ApiIntegrationTest {
   private double promGauge(String prom, String metric, long taskId) {
     for (String line : prom.split("\n")) {
       if (line.startsWith(metric + "{task_id=\"" + taskId + "\"")) {
+        int sp = line.lastIndexOf(' ');
+        return Double.parseDouble(line.substring(sp + 1));
+      }
+    }
+    return Double.NaN;
+  }
+
+  /** 解析 prometheus 文本中某 per-dag gauge 系列行尾的采样值(M4:scheduler_dag_runs_active)。 */
+  private double promDagGauge(String prom, String metric, long dagId) {
+    for (String line : prom.split("\n")) {
+      if (line.startsWith(metric + "{dag_id=\"" + dagId + "\"")) {
         int sp = line.lastIndexOf(' ');
         return Double.parseDouble(line.substring(sp + 1));
       }
