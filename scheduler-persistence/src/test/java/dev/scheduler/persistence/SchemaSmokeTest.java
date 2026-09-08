@@ -42,6 +42,16 @@ class SchemaSmokeTest {
     assertEquals(2, n, "V3 must create execution_shard and execution_shard_outcome");
   }
 
+  @Test void dagTablesExist() {
+    var jdbc = jdbc();
+    Integer n = jdbc.queryForObject(
+        "SELECT count(*) FROM information_schema.tables WHERE table_schema='public'"
+            + " AND table_name IN ('app_dag','app_dag_node','dag_edge','dag_run','dag_run_node',"
+            + "                    'dag_run_outcome','dag_run_node_outcome')",
+        Integer.class);
+    assertEquals(7, n, "V4 must create all 7 dag tables");
+  }
+
   private void assertColumnType(String column) {
     String dataType = jdbc().queryForObject(
         "SELECT data_type FROM information_schema.columns"
