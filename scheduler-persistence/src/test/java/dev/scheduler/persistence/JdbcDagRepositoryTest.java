@@ -1,0 +1,223 @@
+package dev.scheduler.persistence;
+
+import static org.junit.jupiter.api.Assertions.*;
+import dev.scheduler.core.Dag;
+import dev.scheduler.core.DagRun;
+import dev.scheduler.core.DagRunNode;
+import dev.scheduler.core.DagRunNodeStatus;
+import dev.scheduler.core.DagRunStatus;
+import dev.scheduler.core.Task;
+import java.time.Instant;
+import java.util.List;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+
+class JdbcDagRepositoryTest extends AbstractPostgresTest {
+  private final JdbcTaskRepository taskRepo = new JdbcTaskRepository(jdbc);
+  private final JdbcShardRepository shardRepo = new JdbcShardRepository(jdbc);
+  private final DagRepository dagRepo = new JdbcDagRepository(jdbc);
+
+  @BeforeEach void clean() {
+    jdbc.update("TRUNCATE app_dag, app_dag_node, dag_edge, dag_run, dag_run_node,"
+        + " dag_run_outcome, dag_run_node_outcome, execution, execution_shard,"
+        + " execution_shard_outcome, execution_outcome, app_task RESTART IDENTITY CASCADE");
+  }
+
+  private long newTask(String cron) {
+    Task t = taskRepo.create(new Task(null, "t"+System.nanoTime(), "demo", "demo", cron,
+        1, 300, 0, 1000, null, 1, true, false));
+    return t.id();
+  }
+
+  /** 建一个双节点 A→B 的 DAG,返回 dag id。 */
+  private long newDag() {
+    long t = newTask("0 */5 * * * *");
+    Dag d = dagRepo.createDag("d"+System.nanoTime(), "desc", "0 */5 * * * *",
+        List.of(new DagRepository.NodeInput("A", t, 0), new DagRepository.NodeInput("B", t, 1)),
+        List.of(new DagRepository.EdgeInput("A", "B")));
+    return d.id();
+  }
+
+  @Test void createDag_persistsNodesAndEdges() {
+    long t1 = newTask("0 */5 * * * *");
+    long t2 = newTask("0 */5 * * * *");
+    var dag = dagRepo.createDag("d", "desc", "0 */5 * * * *",
+        List.of(new DagRepository.NodeInput("A", t1, 0), new DagRepository.NodeInput("B", t2, 1)),
+        List.of(new DagRepository.EdgeInput("A", "B")));
+
+    assertTrue(dagRepo.findDag(dag.id()).isPresent());
+    assertEquals("d", dagRepo.findDag(dag.id()).get().name());
+
+    var nodes = dagRepo.findNodes(dag.id());
+    assertEquals(2, nodes.size());
+    assertEquals("A", nodes.get(0).nodeKey());
+    assertEquals(t1, nodes.get(0).taskId());
+    assertEquals(0, nodes.get(0).sortOrder());
+    assertEquals("B", nodes.get(1).nodeKey());
+    assertEquals(t2, nodes.get(1).taskId());
+    assertEquals(1, nodes.get(1).sortOrder());
+
+    var edges = dagRepo.findEdges(dag.id());
+    assertEquals(1, edges.size());
+    long aId = nodes.get(0).id();
+    long bId = nodes.get(1).id();
+    assertEquals(aId, edges.get(0).fromNodeId());
+    assertEquals(bId, edges.get(0).toNodeId());
+  }
+
+  @Test void createDag_unknownTask_rejects400() {
+    long t = newTask("0 */5 * * * *");
+    assertThrows(IllegalArgumentException.class, () -> dagRepo.createDag("d", "desc", "cron",
+        List.of(new DagRepository.NodeInput("A", t, 0), new DagRepository.NodeInput("B", 999999L, 1)),
+        List.of()));
+    assertEquals(0, dagRepo.findAllDags().size(), "tx rolled back — no partial dag");
+  }
+
+  @Test void createDag_duplicateNodeKey_rejects() {
+    long t = newTask("0 */5 * * * *");
+    assertThrows(IllegalArgumentException.class, () -> dagRepo.createDag("d", "desc", "cron",
+        List.of(new DagRepository.NodeInput("A", t, 0), new DagRepository.NodeInput("A", t, 1)),
+        List.of()));
+    assertEquals(0, dagRepo.findAllDags().size());
+  }
+
+  @Test void createDag_duplicateEdge_rejects() {
+    long t = newTask("0 */5 * * * *");
+    assertThrows(IllegalArgumentException.class, () -> dagRepo.createDag("d", "desc", "cron",
+        List.of(new DagRepository.NodeInput("A", t, 0), new DagRepository.NodeInput("B", t, 1)),
+        List.of(new DagRepository.EdgeInput("A", "B"), new DagRepository.EdgeInput("A", "B"))));
+    assertEquals(0, dagRepo.findAllDags().size());
+  }
+
+  @Test void createDag_selfLoop_rejects() {
+    long t = newTask("0 */5 * * * *");
+    assertThrows(IllegalArgumentException.class, () -> dagRepo.createDag("d", "desc", "cron",
+        List.of(new DagRepository.NodeInput("A", t, 0)),
+        List.of(new DagRepository.EdgeInput("A", "A"))));
+    assertEquals(0, dagRepo.findAllDags().size());
+  }
+
+  @Test void createDag_cycle_rejects() {
+    long t = newTask("0 */5 * * * *");
+    assertThrows(IllegalArgumentException.class, () -> dagRepo.createDag("d", "desc", "cron",
+        List.of(new DagRepository.NodeInput("A", t, 0), new DagRepository.NodeInput("B", t, 1),
+            new DagRepository.NodeInput("C", t, 2)),
+        List.of(new DagRepository.EdgeInput("A", "B"), new DagRepository.EdgeInput("B", "C"),
+            new DagRepository.EdgeInput("C", "A"))));
+    assertEquals(0, dagRepo.findAllDags().size(), "atomic rollback — no dag persists");
+  }
+
+  @Test void createScheduledRun_isIdempotentByKey() {
+    long dagId = newDag();
+    Instant trig = Instant.ofEpochMilli(123456789L);
+
+    dagRepo.createScheduledRun(dagId, trig);
+    dagRepo.createScheduledRun(dagId, trig);
+
+    var runs = dagRepo.findRuns(dagId);
+    assertEquals(1, runs.size(), "replay by same idempotency key → exactly 1 dag_run");
+    assertEquals(2, dagRepo.findNodesOfRun(runs.get(0).id()).size(), "no duplicate node rows");
+  }
+
+  @Test void createManualRun_createsDistinctRuns() {
+    long dagId = newDag();
+    var r1 = dagRepo.createManualRun(dagId);
+    var r2 = dagRepo.createManualRun(dagId);
+
+    assertNotEquals(r1.idempotencyKey(), r2.idempotencyKey(), "distinct manual uuids");
+    assertEquals(2, dagRepo.findRuns(dagId).size());
+  }
+
+  @Test void markNodeSpawned_setsExecutionAndRunning() {
+    long dagId = newDag();
+    long runId = dagRepo.createScheduledRun(dagId, Instant.now()).id();
+    var nodes = dagRepo.findNodesOfRun(runId);
+    long nodeA = nodes.get(0).id();
+    long taskId = nodes.get(0).taskId();
+    long eid = shardRepo.createParentWithShards(taskId, "seed-"+System.nanoTime(), 1).id();
+
+    assertTrue(dagRepo.markNodeSpawned(nodeA, eid));
+    DagRunNode reloaded = dagRepo.findNode(nodeA).get();
+    assertEquals(DagRunNodeStatus.RUNNING, reloaded.status());
+    assertEquals(eid, reloaded.executionId());
+
+    Integer spawned = jdbc.queryForObject(
+        "SELECT count(*) FROM dag_run_node_outcome WHERE node_id=? AND status='RUNNING' AND detail='spawned'",
+        Integer.class, nodeA);
+    assertEquals(1, spawned, "spawn 落 RUNNING('spawned') outcome");
+
+    assertFalse(dagRepo.markNodeSpawned(nodeA, eid), "node no longer PENDING → second spawn fails");
+  }
+
+  @Test void markNodeStatus_terminal_derivesWithOutcome() {
+    long dagId = newDag();
+    long runId = dagRepo.createScheduledRun(dagId, Instant.now()).id();
+    var nodes = dagRepo.findNodesOfRun(runId);
+    long nodeA = nodes.get(0).id();
+    long taskId = nodes.get(0).taskId();
+    long eid = shardRepo.createParentWithShards(taskId, "seed-"+System.nanoTime(), 1).id();
+    dagRepo.markNodeSpawned(nodeA, eid); // → RUNNING
+
+    assertTrue(dagRepo.markNodeStatus(nodeA, DagRunNodeStatus.SUCCESS, "all shards ok"));
+    DagRunNode s = dagRepo.findNode(nodeA).get();
+    assertEquals(DagRunNodeStatus.SUCCESS, s.status());
+    assertNotNull(s.finishedAt(), "terminal node writes finished_at");
+
+    Integer succ = jdbc.queryForObject(
+        "SELECT count(*) FROM dag_run_node_outcome WHERE node_id=? AND status='SUCCESS'",
+        Integer.class, nodeA);
+    assertEquals(1, succ, "terminal node 落 SUCCESS outcome");
+
+    long nodeB = nodes.get(1).id(); // still PENDING
+    assertThrows(IllegalStateException.class,
+        () -> dagRepo.markNodeStatus(nodeB, DagRunNodeStatus.FAILED, "boom"),
+        "PENDING→FAILED is not a valid transition");
+  }
+
+  @Test void finalizeRun_cas_idempotent() {
+    long dagId = newDag();
+    long runId = dagRepo.createScheduledRun(dagId, Instant.now()).id();
+
+    assertTrue(dagRepo.finalizeRun(runId, DagRunStatus.SUCCESS, "all nodes ok"));
+    DagRun r = dagRepo.findRun(runId).get();
+    assertEquals(DagRunStatus.SUCCESS, r.status());
+    assertNotNull(r.finishedAt());
+
+    Integer outcome = jdbc.queryForObject(
+        "SELECT count(*) FROM dag_run_outcome WHERE dag_run_id=? AND status='SUCCESS'",
+        Integer.class, runId);
+    assertEquals(1, outcome);
+
+    assertFalse(dagRepo.finalizeRun(runId, DagRunStatus.CANCELED, "again"),
+        "CAS 0 → already terminal → idempotent false");
+    Integer all = jdbc.queryForObject(
+        "SELECT count(*) FROM dag_run_outcome WHERE dag_run_id=?", Integer.class, runId);
+    assertEquals(1, all, "no extra run outcome after CAS miss");
+  }
+
+  @Test void requestCancelRun_setsFlag() {
+    long dagId = newDag();
+    long runId = dagRepo.createScheduledRun(dagId, Instant.now()).id();
+
+    dagRepo.requestCancelRun(runId);
+    assertEquals(true, jdbc.queryForObject(
+        "SELECT cancel_requested FROM dag_run WHERE id=?", Boolean.class, runId));
+
+    long run2 = dagRepo.createScheduledRun(dagId, Instant.now().plusSeconds(60)).id();
+    dagRepo.finalizeRun(run2, DagRunStatus.SUCCESS, "done");
+    assertDoesNotThrow(() -> dagRepo.requestCancelRun(run2),
+        "cancel on a terminal run is a silent no-op");
+    assertEquals(false, jdbc.queryForObject(
+        "SELECT cancel_requested FROM dag_run WHERE id=?", Boolean.class, run2));
+  }
+
+  @Test void countActiveRuns() {
+    long dagId = newDag();
+    dagRepo.createScheduledRun(dagId, Instant.ofEpochMilli(1L));
+    dagRepo.createScheduledRun(dagId, Instant.ofEpochMilli(2L));
+    long r3 = dagRepo.createScheduledRun(dagId, Instant.ofEpochMilli(3L)).id();
+    dagRepo.finalizeRun(r3, DagRunStatus.SUCCESS, "done");
+
+    assertEquals(2, dagRepo.countActiveRuns(dagId));
+  }
+}

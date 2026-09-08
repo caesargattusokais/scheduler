@@ -1,12 +1,16 @@
 package dev.scheduler.server.config;
 
+import dev.scheduler.core.Dag;
 import dev.scheduler.core.Task;
+import dev.scheduler.persistence.DagRepository;
 import dev.scheduler.persistence.ExecutionRepository;
+import dev.scheduler.persistence.JdbcDagRepository;
 import dev.scheduler.persistence.JdbcExecutionRepository;
 import dev.scheduler.persistence.JdbcShardRepository;
 import dev.scheduler.persistence.JdbcTaskRepository;
 import dev.scheduler.persistence.ShardRepository;
 import dev.scheduler.persistence.TaskRepository;
+import dev.scheduler.server.dag.DagEngine;
 import dev.scheduler.server.execute.ExecutorWorker;
 import dev.scheduler.server.handler.DemoHandler;
 import dev.scheduler.server.handler.ExecutionHandler;
@@ -65,6 +69,11 @@ public class Beans {
   }
 
   @Bean
+  DagRepository dagRepository(JdbcTemplate jdbc) {
+    return new JdbcDagRepository(jdbc);
+  }
+
+  @Bean
   ExecutionHandler demoHandler() {
     return new DemoHandler();
   }
@@ -88,6 +97,12 @@ public class Beans {
   TriggerEngine triggerEngine(TaskRepository tasks, ExecutionRepository execs,
                               ShardRepository shards, LeaderElection leader, Clock clock) {
     return new TriggerEngine(tasks, execs, shards, leader, clock);
+  }
+
+  @Bean
+  DagEngine dagEngine(DagRepository dags, TaskRepository tasks, ShardRepository shards,
+                      LeaderElection leader, Clock clock) {
+    return new DagEngine(dags, tasks, shards, leader, clock);
   }
 
   /** 重试决策纯类:只判定"应否重试/退避多久",不含 DB 与时钟。 */
@@ -139,6 +154,19 @@ public class Beans {
     };
   }
 
+  /** 每 DAG 指标(spec §6):active 未终态 dag_run 计数。已知重启边界:新 DAG 重启后才有 series(镜像 per-task)。 */
+  @Bean
+  MeterBinder dagMetrics(DagRepository dags) {
+    return registry -> {
+      for (Dag d : dags.findAllDags()) {
+        Gauge.builder("scheduler_dag_runs_active", () -> (double) dags.countActiveRuns(d.id()))
+            .tag("dag_id", Long.toString(d.id()))
+            .tag("dag_name", d.name())
+            .register(registry);
+      }
+    };
+  }
+
   /** 固定周期触发扫描;#5:每 tick 均兜底,DB 抖动只杀一拍不杀调度线程。 */
   @Bean
   @ConditionalOnProperty(name = "scheduler.loop.enabled", havingValue = "true", matchIfMissing = true)
@@ -163,6 +191,12 @@ public class Beans {
   @ConditionalOnProperty(name = "scheduler.reconcile.enabled", havingValue = "true", matchIfMissing = true)
   ReconcileLoop reconcileLoop(Reconciler reconciler, LeaderElection leader) {
     return new ReconcileLoop(reconciler, leader);
+  }
+
+  @Bean
+  @ConditionalOnProperty(name = "scheduler.dag.enabled", havingValue = "true", matchIfMissing = true)
+  DagLoop dagLoop(DagEngine engine) {
+    return new DagLoop(engine);
   }
 
   public static final class ScanLoop {
@@ -219,6 +253,25 @@ public class Beans {
         reconciler.scanOnce();
       } catch (Throwable t) {
         log.warn("reconcile loop tick failed; continuing next tick", t);
+      }
+    }
+  }
+
+  /** DAG 调度循环:固定周期触发 DagEngine.scanOnce();失败兜底不杀线程(镜像 ScanLoop)。 */
+  public static final class DagLoop {
+    private static final Logger log = LoggerFactory.getLogger(DagLoop.class);
+    private final DagEngine engine;
+
+    DagLoop(DagEngine engine) {
+      this.engine = engine;
+    }
+
+    @Scheduled(fixedDelayString = "${scheduler.dag.delay-ms:5000}")
+    public void tick() {
+      try {
+        engine.scanOnce();
+      } catch (Throwable t) {
+        log.warn("dag scan loop tick failed; continuing next tick", t);
       }
     }
   }
