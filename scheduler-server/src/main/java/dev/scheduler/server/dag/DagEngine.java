@@ -8,6 +8,7 @@ import dev.scheduler.core.DagRunNode;
 import dev.scheduler.core.DagRunNodeStatus;
 import dev.scheduler.core.DagRunStatus;
 import dev.scheduler.core.Execution;
+import dev.scheduler.core.ExecutionStatus;
 import dev.scheduler.core.Shard;
 import dev.scheduler.core.Task;
 import dev.scheduler.persistence.DagRepository;
@@ -142,9 +143,9 @@ public class DagEngine {
     if (n.executionId() == null) return;
     List<Shard> ss = shards.findShards(n.executionId());
     if (!ss.stream().allMatch(s -> s.status().isTerminal())) return; // 未全终态 → 保持 RUNNING,等 worker/对账
-    boolean anyFailed = ss.stream().anyMatch(s -> s.status() == dev.scheduler.core.ExecutionStatus.FAILED);
+    boolean anyFailed = ss.stream().anyMatch(s -> s.status() == ExecutionStatus.FAILED);
     DagRunNodeStatus t = anyFailed ? DagRunNodeStatus.FAILED
-        : ss.stream().anyMatch(s -> s.status() == dev.scheduler.core.ExecutionStatus.CANCELED)
+        : ss.stream().anyMatch(s -> s.status() == ExecutionStatus.CANCELED)
             ? DagRunNodeStatus.CANCELED : DagRunNodeStatus.SUCCESS;
     String detail = anyFailed ? "shards failed"
         : (t == DagRunNodeStatus.CANCELED ? "shards cancelled" : "all shards ok");

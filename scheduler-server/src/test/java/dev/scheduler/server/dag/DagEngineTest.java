@@ -289,4 +289,32 @@ class DagEngineTest {
       assertEquals(1L, runOutcomeCount(run.id(), "CANCELED"));
     } finally { leader.close(); }
   }
+
+  /** 读侧取消收敛(spec §3.1 规则 2):A 的 shards 被取消 → DagEngine 派生 A CANCELED;PENDING 下游 B 不以手工
+   *  置 CANCELED,而是下一 scan 由引擎据上游 CANCELED 自行派生 CANCELED(绝不 spawn)→ run CANCELED。
+   *  覆盖引擎 anyCancelled → CANCELED 分支(区别于 test 5 的手工级联)。 */
+  @Test void upstreamCancelled_downstreamCancelled_readSideDerived() {
+    long t1 = newTask(1), t2 = newTask(1);
+    Dag dag = newDag(null, Map.of("A", t1, "B", t2), edges(new String[]{"A", "B"}));
+    var leader = new AdvisoryLockLeaderElection(jdbc);
+    try {
+      var engine = engine(leader);
+      DagRun run = dags.createManualRun(dag.id());
+
+      engine.scanOnce(); // S1:A spawn RUNNING;B PENDING
+      assertEquals(DagRunNodeStatus.RUNNING, node(run.id(), "A").status());
+      assertNotNull(node(run.id(), "A").executionId());
+      assertEquals(DagRunNodeStatus.PENDING, node(run.id(), "B").status());
+
+      setShardStatus(run.id(), "A", "CANCELED"); // 模拟 worker/取消把 A 的 shards 收为 CANCELED
+      engine.scanOnce(); // S2:A 据 shards 派生 CANCELED;B 本 scan 仍见 A scan-start RUNNING → PENDING(跨周期)
+      assertEquals(DagRunNodeStatus.CANCELED, node(run.id(), "A").status());
+      assertEquals(DagRunNodeStatus.PENDING, node(run.id(), "B").status());
+
+      engine.scanOnce(); // S3:B 上游 A 终态 CANCELED → 引擎读侧派生 B CANCELED(非手工置),绝不 spawn
+      assertEquals(DagRunNodeStatus.CANCELED, node(run.id(), "B").status());
+      assertNull(node(run.id(), "B").executionId(), "读侧取消收敛的 PENDING 下游绝不 spawn");
+      assertEquals(DagRunStatus.CANCELED, dags.findRun(run.id()).orElseThrow().status());
+    } finally { leader.close(); }
+  }
 }
