@@ -764,7 +764,7 @@ git commit -m "feat(server): M4 DagEngine — cron trigger + propagation, lazy n
 
 **Files:**
 - Create: `scheduler-server/src/main/java/dev/scheduler/server/service/DagQueryService.java`
-- Create: `scheduler-server/src/main/java/dev/scheduler/server/cons/DagController.java`
+- Create: `scheduler-server/src/main/java/dev/scheduler/server/web/DagController.java`
 - Modify: `scheduler-server/src/main/java/dev/scheduler/server/config/Beans.java` (add `dagQueryService`-independent controller autowiring is done by Spring; add `dagMetrics` `MeterBinder`)
 - Modify: `scheduler-server/src/test/java/dev/scheduler/server/web/ApiIntegrationTest.java` (add `scheduler.dag.enabled=false`, autowire `DagEngine`/`DagRepository`, add dag E2E + cycle-400 + cancel + metrics tests)
 - Modify: `scheduler-server/src/test/java/dev/scheduler/server/web/ApiIntegrationTest.java` must not touch V1–V3 behavior.
