@@ -116,6 +116,8 @@ public class DagController {
         else shards.cancelParentImmediate(n.executionId());
       }
     }
+    // 操作者取消把全部非终态节点一次性置 CANCELED → 全节点已终态,立即固化终态(镜像 M3 cancelParentImmediate),
+    // 不同于引擎 §3.3 的"下一 scan 收敛"。finalizeRun CAS-0 幂等,重放安全。
     dags.finalizeRun(runId, DagRunStatus.CANCELED, "cancelled by operator");
     return ResponseEntity.ok(query.runDetail(runId).orElseThrow());
   }

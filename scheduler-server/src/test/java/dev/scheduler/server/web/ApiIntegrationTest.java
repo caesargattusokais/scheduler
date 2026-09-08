@@ -582,8 +582,6 @@ class ApiIntegrationTest {
     long runId = triggerDag(dagId);  // 仅手动 run,幂等可断言 1 条
 
     dagEngine.scanOnce();            // A 是根(无上游)→ spawn A → RUNNING;B 等上游(PENDING)
-
-    dagEngine.scanOnce();            // A 是根(无上游)→ spawn A → RUNNING;B 等上游(PENDING)
     assertTrue(executorWorker.workOne(), "A 的 shard 应被认领并跑成功");
     reconciler.scanOnce();           // 汇聚 A 的父 execution → SUCCESS
     dagEngine.scanOnce();            // A 由 shards 派生 SUCCESS;B 仍 PENDING(本周期上游快照 RUNNING)
