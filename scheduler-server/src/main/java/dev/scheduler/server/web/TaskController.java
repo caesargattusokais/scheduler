@@ -82,7 +82,7 @@ public class TaskController {
         req.timeoutSeconds() == null ? existing.timeoutSeconds() : req.timeoutSeconds(),
         req.maxRetries() == null ? existing.maxRetries() : req.maxRetries(),
         req.backoffMs() == null ? existing.backoffMs() : req.backoffMs(),
-        req.retryableFailurePattern(),
+        req.retryableFailurePattern() == null ? existing.retryableFailurePattern() : req.retryableFailurePattern(),
         req.maxActiveConcurrent() == null ? existing.maxActiveConcurrent() : req.maxActiveConcurrent(),
         existing.enabled(),
         req.paused() == null ? existing.paused() : req.paused());

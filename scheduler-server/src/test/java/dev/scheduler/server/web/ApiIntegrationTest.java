@@ -206,6 +206,26 @@ class ApiIntegrationTest {
         .andExpect(status().isBadRequest());
   }
 
+  /** 部分 PUT 省略 retryableFailurePattern 时,不得清空既有重试 pattern(其它可空字段同款 null-fallback)。 */
+  @Test
+  void putOmittingRetryPattern_keepsExistingPattern() throws Exception {
+    long id = postTaskWithRetry("retain-pattern-task", "demo", 2, 1500, ".*custom-err.*");
+
+    MvcResult r = mvc.perform(put("/api/v1/tasks/" + id)
+            .contentType(MediaType.APPLICATION_JSON)
+            .content("""
+                {"name":"renamed-pattern","kind":"cron","handlerRef":"demo","cron":"0 */6 * * * *",
+                 "shardCount":2,"timeoutSeconds":900}"""))
+        .andExpect(status().isOk()).andReturn();
+    String body = r.getResponse().getContentAsString();
+    assertTrue(body.contains("\"name\":\"renamed-pattern\""));
+    assertTrue(body.contains(".*custom-err.*"), "省略 retryableFailurePattern 不得清空既有 pattern:\n" + body);
+
+    String got = mvc.perform(get("/api/v1/tasks/" + id)).andExpect(status().isOk())
+        .andReturn().getResponse().getContentAsString();
+    assertTrue(got.contains(".*custom-err.*"), "GET 复读:pattern 应保留:\n" + got);
+  }
+
   @Test
   void manualTrigger_createsDueExecution() throws Exception {
     long id = postTask("trigger-task");
