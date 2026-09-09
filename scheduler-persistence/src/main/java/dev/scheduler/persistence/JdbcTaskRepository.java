@@ -45,6 +45,17 @@ public class JdbcTaskRepository implements TaskRepository {
     return jdbc.query("SELECT * FROM app_task WHERE enabled AND NOT paused AND cron IS NOT NULL", MAP);
   }
   @Override public List<Task> findAll() { return jdbc.query("SELECT * FROM app_task ORDER BY id", MAP); }
+  @Override public boolean update(long id, Task t) {
+    int rows = jdbc.update("""
+        UPDATE app_task SET name=?, kind=?, handler_ref=?, cron=?, shard_count=?,
+               timeout_seconds=?, max_retries=?, backoff_ms=?,
+               retryable_failure_pattern=?, max_active_concurrent=?, paused=?, updated_at=now()
+        WHERE id=?""",
+        t.name(), t.kind(), t.handlerRef(), t.cron(), t.shardCount(), t.timeoutSeconds(),
+        t.maxRetries(), t.backoffMs(), t.retryableFailurePattern(), t.maxActiveConcurrent(),
+        t.paused(), id);
+    return rows > 0;
+  }
   @Override public void setPaused(long id, boolean paused) {
     jdbc.update("UPDATE app_task SET paused=?, updated_at=now() WHERE id=?", paused, id);
   }

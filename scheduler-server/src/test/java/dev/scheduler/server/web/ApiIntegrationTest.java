@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -180,6 +181,52 @@ class ApiIntegrationTest {
   }
 
   @Test
+  void putEditsTask() throws Exception {
+    long id = postTask("put-edit"); // 复用本类既有建 task 辅助
+    MvcResult r = mvc.perform(put("/api/v1/tasks/" + id)
+            .contentType(MediaType.APPLICATION_JSON)
+            .content("""
+                {"name":"renamed","kind":"cron","handlerRef":"demo","cron":"0 */6 * * * *",
+                 "shardCount":3,"timeoutSeconds":600,"maxRetries":2,"backoffMs":2000,
+                 "maxActiveConcurrent":4,"paused":true}"""))
+        .andExpect(status().isOk()).andReturn();
+    String body = r.getResponse().getContentAsString();
+    assertTrue(body.contains("\"name\":\"renamed\""));
+    assertTrue(body.contains("\"shardCount\":3"));
+    assertTrue(body.contains("\"cron\":\"0 */6 * * * *\""));
+
+    mvc.perform(put("/api/v1/tasks/999999999")
+            .contentType(MediaType.APPLICATION_JSON)
+            .content("{}")).andExpect(status().isNotFound());
+    mvc.perform(put("/api/v1/tasks/" + id)
+            .contentType(MediaType.APPLICATION_JSON)
+            .content("""
+                {"name":"","kind":"cron","handlerRef":"x","cron":"0 */6 * * * *",
+                 "shardCount":1}"""))
+        .andExpect(status().isBadRequest());
+  }
+
+  /** 部分 PUT 省略 retryableFailurePattern 时,不得清空既有重试 pattern(其它可空字段同款 null-fallback)。 */
+  @Test
+  void putOmittingRetryPattern_keepsExistingPattern() throws Exception {
+    long id = postTaskWithRetry("retain-pattern-task", "demo", 2, 1500, ".*custom-err.*");
+
+    MvcResult r = mvc.perform(put("/api/v1/tasks/" + id)
+            .contentType(MediaType.APPLICATION_JSON)
+            .content("""
+                {"name":"renamed-pattern","kind":"cron","handlerRef":"demo","cron":"0 */6 * * * *",
+                 "shardCount":2,"timeoutSeconds":900}"""))
+        .andExpect(status().isOk()).andReturn();
+    String body = r.getResponse().getContentAsString();
+    assertTrue(body.contains("\"name\":\"renamed-pattern\""));
+    assertTrue(body.contains(".*custom-err.*"), "省略 retryableFailurePattern 不得清空既有 pattern:\n" + body);
+
+    String got = mvc.perform(get("/api/v1/tasks/" + id)).andExpect(status().isOk())
+        .andReturn().getResponse().getContentAsString();
+    assertTrue(got.contains(".*custom-err.*"), "GET 复读:pattern 应保留:\n" + got);
+  }
+
+  @Test
   void manualTrigger_createsDueExecution() throws Exception {
     long id = postTask("trigger-task");
 
@@ -192,6 +239,22 @@ class ApiIntegrationTest {
         .andExpect(status().isOk())
         .andExpect(jsonPath("$[*].id", hasItem((int) execId)))
         .andExpect(jsonPath("$[?(@.id == " + execId + ")].status").value("DUE")); // worker 循环已关,保持 DUE
+  }
+
+  @Test void rerunCreatesFreshExecution() throws Exception {
+    long id = postTask("rerun-me");
+    // 先手动触发一轮 → executions 现有 1 条
+    mvc.perform(post("/api/v1/tasks/" + id + "/trigger"))
+        .andExpect(status().isCreated());
+    // 重跑 → 再新建一轮(id 递增、父 DUE、taskId 匹配)
+    MvcResult r = mvc.perform(post("/api/v1/tasks/" + id + "/rerun"))
+        .andExpect(status().isCreated()).andReturn();
+    long newExec = objectMapper.readTree(r.getResponse().getContentAsString())
+        .path("id").asLong();
+    assertTrue(newExec > 0);
+    String body = mvc.perform(get("/api/v1/executions?taskId=" + id))
+        .andExpect(status().isOk()).andReturn().getResponse().getContentAsString();
+    assertEquals(2, objectMapper.readTree(body).size());
   }
 
   @Test
