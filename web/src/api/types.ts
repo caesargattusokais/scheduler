@@ -72,3 +72,28 @@ export interface CreateTaskRequest {
 export interface UpdateTaskRequest extends CreateTaskRequest {
   paused?: boolean;
 }
+
+export interface Dag {
+  id: number; name: string;
+  description: string | null; cron: string;
+  enabled: boolean; paused: boolean;
+  createdAt: string | null; updatedAt: string | null;
+}
+/** 镜像 DagController.DagDetail。 */
+export interface DagDetail { dag: Dag; nodes: DagNode[]; edges: DagEdge[]; }
+export interface DagNode { id: number; dagId: number; nodeKey: string; taskId: number; sortOrder: number; }
+export interface DagEdge { id: number; dagId: number; fromNodeId: number; toNodeId: number; }
+export interface DagRun {
+  id: number; dagId: number; idempotencyKey: string;
+  status: string; triggerReason: string; cancelRequested: boolean;
+  finishedAt: string | null; createdAt: string | null;
+}
+export interface DagRunNode {
+  id: number; dagRunId: number; nodeKey: string; taskId: number;
+  executionId: number | null; status: string; sortOrder: number;
+  detail: string | null; createdAt: string | null; finishedAt: string | null;
+}
+export interface NodeDetail { node: DagRunNode; shards: Shard[]; }
+export interface RunDetail { run: DagRun; status: string; nodes: NodeDetail[]; }
+/** /actuator/prometheus 解析后的单条系列。 */
+export interface ParsedMetric { name: string; tags: Record<string, string>; value: number; }

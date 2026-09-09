@@ -1,0 +1,1 @@
+export default function MetricsPage() { return <div>指标面板（M5.3）</div>; }
