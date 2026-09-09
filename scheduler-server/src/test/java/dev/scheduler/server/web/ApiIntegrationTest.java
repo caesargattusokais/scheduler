@@ -241,6 +241,22 @@ class ApiIntegrationTest {
         .andExpect(jsonPath("$[?(@.id == " + execId + ")].status").value("DUE")); // worker 循环已关,保持 DUE
   }
 
+  @Test void rerunCreatesFreshExecution() throws Exception {
+    long id = postTask("rerun-me");
+    // 先手动触发一轮 → executions 现有 1 条
+    mvc.perform(post("/api/v1/tasks/" + id + "/trigger"))
+        .andExpect(status().isCreated());
+    // 重跑 → 再新建一轮(id 递增、父 DUE、taskId 匹配)
+    MvcResult r = mvc.perform(post("/api/v1/tasks/" + id + "/rerun"))
+        .andExpect(status().isCreated()).andReturn();
+    long newExec = objectMapper.readTree(r.getResponse().getContentAsString())
+        .path("id").asLong();
+    assertTrue(newExec > 0);
+    String body = mvc.perform(get("/api/v1/executions?taskId=" + id))
+        .andExpect(status().isOk()).andReturn().getResponse().getContentAsString();
+    assertEquals(2, objectMapper.readTree(body).size());
+  }
+
   @Test
   void leadershipHeldScanOnce_thenWorkOne_reachesSuccess() throws Exception {
     long id = postTask("scan-success-task");

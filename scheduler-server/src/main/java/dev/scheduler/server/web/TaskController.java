@@ -116,14 +116,25 @@ public class TaskController {
     return tasks.findById(id).orElseThrow(() -> notFound("task " + id));
   }
 
-  /** 手动触发一次:登记一条 DUE execution,交由执行器认领派发。 */
   @PostMapping("/{id}/trigger")
   public ResponseEntity<Execution> trigger(@PathVariable long id) {
-    Task t = requireTask(id);
-    String key = "manual:" + t.id() + ":" + UUID.randomUUID();
+    return ResponseEntity.status(HttpStatus.CREATED)
+        .body(manualRun(id, UUID.randomUUID().toString()));
+  }
+
+  /** 任务整体重跑:无条件新建一轮手动 run(spec §1.2;v1 无参)。 */
+  @PostMapping("/{id}/rerun")
+  public ResponseEntity<Execution> rerun(@PathVariable long id) {
+    return ResponseEntity.status(HttpStatus.CREATED)
+        .body(manualRun(id, "rerun-" + UUID.randomUUID()));
+  }
+
+  /** 手动触发:建父 execution + 其 shard(与 trigger 共用底座)。 */
+  private Execution manualRun(long taskId, String suffix) {
+    Task t = requireTask(taskId);
+    String key = "manual:" + t.id() + ":" + suffix;
     long pid = shards.createParentWithShards(t.id(), key, t.shardCount()).id();
-    Execution e = shards.findParent(pid).orElseThrow(() -> notFound("execution " + pid));
-    return ResponseEntity.status(HttpStatus.CREATED).body(e);
+    return shards.findParent(pid).orElseThrow(() -> notFound("execution " + pid));
   }
 
   private Task requireTask(long id) {
