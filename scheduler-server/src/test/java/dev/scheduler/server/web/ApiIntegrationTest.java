@@ -243,16 +243,14 @@ class ApiIntegrationTest {
         .andExpect(jsonPath("$[?(@.id == " + execId + ")].status").value("DUE")); // worker 循环已关,保持 DUE
   }
 
-  /** M5.2:GET /executions from/to 时间窗过滤(started_at)。父 header 的 started_at 恒为 NULL(shard claim 以
-   *  DB now() 回填到 execution_shard.started_at,父 execution.started_at 从不写),M5.2 时间窗作用于父列,
-   *  故先触发建父后再 JDBC 确定性回填一帧 now()(镜像同文件其它用例的 SQL 预置方式)。窗口含该帧 → 1 条,
-   *  更早窗口 → 0 条。 */
+  /** M5.2:GET /executions from/to 时间窗过滤(started_at)。父 execution.started_at 在建父即回填 now()
+   *  (createParentWithShards INSERT now()),故真实 POST /tasks/{id}/trigger 后时间窗应含该父。窗口含该帧
+   *  → 1 条,更早窗口 → 0 条。 */
   @Test
   void executionsTimeWindowFilters() throws Exception {
     resetDb();
     long id = postTask("tw");
-    long parentId = triggerParent(id); // POST /tasks/{id}/trigger → 201,建 1 个 execution 父(DUE)
-    jdbc.update("UPDATE execution SET started_at = now() WHERE id=?", parentId);
+    triggerParent(id); // POST /tasks/{id}/trigger → 201,父 DUE 且 started_at=now()(建父即回填)
     String from = Instant.now().minusSeconds(60).toString();
     String to = Instant.now().plusSeconds(60).toString();
     mvc.perform(get("/api/v1/executions")
@@ -269,8 +267,8 @@ class ApiIntegrationTest {
         .andExpect(jsonPath("$", hasSize(0)));
   }
 
-  /** M5.2:GET /executions limit/offset 分页(started_at 恒 NULL 的父 header 亦分页,ORDER BY started_at
-   *  DESC NULLS LAST 下 NULL 同键仍按行取胜败);trigger 3 次 → 3 父,limit=2 → 2 条,再 offset=2 → 剩 1 条。 */
+  /** M5.2:GET /executions limit/offset 分页(ORDER BY started_at DESC NULLS LAST, id DESC 稳定同毫秒 now() 平局);
+   *  trigger 3 次 → 3 父,limit=2 → 2 条,再 offset=2 → 剩 1 条。 */
   @Test
   void executionsPagination() throws Exception {
     resetDb();

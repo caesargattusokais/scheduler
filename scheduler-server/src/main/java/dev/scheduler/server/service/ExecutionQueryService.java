@@ -40,8 +40,8 @@ public class ExecutionQueryService {
 
   /**
    * 执行列表:taskId/status/from/to 可选过滤 + limit/offset 分页。时间窗按 started_at 过滤
-   * (Timestamp.from 显式转 timestamptz 参数);确定序为 started_at DESC NULLS LAST 支撑分页/时间窗;
-   * LIMIT/OFFSET 恒追加(where true 保证串合法)。limit 默认 100 上限 500,offset 默认 0。
+   * (Timestamp.from 显式转 timestamptz 参数);确定序为 started_at DESC NULLS LAST, id DESC(稳定同毫秒平局)
+   * 支撑分页/时间窗;LIMIT/OFFSET 恒追加(where true 保证串合法)。limit 默认 100 上限 500,offset 默认 0。
    */
   public List<Execution> list(Long taskId, String status, Instant from, Instant to,
                               Integer limit, Integer offset) {
@@ -63,7 +63,7 @@ public class ExecutionQueryService {
       sql.append(" AND started_at <= ?");
       args.add(Timestamp.from(to));
     }
-    sql.append(" ORDER BY started_at DESC NULLS LAST");
+    sql.append(" ORDER BY started_at DESC NULLS LAST, id DESC");
     int lim = (limit == null) ? 100 : Math.min(Math.max(limit, 1), 500);
     int off = (offset == null) ? 0 : Math.max(offset, 0);
     sql.append(" LIMIT ? OFFSET ?");

@@ -53,8 +53,8 @@ public class JdbcShardRepository implements ShardRepository {
     // existing==0 闸、N 个 shard 批量插入 三者原子提交;中途崩溃不留孤儿父/部分 shard。
     Long parentId = tx.execute(s -> {
       Long id = jdbc.queryForObject("""
-        INSERT INTO execution (task_id, status, idempotency_key, shard_index, shard_count)
-        VALUES (?, 'DUE', ?, 0, ?)
+        INSERT INTO execution (task_id, status, idempotency_key, shard_index, shard_count, started_at)
+        VALUES (?, 'DUE', ?, 0, ?, now())
         ON CONFLICT (idempotency_key) DO UPDATE SET idempotency_key = EXCLUDED.idempotency_key
         RETURNING id""", Long.class, taskId, parentKey, shardCount);
       final long pid = id;
