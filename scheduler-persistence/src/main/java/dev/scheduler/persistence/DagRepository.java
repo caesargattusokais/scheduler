@@ -59,6 +59,13 @@ public interface DagRepository {
    *  CAS 0 行=已终态 → 幂等返回 false,不落误导性 outcome。 */
   boolean finalizeRun(long runId, DagRunStatus terminal, String detail);
 
+  /** 单节点重跑(仅 operator):把终态节点回绕到新一轮运行——CAS on status IN (SUCCESS,FAILED,SKIPPED,CANCELED)
+   *  置 status='RUNNING'、execution_id 重挂新 execution、finished_at 清 NULL;并把 dag_run 重开为 'PENDING'
+   *  (finished_at=NULL)使 findActiveRuns 重新纳入、引擎随后重派生。同事务落 dag_run_node_outcome(RUNNING,'node rerun')。
+   *  CAS 0 行=节点已非终态/竞态 → false,不落 outcome。调用方必须是 DagEngine(引擎是运行表唯一写者)。
+   */
+  boolean rerunNodeToExecution(long runId, long nodeId, long newExecutionId);
+
   /** 置 run 取消请求标志(cancel_requested=true);仅 PENDING run,静默跳过已终态。 */
   void requestCancelRun(long runId);
 

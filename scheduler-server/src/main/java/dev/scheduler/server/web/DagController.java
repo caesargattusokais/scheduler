@@ -11,6 +11,7 @@ import dev.scheduler.persistence.DagRepository;
 import dev.scheduler.persistence.DagRepository.EdgeInput;
 import dev.scheduler.persistence.DagRepository.NodeInput;
 import dev.scheduler.persistence.ShardRepository;
+import dev.scheduler.server.dag.DagEngine;
 import dev.scheduler.server.service.DagQueryService;
 import dev.scheduler.server.service.DagQueryService.RunDetail;
 import java.util.List;
@@ -32,11 +33,13 @@ public class DagController {
 
   private final DagRepository dags;
   private final ShardRepository shards;
+  private final DagEngine dagEngine;
   private final DagQueryService query;
 
-  public DagController(DagRepository dags, ShardRepository shards) {
+  public DagController(DagRepository dags, ShardRepository shards, DagEngine dagEngine) {
     this.dags = dags;
     this.shards = shards;
+    this.dagEngine = dagEngine;
     this.query = new DagQueryService(dags, shards);
   }
 
@@ -120,6 +123,15 @@ public class DagController {
     // 不同于引擎 §3.3 的"下一 scan 收敛"。finalizeRun CAS-0 幂等,重放安全。
     dags.finalizeRun(runId, DagRunStatus.CANCELED, "cancelled by operator");
     return ResponseEntity.ok(query.runDetail(runId).orElseThrow());
+  }
+
+  /** M5.3 §1.4 单节点重跑:仅终态节点可用;404 缺失,非终态 → 409;成功 200 + 节点现态。节点态变更经 DagEngine。 */
+  @PostMapping("/runs/{runId}/nodes/{nodeId}/rerun")
+  public ResponseEntity<DagRunNode> rerunNode(@PathVariable long runId, @PathVariable long nodeId) {
+    dags.findRun(runId).orElseThrow(() -> notFound("dag run " + runId));
+    DagRunNode node = dags.findNode(nodeId).orElseThrow(() -> notFound("dag run node " + nodeId));
+    if (!node.dagRunId().equals(runId)) throw notFound("dag run node " + nodeId);
+    return ResponseEntity.ok(dagEngine.rerunNode(runId, nodeId));
   }
 
   private Dag byId(long id) { return dags.findDag(id).orElseThrow(() -> notFound("dag " + id)); }

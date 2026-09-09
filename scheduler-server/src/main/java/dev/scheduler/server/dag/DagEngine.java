@@ -9,6 +9,7 @@ import dev.scheduler.core.DagRunNodeStatus;
 import dev.scheduler.core.DagRunStatus;
 import dev.scheduler.core.Execution;
 import dev.scheduler.core.ExecutionStatus;
+import dev.scheduler.core.IdempotencyKeys;
 import dev.scheduler.core.Shard;
 import dev.scheduler.core.Task;
 import dev.scheduler.persistence.DagRepository;
@@ -83,6 +84,26 @@ public class DagEngine {
       if (to != null && from != null) up.computeIfAbsent(to, k -> new ArrayList<>()).add(from);
     }
     return up;
+  }
+
+  /** M5.3 §1.4 节点单节点重跑(仅 operator):precondition 节点处终态(else IllegalStateException→409)。
+   *  建新 execution(createParentWithShards,键 forNodeRerun)→ 经 dagRepository.rerunNodeToExecution 把节点
+   *  回绕到新 execution + 重开 run → 返回回绕后节点现态。下游不自动复位(propagateRun 跳过已终态)。
+   *  节点态写仅经本方法(引擎是 dag 运行表唯一写者)。
+   */
+  public DagRunNode rerunNode(long runId, long nodeId) {
+    DagRunNode n = dags.findNode(nodeId).orElseThrow(
+        () -> new IllegalStateException("no dag_run_node " + nodeId));
+    if (!n.dagRunId().equals(runId)) throw new IllegalStateException("node " + nodeId + " not in run " + runId);
+    if (!n.status().isTerminal()) throw new IllegalStateException(
+        "node " + nodeId + " is " + n.status() + " and cannot be rerun");
+    Task task = tasks.findById(n.taskId()).orElseThrow();
+    Execution parent = shards.createParentWithShards(
+        n.taskId(), IdempotencyKeys.forNodeRerun(runId, n.nodeKey()), task.shardCount());
+    if (!dags.rerunNodeToExecution(runId, nodeId, parent.id())) {
+      throw new IllegalStateException("node " + nodeId + " was not terminal; rerun cancelled");
+    }
+    return dags.findNode(nodeId).orElseThrow();
   }
 
   private void propagateRun(DagRun run, List<DagRunNode> nodes) {
