@@ -244,6 +244,23 @@ public class JdbcDagRepository implements DagRepository {
     });
   }
 
+  @Override public boolean rerunNodeToExecution(long runId, long nodeId, long newExecutionId) {
+    final boolean[] ok = {false};
+    tx.executeWithoutResult(s -> {
+      int upd = jdbc.update("""
+        UPDATE dag_run_node SET status='RUNNING', execution_id=?, finished_at=NULL
+        WHERE id=? AND status IN ('SUCCESS','FAILED','SKIPPED','CANCELED')""",
+        newExecutionId, nodeId);
+      if (upd == 0) return; // 节点非终态/竞态 → 静默
+      jdbc.update("UPDATE dag_run SET status='PENDING', finished_at=NULL WHERE id=? AND status<>'PENDING'",
+          runId); // 重开 run,引擎随后重扫重派生(幂等)
+      jdbc.update("INSERT INTO dag_run_node_outcome (node_id, status, detail) VALUES (?,?,?)",
+          nodeId, "RUNNING", "node rerun");
+      ok[0] = true;
+    });
+    return ok[0];
+  }
+
   @Override public void requestCancelRun(long runId) {
     jdbc.update("UPDATE dag_run SET cancel_requested=true WHERE id=? AND status='PENDING'", runId);
   }

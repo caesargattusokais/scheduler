@@ -3,6 +3,7 @@ package dev.scheduler.server.web;
 import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.is;
+import static org.hamcrest.Matchers.not;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
@@ -11,6 +12,7 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.scheduler.core.ExecutionStatus;
 import dev.scheduler.core.Shard;
@@ -100,6 +102,8 @@ class ApiIntegrationTest {
   @Autowired dev.scheduler.persistence.DagRepository dagRepository;
   /** 装配的 flaky handler 单例:"flaky" 任务首调抛错、次调成功;@BeforeEach 重装成 failNext 保持确定性。 */
   @Autowired FlakyHandler flakyHandler;
+  /** M5.3 §1.5:选主锁持有者,worker 活性 gauge(scheduler_worker_active)判据。 */
+  @Autowired dev.scheduler.server.leader.LeaderElection leader;
 
   /** 上下文启动(绑定时刻)前就存在的任务 id,用于断言 per-task 指标 series。 */
   private static long METRICS_TASK_ID;
@@ -759,6 +763,86 @@ class ApiIntegrationTest {
         "A 的父执行 shard 应全部级联 CANCELED");
   }
 
+  /** M5.3:终态节点单节点重跑——节点回 RUNNING(新 execution_id) → worker 跑新 execution → 终态重派生;下游不自动复位。 */
+  @Test
+  void dagNodeRerun_terminalRestartsAndDerivesAgain() throws Exception {
+    long t = postTask("rerun-success-task"); // demo handler, shardCount 1
+    long dagId = postDag("rerun-success-dag", new long[]{t, t}, new String[]{"A", "B"},
+        new String[][]{{"A", "B"}});
+    pauseDag(dagId);
+    long runId = triggerDag(dagId);
+    dagEngine.scanOnce();              // spawn A → RUNNING
+    assertTrue(executorWorker.workOne());      // A shard 成功
+    reconciler.scanOnce();             // A 父 SUCCESS
+    dagEngine.scanOnce();              // A 派生 SUCCESS
+    dagEngine.scanOnce();              // B 上游 SUCCESS → spawn B
+    assertTrue(executorWorker.workOne());      // B shard 成功
+    reconciler.scanOnce();             // B 父 SUCCESS
+    dagEngine.scanOnce();              // B 派生 SUCCESS → run 终态 SUCCESS
+
+    long aNodeId = dagNodeId(runId, "A");
+    long aExecBefore = dagNodeExecutionId(runId, "A");
+
+    mvc.perform(post("/api/v1/dags/runs/" + runId + "/nodes/" + aNodeId + "/rerun"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.status").value("RUNNING"))
+        .andExpect(jsonPath("$.executionId").value(is(not(aExecBefore))));
+
+    // 下游 B 不自动复位,仍 SUCCESS
+    mvc.perform(get("/api/v1/dags/runs/" + runId))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.nodes[1].node.status").value("SUCCESS"))
+        .andExpect(jsonPath("$.nodes[0].node.executionId").value(is(not(aExecBefore))));
+
+    // 新 execution 经引擎跑完 → 节点终态重派生(新 execution_id 不变)
+    assertTrue(executorWorker.workOne(), "A 的新 execution shard 应被认领并成功");
+    reconciler.scanOnce();
+    dagEngine.scanOnce();
+    mvc.perform(get("/api/v1/dags/runs/" + runId))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.status").value("SUCCESS"))
+        .andExpect(jsonPath("$.nodes[0].node.status").value("SUCCESS"))
+        .andExpect(jsonPath("$.nodes[0].node.executionId").value(is(not(aExecBefore))));
+  }
+
+  /** M5.3:非终态(PENDING/RUNNING)节点重跑 → 409。 */
+  @Test
+  void dagNodeRerun_nonTerminal_rejected409() throws Exception {
+    long t = postTask("rerun-terminal-task");
+    long dagId = postDag("rerun-terminal-dag", new long[]{t, t}, new String[]{"A", "B"},
+        new String[][]{{"A", "B"}});
+    pauseDag(dagId);
+    long runId = triggerDag(dagId);
+    dagEngine.scanOnce(); // A RUNNING;B PENDING
+
+    long aId = dagNodeId(runId, "A");   // RUNNING → 非终态
+    long bId = dagNodeId(runId, "B");   // PENDING  → 非终态
+    mvc.perform(post("/api/v1/dags/runs/" + runId + "/nodes/" + aId + "/rerun"))
+        .andExpect(status().isConflict());
+    mvc.perform(post("/api/v1/dags/runs/" + runId + "/nodes/" + bId + "/rerun"))
+        .andExpect(status().isConflict());
+  }
+
+  /** M5.3:已失败(FAILED)终态节点允许重跑 → 200 RUNNING(新建 execution)。 */
+  @Test
+  void dagNodeRerun_failedNodeAllowed() throws Exception {
+    long t = postTaskWithRetry("rerun-fail-task", "flaky", 0, 1000, ""); // 首调耗尽失败
+    long dagId = postDag("rerun-fail-dag", new long[]{t}, new String[]{"A"}, new String[][]{});
+    pauseDag(dagId);
+    long runId = triggerDag(dagId);
+    dagEngine.scanOnce();                 // spawn A
+    assertTrue(executorWorker.workOne()); // A shard 耗尽失败
+    reconciler.scanOnce();                // A 父 FAILED
+    dagEngine.scanOnce();                 // A 派生 FAILED → run FAILED
+
+    long aId = dagNodeId(runId, "A");
+    mvc.perform(post("/api/v1/dags/runs/" + runId + "/nodes/" + aId + "/rerun"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.status").value("RUNNING"));
+    mvc.perform(get("/api/v1/dags/runs/" + runId)).andExpect(status().isOk())
+        .andExpect(jsonPath("$.status").value("RUNNING")); // run 已重开
+  }
+
   /** M4:每 DAG 指标。绑定时刻前 seed 的 METRICS_DAG 由 @BeforeAll 预注册 series(@BeforeEach 仅清 app_task /
    *  app_dag_node,app_dag 头是父表不受 CASCADE truncate);此处重载 task 行与节点引用,触发一条 PENDING
    *  dag_run → scheduler_dag_runs_active 按非终态 dag_run 计数 = 1。 */
@@ -780,6 +864,31 @@ class ApiIntegrationTest {
         "scheduler_dag_runs_active 应计该 dag 非终态 dag_run 数(1 条 PENDING)");
   }
 
+  /** M5.3 §1.5:全局指标 gauge scheduler_dlq_depth 与 scheduler_worker_active。种子一条 FAILED+dead_letter shard。 */
+  @Test
+  void prometheus_globalMetrics() throws Exception {
+    long parentId = triggerParent(postTask("metrics-dlq-task"));
+    long shardId = shards.findShards(parentId).get(0).id();
+    jdbc.update("UPDATE execution_shard SET status='FAILED', dead_letter=true WHERE id=? AND status='DUE'", shardId);
+
+    String prom = mvc.perform(get("/actuator/prometheus"))
+        .andExpect(status().isOk()).andReturn().getResponse().getContentAsString();
+    assertTrue(prom.contains("scheduler_dlq_depth"), "missing scheduler_dlq_depth in prometheus:\n" + prom);
+    assertEquals(1.0, promGauge(prom, "scheduler_dlq_depth"), 0.0,
+        "scheduler_dlq_depth 应计 FAILED+dead_letter shard 数(1)");
+    assertTrue(prom.contains("scheduler_worker_active"), "missing scheduler_worker_active in prometheus");
+    assertEquals(leader.isLeader() ? 1.0 : 0.0, promGauge(prom, "scheduler_worker_active"), 0.0,
+        "scheduler_worker_active 应等于本进程选主锁持有判定");
+  }
+
+  /** 取 prometheus 文本中无标签 gauge 的数值(单 series)。 */
+  private double promGauge(String prom, String name) {
+    for (String line : prom.split("\n")) {
+      if (line.startsWith(name + " ")) return Double.parseDouble(line.substring(line.indexOf(' ') + 1));
+    }
+    throw new AssertionError("no plain-valued gauge " + name + " in:\n" + prom);
+  }
+
   /** 触发一次任务(扇出 → 父 header + N 个 DUE shard,shard_count 默认 1),返回父 execution id。 */
   private long triggerParent(long taskId) throws Exception {
     MvcResult r = mvc.perform(post("/api/v1/tasks/" + taskId + "/trigger"))
@@ -797,6 +906,23 @@ class ApiIntegrationTest {
     MvcResult r = mvc.perform(post("/api/v1/dags/" + dagId + "/trigger"))
         .andExpect(status().isCreated()).andReturn();
     return objectMapper.readTree(r.getResponse().getContentAsString()).get("id").asLong();
+  }
+
+  /** 取某 run 中指定 nodeKey 的 dag_run_node id(M5.3 rerun 用例)。 */
+  private long dagNodeId(long runId, String key) throws Exception {
+    String body = mvc.perform(get("/api/v1/dags/runs/" + runId))
+        .andExpect(status().isOk()).andReturn().getResponse().getContentAsString();
+    for (JsonNode n : objectMapper.readTree(body).get("nodes"))
+      if (n.get("node").get("nodeKey").asText().equals(key)) return n.get("node").get("id").asLong();
+    throw new AssertionError("no node " + key);
+  }
+  /** 取某 run 中指定 nodeKey 的 dag_run_node 当前 execution_id(M5.3 rerun 用例)。 */
+  private long dagNodeExecutionId(long runId, String key) throws Exception {
+    String body = mvc.perform(get("/api/v1/dags/runs/" + runId))
+        .andExpect(status().isOk()).andReturn().getResponse().getContentAsString();
+    for (JsonNode n : objectMapper.readTree(body).get("nodes"))
+      if (n.get("node").get("nodeKey").asText().equals(key)) return n.get("node").get("executionId").asLong();
+    throw new AssertionError("no node " + key);
   }
 
   /** 建 DAG(nodeKeys 各引用 taskIds 对应任务;edges 为 from/to 键对),期望 201,返回 dag id。 */

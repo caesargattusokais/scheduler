@@ -167,6 +167,16 @@ public class Beans {
     };
   }
 
+  /** M5.3 §1.5 全局指标:DLQ 深度(全局 gauge) + worker 存活(0/1 = 本进程是否持选主锁)。
+   *  死信计数 lazy 读 DB(scrape 时求值);worker 存活判定 isLeader()。v1 无 per-runner 心跳,选主锁持有即活性边界。 */
+  @Bean
+  MeterBinder schedulerGlobalMetrics(ShardRepository shards, LeaderElection leader) {
+    return registry -> {
+      Gauge.builder("scheduler_dlq_depth", () -> (double) shards.countDeadLetter()).register(registry);
+      Gauge.builder("scheduler_worker_active", () -> leader.isLeader() ? 1.0 : 0.0).register(registry);
+    };
+  }
+
   /** 固定周期触发扫描;#5:每 tick 均兜底,DB 抖动只杀一拍不杀调度线程。 */
   @Bean
   @ConditionalOnProperty(name = "scheduler.loop.enabled", havingValue = "true", matchIfMissing = true)

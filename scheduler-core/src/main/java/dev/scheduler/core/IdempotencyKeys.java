@@ -19,4 +19,9 @@ public final class IdempotencyKeys {
   public static String forManualDagRun(long dagId) {
     return "dag:" + dagId + ":manual:" + UUID.randomUUID();
   }
+
+  /** dag 节点重跑 → 新 execution 全局幂等键(每次新建 UUID,节点重跑每次独立一轮)。 */
+  public static String forNodeRerun(long runId, String nodeKey) {
+    return "dag:" + runId + ":node:" + nodeKey + ":rerun:" + UUID.randomUUID();
+  }
 }
