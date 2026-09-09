@@ -308,6 +308,11 @@ public class JdbcShardRepository implements ShardRepository {
     return c != null && c > 0;
   }
 
+  @Override public long countDeadLetter() {
+    Long c = jdbc.queryForObject("SELECT count(*) FROM execution_shard WHERE dead_letter", Long.class);
+    return c == null ? 0 : c;
+  }
+
   @Override public List<Shard> findDeathLetterShards() {
     return jdbc.query(
         "SELECT * FROM execution_shard WHERE status='FAILED' AND dead_letter ORDER BY id", MAP);

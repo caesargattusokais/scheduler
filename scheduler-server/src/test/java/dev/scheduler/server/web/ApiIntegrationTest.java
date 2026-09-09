@@ -102,6 +102,8 @@ class ApiIntegrationTest {
   @Autowired dev.scheduler.persistence.DagRepository dagRepository;
   /** 装配的 flaky handler 单例:"flaky" 任务首调抛错、次调成功;@BeforeEach 重装成 failNext 保持确定性。 */
   @Autowired FlakyHandler flakyHandler;
+  /** M5.3 §1.5:选主锁持有者,worker 活性 gauge(scheduler_worker_active)判据。 */
+  @Autowired dev.scheduler.server.leader.LeaderElection leader;
 
   /** 上下文启动(绑定时刻)前就存在的任务 id,用于断言 per-task 指标 series。 */
   private static long METRICS_TASK_ID;
@@ -860,6 +862,31 @@ class ApiIntegrationTest {
         "missing per-dag scheduler_dag_runs_active{dag_id=...} series in prometheus:\n" + prom);
     assertEquals(1.0, promDagGauge(prom, "scheduler_dag_runs_active", METRICS_DAG_ID), 0.0,
         "scheduler_dag_runs_active 应计该 dag 非终态 dag_run 数(1 条 PENDING)");
+  }
+
+  /** M5.3 §1.5:全局指标 gauge scheduler_dlq_depth 与 scheduler_worker_active。种子一条 FAILED+dead_letter shard。 */
+  @Test
+  void prometheus_globalMetrics() throws Exception {
+    long parentId = triggerParent(postTask("metrics-dlq-task"));
+    long shardId = shards.findShards(parentId).get(0).id();
+    jdbc.update("UPDATE execution_shard SET status='FAILED', dead_letter=true WHERE id=? AND status='DUE'", shardId);
+
+    String prom = mvc.perform(get("/actuator/prometheus"))
+        .andExpect(status().isOk()).andReturn().getResponse().getContentAsString();
+    assertTrue(prom.contains("scheduler_dlq_depth"), "missing scheduler_dlq_depth in prometheus:\n" + prom);
+    assertEquals(1.0, promGauge(prom, "scheduler_dlq_depth"), 0.0,
+        "scheduler_dlq_depth 应计 FAILED+dead_letter shard 数(1)");
+    assertTrue(prom.contains("scheduler_worker_active"), "missing scheduler_worker_active in prometheus");
+    assertEquals(leader.isLeader() ? 1.0 : 0.0, promGauge(prom, "scheduler_worker_active"), 0.0,
+        "scheduler_worker_active 应等于本进程选主锁持有判定");
+  }
+
+  /** 取 prometheus 文本中无标签 gauge 的数值(单 series)。 */
+  private double promGauge(String prom, String name) {
+    for (String line : prom.split("\n")) {
+      if (line.startsWith(name + " ")) return Double.parseDouble(line.substring(line.indexOf(' ') + 1));
+    }
+    throw new AssertionError("no plain-valued gauge " + name + " in:\n" + prom);
   }
 
   /** 触发一次任务(扇出 → 父 header + N 个 DUE shard,shard_count 默认 1),返回父 execution id。 */

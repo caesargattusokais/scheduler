@@ -83,6 +83,9 @@ public interface ShardRepository {
   /** 该父下是否仍有 RUNNING shard。 */
   boolean hasRunningShard(long parentId);
 
+  /** 全局死信 shard 计数(FAILED 且 dead_letter),指标 scheduler_dlq_depth 源。 */
+  long countDeadLetter();
+
   /** DLQ 读:FAILED 且已标 dead_letter 的分片,按 id 升序。 */
   List<Shard> findDeathLetterShards();
 
