@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -177,6 +178,32 @@ class ApiIntegrationTest {
         + "\"cron\":\"" + CRON + "\",\"shardCount\":0}";
     mvc.perform(post("/api/v1/tasks").contentType(MediaType.APPLICATION_JSON).content(body))
         .andExpect(status().isBadRequest()); // 镜像 maxRetries/timeout 等校验拒绝路径
+  }
+
+  @Test
+  void putEditsTask() throws Exception {
+    long id = postTask("put-edit"); // 复用本类既有建 task 辅助
+    MvcResult r = mvc.perform(put("/api/v1/tasks/" + id)
+            .contentType(MediaType.APPLICATION_JSON)
+            .content("""
+                {"name":"renamed","kind":"cron","handlerRef":"demo","cron":"0 */6 * * * *",
+                 "shardCount":3,"timeoutSeconds":600,"maxRetries":2,"backoffMs":2000,
+                 "maxActiveConcurrent":4,"paused":true}"""))
+        .andExpect(status().isOk()).andReturn();
+    String body = r.getResponse().getContentAsString();
+    assertTrue(body.contains("\"name\":\"renamed\""));
+    assertTrue(body.contains("\"shardCount\":3"));
+    assertTrue(body.contains("\"cron\":\"0 */6 * * * *\""));
+
+    mvc.perform(put("/api/v1/tasks/999999999")
+            .contentType(MediaType.APPLICATION_JSON)
+            .content("{}")).andExpect(status().isNotFound());
+    mvc.perform(put("/api/v1/tasks/" + id)
+            .contentType(MediaType.APPLICATION_JSON)
+            .content("""
+                {"name":"","kind":"cron","handlerRef":"x","cron":"0 */6 * * * *",
+                 "shardCount":1}"""))
+        .andExpect(status().isBadRequest());
   }
 
   @Test

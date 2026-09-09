@@ -8,5 +8,6 @@ public interface TaskRepository {
   Optional<Task> findById(long id);
   List<Task> findCronEnabled();
   List<Task> findAll();
+  boolean update(long id, Task t);
   void setPaused(long id, boolean paused);
 }

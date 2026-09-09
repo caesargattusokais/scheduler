@@ -20,4 +20,24 @@ class JdbcTaskRepositoryTest extends AbstractPostgresTest {
     repo.setPaused(created.id(), true);
     assertTrue(repo.findCronEnabled().isEmpty());
   }
+
+  @Test void update() {
+    var repo = new JdbcTaskRepository(jdbc);
+    var c = repo.create(new Task(null, "t1", "cron", "demo", "0 */5 * * * *",
+        1, 300, 0, 1000, null, 8, true, false));
+    boolean ok = repo.update(c.id(), new Task(c.id(), "t2", "cron", "demo",
+        "0 */6 * * * *", 3, 600, 2, 2000, ".*err.*", 4, true, true));
+    assertTrue(ok);
+    var cur = repo.findById(c.id()).orElseThrow();
+    assertEquals("t2", cur.name());
+    assertEquals("0 */6 * * * *", cur.cron());
+    assertEquals(3, cur.shardCount());
+    assertEquals(600, cur.timeoutSeconds());
+    assertEquals(2, cur.maxRetries());
+    assertEquals(2000L, cur.backoffMs());
+    assertEquals(".*err.*", cur.retryableFailurePattern());
+    assertEquals(4, cur.maxActiveConcurrent());
+    assertTrue(cur.paused());
+    assertFalse(repo.update(99999L, c)); // 不存在 → false
+  }
 }

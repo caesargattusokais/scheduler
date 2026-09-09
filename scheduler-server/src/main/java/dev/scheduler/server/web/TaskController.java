@@ -11,6 +11,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
@@ -33,6 +34,10 @@ public class TaskController {
       Integer shardCount, Integer timeoutSeconds, Integer maxRetries, Long backoffMs,
       String retryableFailurePattern, Integer maxActiveConcurrent) {}
 
+  public record UpdateTaskRequest(String name, String kind, String handlerRef, String cron,
+      Integer shardCount, Integer timeoutSeconds, Integer maxRetries, Long backoffMs,
+      String retryableFailurePattern, Integer maxActiveConcurrent, Boolean paused) {}
+
   @PostMapping
   public ResponseEntity<Task> create(@RequestBody CreateTaskRequest req) {
     if (req == null || req.name() == null || req.name().isBlank()) {
@@ -44,19 +49,8 @@ public class TaskController {
     if (req.cron() == null || req.cron().isBlank()) {
       throw new IllegalArgumentException("cron is required");
     }
-    validateCron(req.cron());
-    if (req.timeoutSeconds() != null && req.timeoutSeconds() < 0) {
-      throw new IllegalArgumentException("timeoutSeconds must be >= 0");
-    }
-    if (req.backoffMs() != null && req.backoffMs() < 0) {
-      throw new IllegalArgumentException("backoffMs must be >= 0");
-    }
-    if (req.maxRetries() != null && req.maxRetries() < 0) {
-      throw new IllegalArgumentException("maxRetries must be >= 0");
-    }
-    if (req.shardCount() != null && req.shardCount() < 1) {
-      throw new IllegalArgumentException("shardCount must be >= 1");
-    }
+    checkDefinition(req.name(), req.handlerRef(), req.cron(), req.shardCount(),
+        req.timeoutSeconds(), req.maxRetries(), req.backoffMs());
     Task created = tasks.create(new Task(
         null, req.name(), req.kind() == null ? "cron" : req.kind(), req.handlerRef(), req.cron(),
         req.shardCount() == null ? 1 : req.shardCount(),
@@ -66,6 +60,36 @@ public class TaskController {
         req.retryableFailurePattern(), req.maxActiveConcurrent() == null ? 8 : req.maxActiveConcurrent(),
         true, false));
     return ResponseEntity.status(HttpStatus.CREATED).body(created);
+  }
+
+  @PutMapping("/{id}")
+  public Task update(@PathVariable long id, @RequestBody UpdateTaskRequest req) {
+    Task existing = requireTask(id);
+    if (req == null || req.name() == null || req.name().isBlank()) {
+      throw new IllegalArgumentException("name is required");
+    }
+    if (req.handlerRef() == null || req.handlerRef().isBlank()) {
+      throw new IllegalArgumentException("handlerRef is required");
+    }
+    if (req.cron() == null || req.cron().isBlank()) {
+      throw new IllegalArgumentException("cron is required");
+    }
+    checkDefinition(req.name(), req.handlerRef(), req.cron(), req.shardCount(),
+        req.timeoutSeconds(), req.maxRetries(), req.backoffMs());
+    Task updated = new Task(id, req.name(), req.kind() == null ? existing.kind() : req.kind(),
+        req.handlerRef(), req.cron(),
+        req.shardCount() == null ? existing.shardCount() : req.shardCount(),
+        req.timeoutSeconds() == null ? existing.timeoutSeconds() : req.timeoutSeconds(),
+        req.maxRetries() == null ? existing.maxRetries() : req.maxRetries(),
+        req.backoffMs() == null ? existing.backoffMs() : req.backoffMs(),
+        req.retryableFailurePattern(),
+        req.maxActiveConcurrent() == null ? existing.maxActiveConcurrent() : req.maxActiveConcurrent(),
+        existing.enabled(),
+        req.paused() == null ? existing.paused() : req.paused());
+    if (!tasks.update(id, updated)) {
+      throw notFound("task " + id);
+    }
+    return tasks.findById(id).orElseThrow(() -> notFound("task " + id));
   }
 
   @GetMapping
@@ -104,6 +128,16 @@ public class TaskController {
 
   private Task requireTask(long id) {
     return tasks.findById(id).orElseThrow(() -> notFound("task " + id));
+  }
+
+  /** 定义域数值合法性:负值即 400;cron 必须 6/7 字段。 */
+  static void checkDefinition(String name, String handlerRef, String cron,
+      Integer shardCount, Integer timeoutSeconds, Integer maxRetries, Long backoffMs) {
+    if (timeoutSeconds != null && timeoutSeconds < 0) throw new IllegalArgumentException("timeoutSeconds must be >= 0");
+    if (backoffMs != null && backoffMs < 0) throw new IllegalArgumentException("backoffMs must be >= 0");
+    if (maxRetries != null && maxRetries < 0) throw new IllegalArgumentException("maxRetries must be >= 0");
+    if (shardCount != null && shardCount < 1) throw new IllegalArgumentException("shardCount must be >= 1");
+    validateCron(cron);
   }
 
   /** 本项目 cron 一律 6 字段(或 7 字段带年);5 字段会被 Spring 6 解析器直接抛异常处决在前面。 */
