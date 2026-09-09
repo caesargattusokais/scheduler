@@ -71,7 +71,6 @@ export default function ExecutionsPage() {
   );
   const apply = () => {
     setOffset(0);
-    load();
   };
 
   return (
@@ -80,7 +79,7 @@ export default function ExecutionsPage() {
       {err && <p style={{ color: 'red' }}>{err}</p>}
       <label>
         任务
-        <select value={taskId} onChange={e => setTaskId(e.target.value)}>
+        <select value={taskId} onChange={e => { setTaskId(e.target.value); setOffset(0); }}>
           <option value="">全部</option>
           {tasks.map(t => (
             <option key={t.id} value={t.id}>
@@ -91,7 +90,7 @@ export default function ExecutionsPage() {
       </label>{' '}
       <label>
         状态
-        <select value={status} onChange={e => setStatus(e.target.value)}>
+        <select value={status} onChange={e => { setStatus(e.target.value); setOffset(0); }}>
           <option value="">全部</option>
           {STATUSES.map(s => (
             <option key={s} value={s}>
@@ -101,10 +100,10 @@ export default function ExecutionsPage() {
         </select>
       </label>{' '}
       <label>
-        从 <input type="datetime-local" value={from} onChange={e => setFrom(e.target.value)} />
+        从 <input type="datetime-local" value={from} onChange={e => { setFrom(e.target.value); setOffset(0); }} />
       </label>{' '}
       <label>
-        到 <input type="datetime-local" value={to} onChange={e => setTo(e.target.value)} />
+        到 <input type="datetime-local" value={to} onChange={e => { setTo(e.target.value); setOffset(0); }} />
       </label>{' '}
       <button onClick={apply}>应用</button>
       <table border={1} cellSpacing={0} cellPadding={4}>
