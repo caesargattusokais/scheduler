@@ -13,7 +13,7 @@
 | `scheduler-server` | Spring Boot 应用、REST API、DAG Engine、Prometheus 指标 |
 | `web` | 控制台前端（React + TS + Vite，vite 代理到后端） |
 
-技术栈：Java 17、Spring Boot 3.2.5、PostgreSQL 16、Micrometer/Prometheus、React 18、Vite 6。
+技术栈：Java 17、Spring Boot 3.2.5、PostgreSQL 16、Micrometer/Prometheus、React 19、Vite 6。
 
 ## 运行
 
