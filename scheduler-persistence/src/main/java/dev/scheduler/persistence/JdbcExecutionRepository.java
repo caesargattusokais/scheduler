@@ -36,8 +36,8 @@ public class JdbcExecutionRepository implements ExecutionRepository {
 
   @Override public long createDue(Execution e) {
     String sql = """
-      INSERT INTO execution (task_id, status, idempotency_key, args, shard_index, shard_count, attempt)
-      VALUES (?, 'DUE', ?, ?, ?, ?, ?)
+      INSERT INTO execution (task_id, status, idempotency_key, args, shard_index, shard_count, attempt, started_at)
+      VALUES (?, 'DUE', ?, ?, ?, ?, ?, now())
       ON CONFLICT (idempotency_key) DO UPDATE SET idempotency_key = EXCLUDED.idempotency_key
       RETURNING id""";
     Long id = jdbc.queryForObject(sql, Long.class,

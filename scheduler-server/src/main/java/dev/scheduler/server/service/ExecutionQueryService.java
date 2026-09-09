@@ -5,6 +5,8 @@ import dev.scheduler.core.ExecutionStatus;
 import dev.scheduler.core.Shard;
 import dev.scheduler.persistence.ExecutionRepository;
 import dev.scheduler.persistence.ShardRepository;
+import java.sql.Timestamp;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
@@ -36,8 +38,13 @@ public class ExecutionQueryService {
       rs.getTimestamp("finished_at") != null ? rs.getTimestamp("finished_at").toInstant() : null,
       rs.getString("result_payload"));
 
-  /** 执行列表:taskId/status 可选过滤,id 倒序。语义与行为与原执行控制器一致。 */
-  public List<Execution> list(Long taskId, String status) {
+  /**
+   * 执行列表:taskId/status/from/to 可选过滤 + limit/offset 分页。时间窗按 started_at 过滤
+   * (Timestamp.from 显式转 timestamptz 参数);确定序为 started_at DESC NULLS LAST, id DESC(稳定同毫秒平局)
+   * 支撑分页/时间窗;LIMIT/OFFSET 恒追加(where true 保证串合法)。limit 默认 100 上限 500,offset 默认 0。
+   */
+  public List<Execution> list(Long taskId, String status, Instant from, Instant to,
+                              Integer limit, Integer offset) {
     StringBuilder sql = new StringBuilder("SELECT * FROM execution WHERE true");
     List<Object> args = new ArrayList<>();
     if (taskId != null) {
@@ -48,7 +55,20 @@ public class ExecutionQueryService {
       sql.append(" AND status=?");
       args.add(status);
     }
-    sql.append(" ORDER BY id DESC");
+    if (from != null) {
+      sql.append(" AND started_at >= ?");
+      args.add(Timestamp.from(from));
+    }
+    if (to != null) {
+      sql.append(" AND started_at <= ?");
+      args.add(Timestamp.from(to));
+    }
+    sql.append(" ORDER BY started_at DESC NULLS LAST, id DESC");
+    int lim = (limit == null) ? 100 : Math.min(Math.max(limit, 1), 500);
+    int off = (offset == null) ? 0 : Math.max(offset, 0);
+    sql.append(" LIMIT ? OFFSET ?");
+    args.add(lim);
+    args.add(off);
     return jdbc.query(sql.toString(), ROW, args.toArray());
   }
 

@@ -7,6 +7,8 @@ import dev.scheduler.persistence.ExecutionRepository;
 import dev.scheduler.persistence.ShardRepository;
 import dev.scheduler.server.service.ExecutionDetail;
 import dev.scheduler.server.service.ExecutionQueryService;
+import java.time.Instant;
+import java.time.format.DateTimeParseException;
 import java.util.List;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -39,9 +41,25 @@ public class ExecutionController {
   }
 
   @GetMapping
-  public List<Execution> list(@RequestParam(required = false) Long taskId,
-                              @RequestParam(required = false) String status) {
-    return queryService.list(taskId, status);
+  public List<Execution> list(
+      @RequestParam(required = false) Long taskId,
+      @RequestParam(required = false) String status,
+      @RequestParam(required = false) String from,
+      @RequestParam(required = false) String to,
+      @RequestParam(required = false) Integer limit,
+      @RequestParam(required = false) Integer offset) {
+    return queryService.list(taskId, status,
+        parseInstant(from), parseInstant(to), limit, offset);
+  }
+
+  private static Instant parseInstant(String s) {
+    if (s == null || s.isBlank()) return null;
+    try {
+      return Instant.parse(s); // ISO-8601 带偏移
+    } catch (DateTimeParseException e) {
+      throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+          "invalid `from`/`to` (expected ISO-8601 with offset): " + s);
+    }
   }
 
   /** 详情:父 header + 其分片;展示的父 status 为派生值(非终态父且含 RUNNING shard → 读作 RUNNING)。 */

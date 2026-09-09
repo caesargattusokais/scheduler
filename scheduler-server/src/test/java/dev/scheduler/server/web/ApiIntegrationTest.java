@@ -1,6 +1,8 @@
 package dev.scheduler.server.web;
 
 import static org.hamcrest.Matchers.hasItem;
+import static org.hamcrest.Matchers.hasSize;
+import static org.hamcrest.Matchers.is;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
@@ -239,6 +241,48 @@ class ApiIntegrationTest {
         .andExpect(status().isOk())
         .andExpect(jsonPath("$[*].id", hasItem((int) execId)))
         .andExpect(jsonPath("$[?(@.id == " + execId + ")].status").value("DUE")); // worker 循环已关,保持 DUE
+  }
+
+  /** M5.2:GET /executions from/to 时间窗过滤(started_at)。父 execution.started_at 在建父即回填 now()
+   *  (createParentWithShards INSERT now()),故真实 POST /tasks/{id}/trigger 后时间窗应含该父。窗口含该帧
+   *  → 1 条,更早窗口 → 0 条。 */
+  @Test
+  void executionsTimeWindowFilters() throws Exception {
+    resetDb();
+    long id = postTask("tw");
+    triggerParent(id); // POST /tasks/{id}/trigger → 201,父 DUE 且 started_at=now()(建父即回填)
+    String from = Instant.now().minusSeconds(60).toString();
+    String to = Instant.now().plusSeconds(60).toString();
+    mvc.perform(get("/api/v1/executions")
+            .param("from", from).param("to", to))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$", hasSize(1)))
+        .andExpect(jsonPath("$[0].taskId", is((int) id)));
+    // 窗口排除:过去 1 小时之前的窗口 → 0 条
+    String pastFrom = Instant.now().minusSeconds(7200).toString();
+    String pastTo = Instant.now().minusSeconds(3600).toString();
+    mvc.perform(get("/api/v1/executions")
+            .param("from", pastFrom).param("to", pastTo))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$", hasSize(0)));
+  }
+
+  /** M5.2:GET /executions limit/offset 分页(ORDER BY started_at DESC NULLS LAST, id DESC 稳定同毫秒 now() 平局);
+   *  trigger 3 次 → 3 父,limit=2 → 2 条,再 offset=2 → 剩 1 条。 */
+  @Test
+  void executionsPagination() throws Exception {
+    resetDb();
+    long id = postTask("pg");
+    mvc.perform(post("/api/v1/tasks/" + id + "/trigger")).andExpect(status().isCreated());
+    mvc.perform(post("/api/v1/tasks/" + id + "/trigger")).andExpect(status().isCreated());
+    mvc.perform(post("/api/v1/tasks/" + id + "/trigger")).andExpect(status().isCreated()); // 3 个 execution 父
+    mvc.perform(get("/api/v1/executions").param("limit", "2"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$", hasSize(2)));
+    mvc.perform(get("/api/v1/executions")
+            .param("limit", "2").param("offset", "2"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$", hasSize(1))); // 剩 1 条(3-2)
   }
 
   @Test void rerunCreatesFreshExecution() throws Exception {
