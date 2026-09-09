@@ -30,8 +30,9 @@ function drawPath(vals: number[]): string {
   const w = 120, h = 36;
   const min = Math.min(...vals), max = Math.max(...vals);
   const span = max - min || 1;
+  const denom = vals.length - 1 || 1; // 单样本时 0/0→NaN x,兜底为 1
   return vals.map((v, i) =>
-    `${i === 0 ? 'M' : 'L'}${(i / (vals.length - 1)) * w},${h - ((v - min) / span) * (h - 4) - 2}`).join(' ');
+    `${i === 0 ? 'M' : 'L'}${(i / denom) * w},${h - ((v - min) / span) * (h - 4) - 2}`).join(' ');
 }
 
 export default function MetricsPage() {
