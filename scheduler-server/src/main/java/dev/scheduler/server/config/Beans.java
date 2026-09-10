@@ -13,11 +13,6 @@ import dev.scheduler.persistence.ShardRepository;
 import dev.scheduler.persistence.TaskRepository;
 import dev.scheduler.persistence.WorkerRepository;
 import dev.scheduler.server.dag.DagEngine;
-import dev.scheduler.worker.execute.ExecutorWorker;
-import dev.scheduler.worker.handler.DemoHandler;
-import dev.scheduler.worker.handler.ExecutionHandler;
-import dev.scheduler.worker.handler.HandlerRegistry;
-import dev.scheduler.worker.handler.MapHandlerRegistry;
 import dev.scheduler.server.leader.AdvisoryLockLeaderElection;
 import dev.scheduler.server.leader.LeaderElection;
 import dev.scheduler.server.reconcile.Reconciler;
@@ -27,14 +22,10 @@ import dev.scheduler.persistence.retry.RetryPolicy;
 import dev.scheduler.server.trigger.TriggerEngine;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.binder.MeterBinder;
-import java.net.InetAddress;
 import java.time.Clock;
-import java.util.List;
-import java.util.function.Supplier;
 import javax.sql.DataSource;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -82,24 +73,11 @@ public class Beans {
     return new JdbcWorkerRepository(jdbc);
   }
 
-  /** M6.2:控制面校验的可用 handlerRef 并集(进程内 ∪ 存活 worker);TaskController 建/改 + handlers 下拉框同源。 */
+  /** M6.3:控制面校验的可用 handlerRef = 存活 worker 注册表 refs 并集(纯 worker 视角);
+   *  TaskController 建/改 + handlers 下拉框同源。 */
   @Bean
-  AvailableHandlerRefs availableHandlerRefs(HandlerRegistry handlerRegistry, WorkerRepository workerRepository, Clock clock) {
-    return new AvailableHandlerRefs(handlerRegistry, workerRepository, clock);
-  }
-
-  @Bean
-  ExecutionHandler demoHandler() {
-    return new DemoHandler();
-  }
-
-  /** 收集全部 ExecutionHandler Bean 并路由 task.handlerRef → handler 实例;handler-ref 未注册在派发时暴露。 */
-  @Bean
-  HandlerRegistry handlerRegistry(List<ExecutionHandler> handlers) {
-    List<Supplier<ExecutionHandler>> suppliers = handlers.stream()
-        .map(h -> (Supplier<ExecutionHandler>) () -> h)
-        .toList();
-    return new MapHandlerRegistry(suppliers);
+  AvailableHandlerRefs availableHandlerRefs(WorkerRepository workerRepository, Clock clock) {
+    return new AvailableHandlerRefs(workerRepository, clock);
   }
 
   /** 会话级 advisory lock 选主;destroyMethod=close 保证停机时释锁并归还专属连接。 */
@@ -130,19 +108,6 @@ public class Beans {
   @Bean
   FailureResolver failureResolver(ShardRepository shards, RetryPolicy retryPolicy, Clock clock) {
     return new FailureResolver(shards, retryPolicy, clock);
-  }
-
-  /** 本节点稳定的执行者标识,流入认领与每次 markStatus(审计"谁做的")。 */
-  @Bean
-  String schedulerWorkerId(@Value("${scheduler.worker-id:}") String configured) {
-    return configured.isBlank() ? defaultWorkerId() : configured;
-  }
-
-  @Bean
-  ExecutorWorker executorWorker(TaskRepository tasks, ShardRepository shards,
-                                HandlerRegistry handlers, String schedulerWorkerId,
-                                FailureResolver failureResolver, Clock clock) {
-    return new ExecutorWorker(tasks, shards, handlers, schedulerWorkerId, failureResolver, clock);
   }
 
   /**
@@ -199,12 +164,6 @@ public class Beans {
     return new ScanLoop(engine);
   }
 
-  @Bean
-  @ConditionalOnProperty(name = "scheduler.loop.enabled", havingValue = "true", matchIfMissing = true)
-  WorkLoop workLoop(ExecutorWorker worker) {
-    return new WorkLoop(worker);
-  }
-
   /** 对账器:单例,复用共享 FailureResolver(同一重试判定,worker 与 reconciler 无漂移)。M3:作用对象为 shard。 */
   @Bean
   Reconciler reconciler(TaskRepository tasks, ShardRepository shards,
@@ -238,24 +197,6 @@ public class Beans {
         engine.scanOnce();
       } catch (Throwable t) {
         log.warn("trigger scan loop tick failed; continuing next tick", t);
-      }
-    }
-  }
-
-  public static final class WorkLoop {
-    private static final Logger log = LoggerFactory.getLogger(WorkLoop.class);
-    private final ExecutorWorker worker;
-
-    WorkLoop(ExecutorWorker worker) {
-      this.worker = worker;
-    }
-
-    @Scheduled(fixedDelayString = "${scheduler.loop.work-delay-ms:100}")
-    public void tick() {
-      try {
-        worker.workOne();
-      } catch (Throwable t) {
-        log.warn("executor work loop tick failed; continuing next tick", t);
       }
     }
   }
@@ -311,14 +252,5 @@ public class Beans {
             + " WHERE s.status='DUE' AND e.task_id=? ORDER BY s.id LIMIT 1)))::float8",
         Double.class, taskId);
     return v == null ? 0.0 : v;
-  }
-
-  private static String defaultWorkerId() {
-    try {
-      return System.getProperty("os.name") + ":" + InetAddress.getLocalHost().getHostName();
-    } catch (Throwable t) {
-      log.warn("could not resolve hostname for worker-id, falling back to nano id", t);
-      return "fallback:" + Long.toUnsignedString(System.nanoTime());
-    }
   }
 }
