@@ -18,4 +18,8 @@ public class MapHandlerRegistry implements HandlerRegistry {
     if (h == null) throw new IllegalArgumentException("handler not registered: " + ref);
     return h;
   }
+
+  @Override public List<String> refs() {
+    return handlers.keySet().stream().sorted().toList();
+  }
 }

@@ -28,3 +28,6 @@ Thumbs.db
 
 # logs
 *.log
+
+# dev-run classpath scratch (java -cp "$(cat cp-test.txt)")
+cp*.txt

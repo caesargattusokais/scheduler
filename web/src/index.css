@@ -1,0 +1,79 @@
+@import 'tailwindcss';
+
+/*
+ * Scheduler 管理台设计系统。
+ * 克制调色:中性 slate 底 + 单一 indigo 强调;语义色只留给状态徽章。
+ */
+
+@layer base {
+  body {
+    @apply bg-slate-100 text-slate-800 antialiased;
+    font-family: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  }
+}
+
+@layer components {
+  /* 桌面外壳 */
+  .shell { @apply flex min-h-screen; }
+  .sidebar { @apply w-56 shrink-0 border-r border-slate-200 bg-white; }
+  .sidebar-brand { @apply flex h-14 items-center gap-2 border-b border-slate-100 px-4 text-sm font-semibold text-slate-800; }
+  .sidebar-nav { @apply space-y-1 p-3; }
+  .navlink {
+    @apply flex items-center gap-2 rounded-md px-3 py-2 text-sm font-medium text-slate-600 transition-colors;
+    &:hover { @apply bg-slate-50 text-slate-900; }
+    &.active { @apply bg-indigo-50 text-indigo-700; }
+  }
+  .content { @apply flex-1 min-w-0 px-6 py-6; }
+  .page-head { @apply mb-5 flex items-start justify-between gap-4; }
+  .page-title { @apply text-lg font-semibold text-slate-900; }
+  .page-sub { @apply mt-0.5 text-sm text-slate-500; }
+
+  /* 卡片与面板 */
+  .card { @apply rounded-lg border border-slate-200 bg-white shadow-sm; }
+  .card-pad { @apply p-4; }
+
+  /* 表格 */
+  .table-wrap { @apply overflow-x-auto rounded-lg border border-slate-200 bg-white shadow-sm; }
+  .table { @apply w-full border-collapse text-sm; }
+  .table thead th {
+    @apply border-b border-slate-200 bg-slate-50 px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide text-slate-500;
+  }
+  .table tbody td { @apply border-b border-slate-100 px-3 py-2 text-slate-700; }
+  .table tbody tr:last-child td { @apply border-b-0; }
+  .table tbody tr:hover td { @apply bg-indigo-50/40; }
+  .table .num { @apply text-right tabular-nums; }
+
+  /* 按钮 */
+  .btn-primary {
+    @apply inline-flex items-center gap-1.5 rounded-md bg-indigo-600 px-3 py-1.5 text-sm font-medium text-white transition-colors hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50;
+  }
+  .btn-secondary {
+    @apply inline-flex items-center gap-1.5 rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm font-medium text-slate-700 transition-colors hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50;
+  }
+  .btn-danger {
+    @apply inline-flex items-center gap-1.5 rounded-md border border-red-200 bg-white px-3 py-1.5 text-sm font-medium text-red-600 transition-colors hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50;
+  }
+  .btn-ghost {
+    @apply inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium text-slate-600 transition-colors hover:bg-slate-100 hover:text-slate-900 disabled:cursor-not-allowed disabled:opacity-50;
+  }
+
+  /* 表单 */
+  .input { @apply rounded-md border border-slate-300 bg-white px-2.5 py-1.5 text-sm text-slate-800 placeholder-slate-400 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500; }
+  .label { @apply text-xs font-medium text-slate-600; }
+  .field { @apply flex flex-col gap-1; }
+  .toolbar { @apply mb-4 flex flex-wrap items-end gap-3 rounded-lg border border-slate-200 bg-white p-3 shadow-sm; }
+
+  /* 徽章(状态 tinted pill) */
+  .badge { @apply inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium; }
+  .badge-blue   { @apply bg-blue-50 text-blue-700; }
+  .badge-green  { @apply bg-green-50 text-green-700; }
+  .badge-amber  { @apply bg-amber-50 text-amber-700; }
+  .badge-red    { @apply bg-red-50 text-red-700; }
+  .badge-slate  { @apply bg-slate-100 text-slate-600; }
+  .badge-violet { @apply bg-violet-50 text-violet-700; }
+
+  /* 指标卡 */
+  .metric-card { @apply rounded-lg border border-slate-200 bg-white p-4 shadow-sm; }
+  .metric-value { @apply mt-1 text-3xl font-semibold tabular-nums text-slate-900; }
+  .metric-unit { @apply ml-1 text-sm font-normal text-slate-500; }
+}

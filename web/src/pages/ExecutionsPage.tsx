@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { listExecutions, getExecutionDetail, cancelExecution, listTasks } from '../api/client';
 import { useInterval } from '../lib/useInterval';
 import { Execution, ExecutionDetail, Task } from '../api/types';
+import StatusBadge from '../components/StatusBadge';
 
 const PAGE_SIZE = 10;
 const STATUSES = ['DUE', 'RUNNING', 'SUCCESS', 'FAILED', 'ORPHANED', 'CANCELED'];
@@ -72,96 +73,125 @@ export default function ExecutionsPage() {
   const apply = () => {
     setOffset(0);
   };
+  const reset = () => {
+    setTaskId(''); setStatus(''); setFrom(''); setTo(''); setOffset(0);
+  };
 
   return (
     <div>
-      <h2>执行</h2>
-      {err && <p style={{ color: 'red' }}>{err}</p>}
-      <label>
-        任务
-        <select value={taskId} onChange={e => { setTaskId(e.target.value); setOffset(0); }}>
-          <option value="">全部</option>
-          {tasks.map(t => (
-            <option key={t.id} value={t.id}>
-              {t.name}
-            </option>
-          ))}
-        </select>
-      </label>{' '}
-      <label>
-        状态
-        <select value={status} onChange={e => { setStatus(e.target.value); setOffset(0); }}>
-          <option value="">全部</option>
-          {STATUSES.map(s => (
-            <option key={s} value={s}>
-              {s}
-            </option>
-          ))}
-        </select>
-      </label>{' '}
-      <label>
-        从 <input type="datetime-local" value={from} onChange={e => { setFrom(e.target.value); setOffset(0); }} />
-      </label>{' '}
-      <label>
-        到 <input type="datetime-local" value={to} onChange={e => { setTo(e.target.value); setOffset(0); }} />
-      </label>{' '}
-      <button onClick={apply}>应用</button>
-      <table border={1} cellSpacing={0} cellPadding={4}>
-        <thead>
-          <tr>
-            <th>id</th>
-            <th>taskId</th>
-            <th>状态</th>
-            <th>分片</th>
-            <th>attempt</th>
-            <th>startedAt</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map(r => (
-            <tr key={r.id} onClick={() => openDetail(r.id)} style={{ cursor: 'pointer' }}>
-              <td>{r.id}</td>
-              <td>{r.taskId}</td>
-              <td>{r.status}</td>
-              <td>{r.shardCount}</td>
-              <td>{r.attempt}</td>
-              <td>{r.startedAt ?? '—'}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-      {hasMore && <button onClick={() => setOffset(o => o + PAGE_SIZE)}>加载更多</button>}
-      {detail && (
+      <div className="page-head">
         <div>
-          <h3>
-            详情 #{detail.id} · 状态 {detail.status}
-          </h3>
-          <button onClick={() => setDetail(null)}>关闭</button>{' '}
-          <button onClick={() => doCancel(detail.id)}>取消执行</button>
-          <table border={1} cellSpacing={0} cellPadding={4}>
-            <thead>
-              <tr>
-                <th>shard</th>
-                <th>idx</th>
-                <th>状态</th>
-                <th>attempt</th>
-                <th>workerId</th>
-                <th>deadLetter</th>
+          <h1 className="page-title">执行</h1>
+          <p className="page-sub">按任务 / 状态 / 时间窗检索执行记录</p>
+        </div>
+        {rows.length > 0 && <div className="text-sm text-slate-500">显示 {offset + 1}–{offset + rows.length}</div>}
+      </div>
+
+      {err && <div className="mb-4 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{err}</div>}
+
+      <div className="toolbar">
+        <label className="field">
+          <span className="label">任务</span>
+          <select className="input" value={taskId} onChange={(e) => { setTaskId(e.target.value); setOffset(0); }}>
+            <option value="">全部</option>
+            {tasks.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+          </select>
+        </label>
+        <label className="field">
+          <span className="label">状态</span>
+          <select className="input" value={status} onChange={(e) => { setStatus(e.target.value); setOffset(0); }}>
+            <option value="">全部</option>
+            {STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
+          </select>
+        </label>
+        <label className="field">
+          <span className="label">从</span>
+          <input className="input" type="datetime-local" value={from} onChange={(e) => { setFrom(e.target.value); setOffset(0); }} />
+        </label>
+        <label className="field">
+          <span className="label">到</span>
+          <input className="input" type="datetime-local" value={to} onChange={(e) => { setTo(e.target.value); setOffset(0); }} />
+        </label>
+        <div className="ml-auto flex items-center gap-2">
+          <button className="btn-secondary" onClick={reset}>重置</button>
+          <button className="btn-primary" onClick={apply}>应用</button>
+        </div>
+      </div>
+
+      <div className="table-wrap">
+        <table className="table">
+          <thead>
+            <tr>
+              <th className="num">id</th>
+              <th className="num">taskId</th>
+              <th>状态</th>
+              <th className="num">分片</th>
+              <th className="num">attempt</th>
+              <th>startedAt</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => (
+              <tr key={r.id} onClick={() => openDetail(r.id)} className="cursor-pointer">
+                <td className="num">{r.id}</td>
+                <td className="num">{r.taskId}</td>
+                <td><StatusBadge status={r.status} /></td>
+                <td className="num">{r.shardCount}</td>
+                <td className="num">{r.attempt}</td>
+                <td className="text-xs text-slate-500">{r.startedAt ?? '—'}</td>
               </tr>
-            </thead>
-            <tbody>
-              {detail.shards.map(s => (
-                <tr key={s.id}>
-                  <td>{s.id}</td>
-                  <td>{s.shardIndex}</td>
-                  <td>{s.status}</td>
-                  <td>{s.attempt}</td>
-                  <td>{s.workerId ?? '—'}</td>
-                  <td>{String(s.deadLetter)}</td>
+            ))}
+            {rows.length === 0 && (
+              <tr><td colSpan={6} className="py-8 text-center text-slate-400">暂无执行记录</td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+
+      {hasMore && (
+        <div className="mt-3 text-center">
+          <button className="btn-secondary" onClick={() => setOffset((o) => o + PAGE_SIZE)}>加载更多</button>
+        </div>
+      )}
+
+      {detail && (
+        <div className="card mt-5">
+          <div className="flex items-center justify-between border-b border-slate-200 px-4 py-3">
+            <div className="flex items-center gap-2 text-sm font-semibold text-slate-900">
+              执行详情 #{detail.id}
+              <StatusBadge status={detail.status} />
+            </div>
+            <div className="flex items-center gap-2">
+              <button className="btn-secondary" onClick={() => setDetail(null)}>关闭</button>
+              <button className="btn-danger" onClick={() => doCancel(detail.id)}>取消执行</button>
+            </div>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="table">
+              <thead>
+                <tr>
+                  <th className="num">shard</th>
+                  <th className="num">idx</th>
+                  <th>状态</th>
+                  <th className="num">attempt</th>
+                  <th>workerId</th>
+                  <th>deadLetter</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {detail.shards.map((s) => (
+                  <tr key={s.id}>
+                    <td className="num">{s.id}</td>
+                    <td className="num">{s.shardIndex}</td>
+                    <td><StatusBadge status={s.status} /></td>
+                    <td className="num">{s.attempt}</td>
+                    <td className="text-xs text-slate-500">{s.workerId ?? '—'}</td>
+                    <td>{s.deadLetter ? <span className="badge badge-red">死信</span> : <span className="text-slate-300">—</span>}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
       )}
     </div>

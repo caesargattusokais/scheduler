@@ -23,6 +23,8 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const listTasks = () => req<Task[]>('/api/v1/tasks');
+/** 已注册 handler 的 ref 列表,供任务表单下拉框枚举。 */
+export const listHandlerRefs = () => req<string[]>('/api/v1/handlers');
 export const createTask = (b: CreateTaskRequest) =>
   req<Task>('/api/v1/tasks', { method: 'POST', body: JSON.stringify(b) });
 export const updateTask = (id: number, b: UpdateTaskRequest) =>

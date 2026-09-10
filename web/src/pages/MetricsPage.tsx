@@ -60,19 +60,33 @@ export default function MetricsPage() {
 
   return (
     <div>
-      <h2>指标面板</h2>
-      {err && <p style={{ color: 'red' }}>{err}</p>}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px,1fr))', gap: 12 }}>
+      <div className="page-head">
+        <div>
+          <h1 className="page-title">指标</h1>
+          <p className="page-sub">5 个核心运维 gauge · 每 5s 刷新（数据源 /actuator/prometheus）</p>
+        </div>
+      </div>
+
+      {err && <div className="mb-4 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{err}</div>}
+
+      <div className="grid grid-cols-2 gap-4 md:grid-cols-3 xl:grid-cols-5">
         {CARDS.map((c) => {
           const vals = hist[c.key] ?? [];
           const last = vals.length ? vals[vals.length - 1] : NaN;
           return (
-            <div key={c.key} style={{ border: '1px solid #ccc', borderRadius: 6, padding: 10 }}>
-              <div style={{ fontWeight: 600 }}>{c.label}</div>
-              <div style={{ fontSize: 22 }}>{Number.isNaN(last) ? '—' : c.nice ? c.nice(last) : last}</div>
-              <svg width={120} height={36}>
-                <polyline points={drawPath(vals)} fill="none" stroke="currentColor" strokeWidth={1.5} />
-              </svg>
+            <div key={c.key} className="metric-card">
+              <div className="text-sm font-medium text-slate-500">{c.label}</div>
+              <div className="metric-value">
+                {Number.isNaN(last) ? '—' : c.nice ? c.nice(last) : last}
+                {!Number.isNaN(last) && c.unit && <span className="metric-unit">{c.unit}</span>}
+              </div>
+              <div className="mt-2 h-9 text-indigo-500">
+                {vals.length > 1 && (
+                  <svg width={120} height={36} viewBox="0 0 120 36" preserveAspectRatio="none" className="h-full w-full">
+                    <polyline points={drawPath(vals)} fill="none" stroke="currentColor" strokeWidth={1.5} strokeLinejoin="round" strokeLinecap="round" />
+                  </svg>
+                )}
+              </div>
             </div>
           );
         })}

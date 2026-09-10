@@ -177,6 +177,14 @@ class ApiIntegrationTest {
         .andExpect(jsonPath("$.name").value("create-list-task"));
   }
 
+  /** 表单下拉框的数据源:已注册 handler 的 ref 必须能枚举出来。 */
+  @Test
+  void handlersEndpoint_listsRegisteredRefs() throws Exception {
+    mvc.perform(get("/api/v1/handlers"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$[*]", hasItem("demo")));
+  }
+
   /** M3 回归:shardCount=0 不得创建任务(否则扇出 0 个 shard → 恒 DUE、无法汇聚终态的父)。 */
   @Test
   void createTask_shardCountZero_returnsBadRequest() throws Exception {

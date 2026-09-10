@@ -12,4 +12,9 @@ class HandlerRegistryTest {
     assertEquals("demo", r.get("demo").ref());
     assertThrows(IllegalArgumentException.class, () -> r.get("nope"));
   }
+
+  @Test void refsListsEveryRegisteredHandler() {
+    var r = new MapHandlerRegistry(List.of(DemoHandler::new));
+    assertEquals(List.of("demo"), r.refs());
+  }
 }
