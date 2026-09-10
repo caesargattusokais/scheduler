@@ -8,8 +8,10 @@ import dev.scheduler.persistence.JdbcDagRepository;
 import dev.scheduler.persistence.JdbcExecutionRepository;
 import dev.scheduler.persistence.JdbcShardRepository;
 import dev.scheduler.persistence.JdbcTaskRepository;
+import dev.scheduler.persistence.JdbcWorkerRepository;
 import dev.scheduler.persistence.ShardRepository;
 import dev.scheduler.persistence.TaskRepository;
+import dev.scheduler.persistence.WorkerRepository;
 import dev.scheduler.server.dag.DagEngine;
 import dev.scheduler.worker.execute.ExecutorWorker;
 import dev.scheduler.worker.handler.DemoHandler;
@@ -71,6 +73,12 @@ public class Beans {
   @Bean
   DagRepository dagRepository(JdbcTemplate jdbc) {
     return new JdbcDagRepository(jdbc);
+  }
+
+  /** M6:控制面读共享 DB 的 worker 注册表,供存活-refs 视图(findAllAlive)校验——M6.2 建/改任务时引用 worker 是否存活。 */
+  @Bean
+  WorkerRepository workerRepository(JdbcTemplate jdbc) {
+    return new JdbcWorkerRepository(jdbc);
   }
 
   @Bean

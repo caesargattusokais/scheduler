@@ -17,6 +17,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.scheduler.core.ExecutionStatus;
 import dev.scheduler.core.Shard;
 import dev.scheduler.persistence.ShardRepository;
+import dev.scheduler.persistence.WorkerRegistration;
+import dev.scheduler.persistence.WorkerRepository;
 import dev.scheduler.worker.execute.ExecutorWorker;
 import dev.scheduler.worker.handler.ExecutionHandler;
 import dev.scheduler.worker.handler.HandlerContext;
@@ -92,6 +94,8 @@ class ApiIntegrationTest {
   @Autowired ObjectMapper objectMapper;
   @Autowired JdbcTemplate jdbc;
   @Autowired ShardRepository shards;
+  /** M6:装配的 worker 表读写 bean——控制面据此读共享 DB 的存活 worker 注册视图(refs),供 M6.2 校验。 */
+  @Autowired WorkerRepository workerRepository;
   @Autowired TriggerEngine triggerEngine;
   @Autowired ExecutorWorker executorWorker;
   /** 共享 Reconciler Bean(M3:回收孤儿 shard + 父级终态汇聚),由测试同步驱动以推进父终态。 */
@@ -162,6 +166,18 @@ class ApiIntegrationTest {
         + " app_task RESTART IDENTITY CASCADE");
     CLOCK.now = BASE;
     flakyHandler.failNext = true; // 每个用例从"下一调抛错"确定性起步
+  }
+
+  /** M6:控制面应能从共享 DB 读存活 worker 注册视图(refs)。@Autowired 装配的 workerRepository bean 直接读,
+   *  既验查询逻辑、又证 bean 真被接线进 server 上下文(镜像既有 shards/jdbc 用法)。 */
+  @Test
+  void readsLiveWorkerRegistryView() throws Exception {
+    Instant base = Instant.parse("2026-09-10T00:00:00Z");
+    jdbc.update("INSERT INTO worker(id, refs, last_seen, status) "
+        + "VALUES('w1','demo',?,'ALIVE')", java.sql.Timestamp.from(base));
+    var live = workerRepository.findAllAlive(base.minusSeconds(10));
+    assertEquals(List.of("w1"), live.stream().map(WorkerRegistration::id).toList());
+    assertEquals(List.of("demo"), live.get(0).refs());
   }
 
   @Test
