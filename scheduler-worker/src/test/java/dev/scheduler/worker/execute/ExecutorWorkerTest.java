@@ -1,4 +1,4 @@
-package dev.scheduler.server.execute;
+package dev.scheduler.worker.execute;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -12,12 +12,12 @@ import dev.scheduler.persistence.JdbcShardRepository;
 import dev.scheduler.persistence.JdbcTaskRepository;
 import dev.scheduler.persistence.ShardRepository;
 import dev.scheduler.persistence.TaskRepository;
-import dev.scheduler.server.handler.ExecutionHandler;
-import dev.scheduler.server.handler.HandlerContext;
-import dev.scheduler.server.handler.HandlerRegistry;
-import dev.scheduler.server.handler.MapHandlerRegistry;
-import dev.scheduler.server.retry.FailureResolver;
-import dev.scheduler.server.retry.RetryPolicy;
+import dev.scheduler.worker.handler.ExecutionHandler;
+import dev.scheduler.worker.handler.HandlerContext;
+import dev.scheduler.worker.handler.HandlerRegistry;
+import dev.scheduler.worker.handler.MapHandlerRegistry;
+import dev.scheduler.worker.retry.FailureResolver;
+import dev.scheduler.worker.retry.RetryPolicy;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;

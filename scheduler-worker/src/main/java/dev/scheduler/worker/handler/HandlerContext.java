@@ -1,4 +1,4 @@
-package dev.scheduler.server.handler;
+package dev.scheduler.worker.handler;
 
 /** 一次分片运行的上下文:父 execution + 本分片坐标 + 父 args + 协作取消令牌。 */
 public record HandlerContext(long executionId, long shardId, int shardIndex, int shardCount,

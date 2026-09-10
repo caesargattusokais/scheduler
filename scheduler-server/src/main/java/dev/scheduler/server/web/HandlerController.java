@@ -1,6 +1,6 @@
 package dev.scheduler.server.web;
 
-import dev.scheduler.server.handler.HandlerRegistry;
+import dev.scheduler.worker.handler.HandlerRegistry;
 import java.util.List;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;

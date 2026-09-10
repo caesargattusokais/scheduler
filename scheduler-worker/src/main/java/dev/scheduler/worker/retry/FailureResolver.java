@@ -1,4 +1,4 @@
-package dev.scheduler.server.retry;
+package dev.scheduler.worker.retry;
 
 import dev.scheduler.core.Task;
 import dev.scheduler.persistence.ShardRepository;

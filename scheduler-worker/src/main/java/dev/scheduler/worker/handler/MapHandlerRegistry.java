@@ -1,4 +1,4 @@
-package dev.scheduler.server.handler;
+package dev.scheduler.worker.handler;
 
 import java.util.List;
 import java.util.Map;

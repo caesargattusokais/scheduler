@@ -6,7 +6,7 @@ import dev.scheduler.core.Task;
 import dev.scheduler.persistence.ShardRepository;
 import dev.scheduler.persistence.ShardRepository.ExpiredShard;
 import dev.scheduler.persistence.TaskRepository;
-import dev.scheduler.server.retry.FailureResolver;
+import dev.scheduler.worker.retry.FailureResolver;
 import java.util.List;
 
 /**

@@ -1,4 +1,4 @@
-package dev.scheduler.server.handler;
+package dev.scheduler.worker.handler;
 
 /**
  * 协作取消令牌:无状态弹桶,仅携带本次 handler 运行开始时从 DB 读到的 {@code cancel_requested}。

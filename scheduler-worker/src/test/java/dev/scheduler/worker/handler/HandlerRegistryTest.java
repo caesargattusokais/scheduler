@@ -1,4 +1,4 @@
-package dev.scheduler.server.handler;
+package dev.scheduler.worker.handler;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;

@@ -1,4 +1,4 @@
-package dev.scheduler.server.handler;
+package dev.scheduler.worker.handler;
 
 public interface ExecutionHandler {
   String ref();
