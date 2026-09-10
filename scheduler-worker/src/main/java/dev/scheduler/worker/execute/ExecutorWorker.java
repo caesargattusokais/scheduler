@@ -10,7 +10,7 @@ import dev.scheduler.worker.handler.ExecutionHandler;
 import dev.scheduler.worker.handler.CancellationToken;
 import dev.scheduler.worker.handler.HandlerContext;
 import dev.scheduler.worker.handler.HandlerRegistry;
-import dev.scheduler.worker.retry.FailureResolver;
+import dev.scheduler.persistence.retry.FailureResolver;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.concurrent.CancellationException;
