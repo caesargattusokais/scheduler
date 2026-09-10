@@ -10,7 +10,7 @@
 |------|------|
 | `scheduler-core` | 领域模型、状态机、幂等键、leader 选举接口 |
 | `scheduler-persistence` | JDBC 仓储 + Flyway 迁移（PostgreSQL） |
-| `scheduler-server` | Spring Boot 控制面：REST API、DAG Engine、调度触发、Prometheus 指标 |
+| `scheduler-server` | Spring Boot 控制面：REST API、DAG Engine、调度触发、对账、Prometheus 指标；不执行业务 handler（仅按存活worker注册表校验 handlerRef） |
 | `scheduler-worker` | 独立执行 worker：共享 DB 心跳注册 + 原子认领散片运行 handler |
 | `web` | 控制台前端（React + TS + Vite，vite 代理到后端） |
 
