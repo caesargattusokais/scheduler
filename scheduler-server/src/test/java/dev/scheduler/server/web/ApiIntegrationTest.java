@@ -19,9 +19,6 @@ import dev.scheduler.core.Shard;
 import dev.scheduler.persistence.ShardRepository;
 import dev.scheduler.persistence.WorkerRegistration;
 import dev.scheduler.persistence.WorkerRepository;
-import dev.scheduler.worker.execute.ExecutorWorker;
-import dev.scheduler.worker.handler.ExecutionHandler;
-import dev.scheduler.worker.handler.HandlerContext;
 import dev.scheduler.server.reconcile.Reconciler;
 import dev.scheduler.server.trigger.TriggerEngine;
 import java.time.Clock;
@@ -60,9 +57,9 @@ import org.testcontainers.junit.jupiter.Testcontainers;
  *   <li>{@code @TestConfiguration + @Primary} 把 {@link Clock} 换成可控 {@link MutableClock},钉在
  *       10:05:00Z —— 与配置的 6 字段 cron 恰为一个 tick 边界,使
  *       {@code TriggerEngine.scanOnce()} 确定性命中并登记一条 DUE,不依赖墙钟。</li>
- *   <li>触发扫描({@link TriggerEngine#scanOnce()})与执行({@link ExecutorWorker#workOne()})由测试
- *       同步直接驱动;选主由 Boot 装配的 {@code AdvisoryLockLeaderElection} Bean 持锁,scan 的
- *       leader 守卫恒真。</li>
+ *   <li>触发扫描({@link TriggerEngine#scanOnce()})由测试同步直接驱动;选主由 Boot 装配的
+ *       {@code AdvisoryLockLeaderElection} Bean 持锁,scan 的 leader 守卫恒真。M6.3 已无进程内执行器,
+ *       服务器测试只断言控制面;执行平面语义收归 worker 模块测试。</li>
  *   <li>每个用例 {@code @BeforeEach} 清库,互不影响。</li>
  * </ol>
  */
@@ -97,15 +94,12 @@ class ApiIntegrationTest {
   /** M6:装配的 worker 表读写 bean——控制面据此读共享 DB 的存活 worker 注册视图(refs),供 M6.2 校验。 */
   @Autowired WorkerRepository workerRepository;
   @Autowired TriggerEngine triggerEngine;
-  @Autowired ExecutorWorker executorWorker;
   /** 共享 Reconciler Bean(M3:回收孤儿 shard + 父级终态汇聚),由测试同步驱动以推进父终态。 */
   @Autowired Reconciler reconciler;
   /** M4:工作流 DAG 引擎,由测试同步驱动 scanOnce() 推进节点 spawn/终态派生(镜像 triggerEngine)。 */
   @Autowired dev.scheduler.server.dag.DagEngine dagEngine;
   /** M4:工作流 DAG 仓储(建 DAG/触发,以及指标断言复用)。 */
   @Autowired dev.scheduler.persistence.DagRepository dagRepository;
-  /** 装配的 flaky handler 单例:"flaky" 任务首调抛错、次调成功;@BeforeEach 重装成 failNext 保持确定性。 */
-  @Autowired FlakyHandler flakyHandler;
   /** M5.3 §1.5:选主锁持有者,worker 活性 gauge(scheduler_worker_active)判据。 */
   @Autowired dev.scheduler.server.leader.LeaderElection leader;
 
@@ -120,13 +114,6 @@ class ApiIntegrationTest {
     @Primary
     Clock testClock() {
       return ApiIntegrationTest.CLOCK;
-    }
-
-    /** 状态化测试 handler:"flaky" 任务首调抛错、次调成功。Beans#handlerRegistry 收集全部 ExecutionHandler
-     *  Bean,故该实例被自动路由进共享 registry,worker 派发到的即本单例(测试字段与之同一实例)。 */
-    @Bean
-    FlakyHandler flakyHandler() {
-      return new FlakyHandler();
     }
   }
 
@@ -165,7 +152,13 @@ class ApiIntegrationTest {
     jdbc.execute("TRUNCATE execution, execution_outcome, execution_shard, execution_shard_outcome,"
         + " app_task, worker RESTART IDENTITY CASCADE");
     CLOCK.now = BASE;
-    flakyHandler.failNext = true; // 每个用例从"下一调抛错"确定性起步
+    // M6.3:server 上下文无进程内 handler——测试建任务须先注册一个存活 worker 提供 handlerRef(demo);
+    //  该 worker 在未拨动 CLOCK.now 的用例中恒存活(见 handlersEndpoint 用例拨钟后须重播种)。
+    jdbc.update("INSERT INTO worker(id, refs, last_seen, status) VALUES('w-demo','demo',?,'ALIVE')",
+        java.sql.Timestamp.from(CLOCK.now));
+    // w-flaky 供仍用 "flaky" ref 建任务的用例通过 M6.2 校验(其 FAILED 由 completeNodeShards 直写,handler 不实跑)。
+    jdbc.update("INSERT INTO worker(id, refs, last_seen, status) VALUES('w-flaky','flaky',?,'ALIVE')",
+        java.sql.Timestamp.from(CLOCK.now));
   }
 
   /** M6:控制面应能从共享 DB 读存活 worker 注册视图(refs)。@Autowired 装配的 workerRepository bean 直接读,
@@ -193,16 +186,19 @@ class ApiIntegrationTest {
         .andExpect(jsonPath("$.name").value("create-list-task"));
   }
 
-  /** 表单下拉框的数据源 = 进程内 ∪ 存活 worker 并集(与 create/update 校验同源)。 */
+  /** M6.3:表单下拉框的数据源 = 纯存活 worker 注册表并集(与 create/update 校验同源;无进程内 handler)。 */
   @Test
   void handlersEndpoint_listsRegisteredRefs() throws Exception {
     Instant base = Instant.parse("2026-09-10T00:00:00Z");
     CLOCK.now = base;
+    // demo 与 ping 都来自存活 worker(@BeforeEach 里的 w-demo 是 BASE 时刻,拨钟后已 stale,须在此重播种)。
+    // w-demo 行已由 @BeforeEach 建立(主键唯一),拨钟后仅刷新 last_seen 使其在 base 重新存活。
+    jdbc.update("UPDATE worker SET last_seen=? WHERE id='w-demo'", java.sql.Timestamp.from(base));
     jdbc.update("INSERT INTO worker(id, refs, last_seen, status) "
         + "VALUES('w-ping','ping',?,'ALIVE')", java.sql.Timestamp.from(base));
     mvc.perform(get("/api/v1/handlers"))
         .andExpect(status().isOk())
-        .andExpect(jsonPath("$[*]", hasItem("demo")))    // 进程内
+        .andExpect(jsonPath("$[*]", hasItem("demo")))    // 存活 worker
         .andExpect(jsonPath("$[*]", hasItem("ping")));   // 存活 worker
   }
 
@@ -381,7 +377,7 @@ class ApiIntegrationTest {
   }
 
   @Test
-  void leadershipHeldScanOnce_thenWorkOne_reachesSuccess() throws Exception {
+  void leadershipHeldScanOnce_shardStaysDue_absentWorker() throws Exception {
     long id = postTask("scan-success-task");
 
     // 持有领导权(装配的 advisory-lock Bean)时,同步扫描一次 → 命中 tick,登记父 + 1 DUE shard
@@ -393,19 +389,13 @@ class ApiIntegrationTest {
         .andExpect(status().isOk())
         .andExpect(jsonPath("$[*].status", hasItem("DUE")));
 
-    // 执行器工作一步:认领并运行已注册的 DemoHandler → 回写 shard SUCCESS;父仍 DUE(终态由 reconciler 汇聚)
-    boolean processed = executorWorker.workOne();
-    assertTrue(processed, "expected the seeded handling loop to claim and run one work item");
-    assertEquals("SUCCESS", shardStatus(parentId), "workOne → shard 实时 SUCCESS");
-    assertEquals("DUE", parentStatus(parentId), "worker 只写 shard,父 header 保持 DUE 直至 reconciler 汇聚");
-
-    // 对账器扫描一次 → 父级终态汇聚 → 父 SUCCESS
+    boolean processed = false; // 无执行器:不再有 workOne
     reconciler.scanOnce();
-    assertEquals("SUCCESS", parentStatus(parentId), "reconciler 汇聚 → 父 SUCCESS");
-
+    assertEquals("DUE", shardStatus(parentId), "无 worker → shard 保持 DUE(汇聚不改变未执行分片)");
+    assertEquals("DUE", parentStatus(parentId), "非全部终态 → 父仍 DUE");
     mvc.perform(get("/api/v1/executions").param("taskId", String.valueOf(id)))
         .andExpect(status().isOk())
-        .andExpect(jsonPath("$[0].status").value("SUCCESS"));
+        .andExpect(jsonPath("$[0].status").value("DUE"));
   }
 
   @Test
@@ -513,11 +503,8 @@ class ApiIntegrationTest {
         Integer.class, shardId),
         "requeue 后该 shard 不再是死信");
 
-    // workOne 可成功跑(requeue 后该 shard DUE 被认领 → shard SUCCESS)
-    boolean processed = executorWorker.workOne();
-    assertTrue(processed, "requeued shard should be claimable by the worker");
-    assertEquals("SUCCESS", jdbc.queryForObject(
-        "SELECT status FROM execution_shard WHERE id=?", String.class, shardId));
+    // 外部 worker 认领并跑成功(server 无执行器;requeue 控制面已在上方断言 DUE + 不再出现在 /dlq)
+    jdbc.update("UPDATE execution_shard SET status='SUCCESS', worker_id='w-demo' WHERE id=?", shardId);
   }
 
   @Test
@@ -561,173 +548,6 @@ class ApiIntegrationTest {
         "派生 RUNNING 仅读取映射,不写库:父仍存 DUE header");
   }
 
-  /** M2 重试闭环(DB 时钟控闸):flaky 首调抛错 → 重试落 DUE + next_retry_at;拨后 gate 排除,调回过去重现。 */
-  @Test
-  void retryAfterFailure_thenBackoffGate_thenRerunReachesSuccess() throws Exception {
-    long id = postTaskWithRetry("retry-task", "flaky", 1, 1000, ""); // maxRetries=1, pattern 空=恒可重试
-    long parentId = triggerParent(id);
-    long shardId = shards.findShards(parentId).get(0).id();
-
-    // 第 1 次:flaky 首调抛 RuntimeException(the generic failure,非 CancellationException)→ 进重试路径
-    assertTrue(executorWorker.workOne(), "第 1 次 workOne 应认领 shard(触发 DUE)");
-    assertEquals("DUE", jdbc.queryForObject("SELECT status FROM execution_shard WHERE id=?", String.class, shardId),
-        "maxRetries=1 → 首失败可重试,shard 回到 DUE 待再次认领");
-    assertEquals("DUE", parentStatus(parentId), "worker 只写 shard,父 header 保持 DUE");
-    // 注入时钟钉在 2026-01-01(远早于 DB now()),scheduleRetry 写回的 next_retry_at 由注入时钟推得;
-    // 由 DB now() 维度断言其在 shard 落一条 DUE outcome 即可证明重试已调度(不靠墙钟断言 next_retry_at 绝对值)。
-    assertTrue(jdbc.queryForObject(
-        "SELECT count(*) FROM execution_shard_outcome WHERE shard_id=? AND status='DUE'",
-        Long.class, shardId) > 0, "重试必须在 shard 落 DUE outcome");
-
-    // 证闸:把 shard 的 next_retry_at 拨到 DB now() 之后 1 小时 → findCandidate 的 now() 门栅排除,无候选可认领。
-    jdbc.update("UPDATE execution_shard SET next_retry_at = now() + interval '1 hour' WHERE id=?", shardId);
-    assertTrue(!executorWorker.workOne(), "未来闸 → 候选被门栅排除,workOne 不得认领任何 shard");
-    assertEquals("DUE", jdbc.queryForObject("SELECT status FROM execution_shard WHERE id=?", String.class, shardId),
-        "被未来闸挡下 → shard 仍 DUE,未被重认领/回写");
-
-    // 调回过去:next_retry_at 早于 now() 1 秒 → 候选放行;flaky 现次调成功(已消耗首败)→ shard SUCCESS。
-    jdbc.update("UPDATE execution_shard SET next_retry_at = now() - interval '1 second' WHERE id=?", shardId);
-    assertTrue(executorWorker.workOne(), "过去闸 → 候选放行,workOne 应再次认领并跑成功");
-    assertEquals("SUCCESS", jdbc.queryForObject("SELECT status FROM execution_shard WHERE id=?", String.class, shardId),
-        "重试后 rerun → handler 次调成功 → shard SUCCESS");
-  }
-
-  /** M2 DLQ 闭环(真失败 → 死信而非预置 FAILED):真实耗尽失败落 DLQ,requeue 后再跑转 SUCCESS。 */
-  @Test
-  void exhaustedFailure_landsInDlq_thenRequeueRunsSucceeds() throws Exception {
-    long id = postTaskWithRetry("dlq-real-task", "flaky", 0, 1000, ""); // maxRetries=0 → 首失败即耗尽
-    long parentId = triggerParent(id);
-    long shardId = shards.findShards(parentId).get(0).id();
-
-    // flaky 首调抛错 → attempt 1 > maxRetries 0 → 不可重试 → shard FAILED + 死信
-    assertTrue(executorWorker.workOne(), "第 1 次 workOne 应认领 shard 并让 flaky 失败");
-    assertEquals("FAILED", jdbc.queryForObject("SELECT status FROM execution_shard WHERE id=?",
-        String.class, shardId), "耗尽失败 → shard FAILED");
-    assertEquals(Boolean.TRUE, jdbc.queryForObject(
-        "SELECT dead_letter FROM execution_shard WHERE id=?", Boolean.class, shardId),
-        "耗尽失败 → dead_letter=true");
-
-    // GET /dlq 含它(shard 口径,真实 FAILED 死信,非 seedDeadLetter 预置)
-    mvc.perform(get("/api/v1/executions/dlq"))
-        .andExpect(status().isOk())
-        .andExpect(jsonPath("$[*].id", hasItem((int) shardId)))
-        .andExpect(jsonPath("$[?(@.id == " + shardId + ")].status").value("FAILED"));
-
-    // requeue → 200 + DUE;flaky 已消耗首败,次调成功 → workOne → shard SUCCESS
-    mvc.perform(post("/api/v1/executions/shards/" + shardId + "/requeue"))
-        .andExpect(status().isOk())
-        .andExpect(jsonPath("$.status").value("DUE"));
-    assertTrue(executorWorker.workOne(), "requeue 后之 shard 应被 worker 认领并跑成功");
-    assertEquals("SUCCESS", jdbc.queryForObject("SELECT status FROM execution_shard WHERE id=?",
-        String.class, shardId), "requeue 后 rerun → flaky 次调成功 → shard SUCCESS");
-
-    // 父终态 = reconciler 汇聚
-    reconciler.scanOnce();
-    assertEquals("SUCCESS", parentStatus(parentId), "reconciler 汇聚 → 父 SUCCESS");
-  }
-
-  /** M2 协作取消:worker 认领时前置检查 cancel_requested → CANCELED(恒真的 worker 侧验证,走真实 Boot 装配
-   *  handler/db/worker,非 SQL 直置终态)。API requestCancel 仅对 RUNNING 置位(已由既有 cancelRunning_* 覆盖),
-   *  此处直接在 DUE 行上写标志,使认领+运行前检查这段真实路径被驱动。 */
-  @Test
-  void workerReclaimsCancelRequestedDue_asCanceled() throws Exception {
-    long id = postTask("cancel-coop-task"); // handlerRef=demo 即可,取消发生在运行 handler 之前
-    long parentId = triggerParent(id);
-    long shardId = shards.findShards(parentId).get(0).id();
-
-    // 直接 DB 在 DUE shard 上置 cancel_requested:没有 RUNNING 兄弟可被 API requestCancel 置位(已另有
-    // cancelRunning_* 端到端用例),此处模拟"已请求取消"的 DUE shard,使 workOne 认领后运行前检查命中。
-    jdbc.update("UPDATE execution_shard SET cancel_requested=true WHERE id=?", shardId);
-
-    assertTrue(executorWorker.workOne(), "带 cancel_requested 的 DUE shard 候选应被认领(运行前取消也属处理)");
-    assertEquals("CANCELED", jdbc.queryForObject(
-        "SELECT status FROM execution_shard WHERE id=?", String.class, shardId),
-        "运行前检查命中取消请求 → shard CANCELED(cancelled before run)");
-    assertEquals("DUE", jdbc.queryForObject(
-        "SELECT status FROM execution WHERE id=?", String.class, parentId),
-        "worker 只写 shard,父 header 保持 DUE");
-    assertTrue(jdbc.queryForObject(
-        "SELECT count(*) FROM execution_shard_outcome WHERE shard_id=? AND status='CANCELED'",
-        Long.class, shardId) > 0, "协作取消必须在 shard 落 CANCELED outcome");
-  }
-
-  /** M3 并发扇出端到端:shardCount=3 任务,三次 workOne → 三 shard 全 SUCCESS,父经 reconciler 汇聚为 SUCCESS;
-   *  详情(父 + 全 3 shard)完整呈现扇出形状。 */
-  @Test
-  void craftShardFanOut_allSuccess_parentSuccess() throws Exception {
-    long id = postTaskWithRetry("fanout-task", "demo", 0, 1000, null, 3); // shardCount=3, demo 恒成功
-    triggerEngine.scanOnce(); // 命中 tick → 父 + 3 DUE shard
-    long parentId = parentIdFor(id);
-    List<Shard> seeded = shards.findShards(parentId);
-    assertEquals(3, seeded.size(), "扇出 → 父 + 3 DUE shard");
-    for (Shard s : seeded) {
-      assertEquals("DUE", s.status().name(), "扇出后 shard 全 DUE");
-    }
-    assertEquals("DUE", parentStatus(parentId), "父 header 只存 DUE");
-
-    // 三次 workOne → 三 shard 全 SUCCESS,父仍 DUE(worker 不写父)
-    for (int i = 0; i < 3; i++) {
-      assertTrue(executorWorker.workOne(), "第 " + (i + 1) + " 次 workOne 应认领一枚 DUE shard");
-    }
-    List<Shard> done = shards.findShards(parentId);
-    for (Shard s : done) {
-      assertEquals("SUCCESS", s.status().name(), "全部 shard → SUCCESS");
-    }
-    assertEquals("DUE", parentStatus(parentId), "父终态由 reconciler 汇聚,worker 不写父");
-
-    reconciler.scanOnce();
-    assertEquals("SUCCESS", parentStatus(parentId), "reconciler 汇聚 → 父 SUCCESS");
-
-    // GET /executions/{id} 详情:父 + 全 3 shard
-    mvc.perform(get("/api/v1/executions/" + parentId))
-        .andExpect(status().isOk())
-        .andExpect(jsonPath("$.id").value((int) parentId))
-        .andExpect(jsonPath("$.status").value("SUCCESS"))
-        .andExpect(jsonPath("$.shardCount").value(3))
-        .andExpect(jsonPath("$.shards.length()").value(3));
-  }
-
-  /** M3 FAIL_FAST 端到端:shardCount=3,maxRetries=0,handler=flaky。首个被认领的 shard(按 id 升序,即 shard0)
-   *  首调耗尽失败 → DLQ → cancelSiblings 将两条 DUE 兄弟直编 CANCELED(+outcome);父经 reconciler 汇聚 → FAILED。 */
-  @Test
-  void failFast_endToEnd_oneShardFails_cancelsSiblings_parentFailed() throws Exception {
-    long id = postTaskWithRetry("failfast-task", "flaky", 0, 1000, null, 3); // shardCount=3, maxRetries=0
-    long parentId = triggerParent(id); // 手动触发扇出 → 父 + 3 DUE shard
-    assertEquals(3, shards.findShards(parentId).size());
-
-    // 首次 workOne 认领首个 DUE(按 id 升序,即 shard0)→ flaky 首调抛错 → 耗尽 FAILED + DLQ → FAIL_FAST
-    assertTrue(executorWorker.workOne(), "首个 workOne 应认领并耗尽失败");
-
-    List<Shard> ss = shards.findShards(parentId);
-    long failedCnt = ss.stream().filter(s -> s.status() == ExecutionStatus.FAILED).count();
-    long canceledCnt = ss.stream().filter(s -> s.status() == ExecutionStatus.CANCELED).count();
-    assertEquals(1, failedCnt, "恰好一条 shard FAILED");
-    assertEquals(2, canceledCnt, "FAIL_FAST 将两条 DUE 兄弟直编 CANCELED");
-
-    // 唯一 FAILED 死信(shard0)在 /dlq
-    mvc.perform(get("/api/v1/executions/dlq"))
-        .andExpect(status().isOk())
-        .andExpect(jsonPath("$.length()").value(1));
-
-    // 两条 CANCELED 兄弟各落 CANCELED outcome(FAIL_FAST detail=fail_fast)
-    List<Shard> canceled = ss.stream().filter(s -> s.status() == ExecutionStatus.CANCELED).toList();
-    for (Shard s : canceled) {
-      assertEquals(1L, jdbc.queryForObject(
-          "SELECT count(*) FROM execution_shard_outcome WHERE shard_id=? AND status='CANCELED'",
-          Long.class, s.id()), "FAIL_FAST 取消的兄弟必须落 CANCELED outcome");
-    }
-    assertEquals("fail_fast", jdbc.queryForObject(
-        "SELECT detail FROM execution_shard_outcome WHERE shard_id=? AND status='CANCELED'"
-            + " ORDER BY id LIMIT 1", String.class, canceled.get(0).id()),
-        "DUE 兄弟由 FAIL_FAST 取消,detail=fail_fast");
-
-    // 父仍 DUE:全部兄弟已终态,但父终态由 reconciler 汇聚(any-FAILED → 父 FAILED)
-    assertEquals("DUE", parentStatus(parentId), "汇聚前父保持 DUE");
-
-    reconciler.scanOnce();
-    assertEquals("FAILED", parentStatus(parentId), "any-FAILED 且全部终态 → 父 FAILED");
-  }
-
   /** M3 父级取消级联:shardCount=3,无 RUNNING shard → cancelParentImmediate 直取消 → 父 CANCELED + 全 DUE shard 级联 CANCELED。 */
   @Test
   void cooperativeCancel_parentLevel_cascadesToShards() throws Exception {
@@ -757,7 +577,7 @@ class ApiIntegrationTest {
         .andExpect(status().isBadRequest());
   }
 
-  /** M4:线性 A→B 全成功端到端。真实触发 + 同步驱动(dagEngine.scanOnce → worker.workOne → reconciler.scanOnce)。
+  /** M4:线性 A→B 全成功端到端。真实触发 + 同步驱动(dagEngine.scanOnce → completeNodeShards → reconciler.scanOnce)。
    *  跨周期收敛:节点只在"其上游 SUCCESS 之后的下一次 scan"才 spawn,故 A 终态后需多一次 scan 才生成 B。 */
   @Test
   void dagLinear_e2e_runsToSuccess() throws Exception {
@@ -768,11 +588,11 @@ class ApiIntegrationTest {
     long runId = triggerDag(dagId);  // 仅手动 run,幂等可断言 1 条
 
     dagEngine.scanOnce();            // A 是根(无上游)→ spawn A → RUNNING;B 等上游(PENDING)
-    assertTrue(executorWorker.workOne(), "A 的 shard 应被认领并跑成功");
+    completeNodeShards(runId, "A", "SUCCESS");
     reconciler.scanOnce();           // 汇聚 A 的父 execution → SUCCESS
     dagEngine.scanOnce();            // A 由 shards 派生 SUCCESS;B 仍 PENDING(本周期上游快照 RUNNING)
     dagEngine.scanOnce();            // B 上游 SUCCESS → spawn B → RUNNING
-    assertTrue(executorWorker.workOne(), "B 的 shard 应被认领并跑成功");
+    completeNodeShards(runId, "B", "SUCCESS");
     reconciler.scanOnce();           // 汇聚 B 的父 execution → SUCCESS
     dagEngine.scanOnce();            // B 派生 SUCCESS → 全节点终态 → dag_run SUCCESS
 
@@ -798,7 +618,7 @@ class ApiIntegrationTest {
     long runId = triggerDag(dagId);
 
     dagEngine.scanOnce();            // spawn A → RUNNING
-    assertTrue(executorWorker.workOne(), "A 的 shard 应被认领并耗尽失败");
+    completeNodeShards(runId, "A", "FAILED");
     reconciler.scanOnce();           // 汇聚 A 的父 → FAILED
     dagEngine.scanOnce();            // A 派生 FAILED(本周期于 A 的 RUNNING 快照,不连锁)
     dagEngine.scanOnce();            // B 上游 FAILED → SKIPPED → 全节点终态 → dag_run FAILED
@@ -847,11 +667,11 @@ class ApiIntegrationTest {
     pauseDag(dagId);
     long runId = triggerDag(dagId);
     dagEngine.scanOnce();              // spawn A → RUNNING
-    assertTrue(executorWorker.workOne());      // A shard 成功
+    completeNodeShards(runId, "A", "SUCCESS");
     reconciler.scanOnce();             // A 父 SUCCESS
     dagEngine.scanOnce();              // A 派生 SUCCESS
     dagEngine.scanOnce();              // B 上游 SUCCESS → spawn B
-    assertTrue(executorWorker.workOne());      // B shard 成功
+    completeNodeShards(runId, "B", "SUCCESS");
     reconciler.scanOnce();             // B 父 SUCCESS
     dagEngine.scanOnce();              // B 派生 SUCCESS → run 终态 SUCCESS
 
@@ -870,7 +690,7 @@ class ApiIntegrationTest {
         .andExpect(jsonPath("$.nodes[0].node.executionId").value(is(not(aExecBefore))));
 
     // 新 execution 经引擎跑完 → 节点终态重派生(新 execution_id 不变)
-    assertTrue(executorWorker.workOne(), "A 的新 execution shard 应被认领并成功");
+    completeNodeShards(runId, "A", "SUCCESS");
     reconciler.scanOnce();
     dagEngine.scanOnce();
     mvc.perform(get("/api/v1/dags/runs/" + runId))
@@ -906,7 +726,7 @@ class ApiIntegrationTest {
     pauseDag(dagId);
     long runId = triggerDag(dagId);
     dagEngine.scanOnce();                 // spawn A
-    assertTrue(executorWorker.workOne()); // A shard 耗尽失败
+    completeNodeShards(runId, "A", "FAILED");
     reconciler.scanOnce();                // A 父 FAILED
     dagEngine.scanOnce();                 // A 派生 FAILED → run FAILED
 
@@ -998,6 +818,18 @@ class ApiIntegrationTest {
     for (JsonNode n : objectMapper.readTree(body).get("nodes"))
       if (n.get("node").get("nodeKey").asText().equals(key)) return n.get("node").get("executionId").asLong();
     throw new AssertionError("no node " + key);
+  }
+
+  /** M6.3:模拟外部 worker 完成某节点本次 execution 的全部分片(server 不再内嵌执行器)。
+   *  status 传入 'SUCCESS' 或对失败路径 'FAILED' + dead_letter=true(cancel_siblings 不受影响)。
+   *  对 rerun 用例,读的是该节点最新的 execution_id(即重跑新建的那条)。 */
+  private void completeNodeShards(long runId, String nodeKey, String status) throws Exception {
+    long execId = dagNodeExecutionId(runId, nodeKey);
+    if ("FAILED".equals(status)) {
+      jdbc.update("UPDATE execution_shard SET status='FAILED', dead_letter=true WHERE execution_id=?", execId);
+    } else {
+      jdbc.update("UPDATE execution_shard SET status=?, worker_id='w-demo' WHERE execution_id=?", status, execId);
+    }
   }
 
   /** 建 DAG(nodeKeys 各引用 taskIds 对应任务;edges 为 from/to 键对),期望 201,返回 dag id。 */
@@ -1094,21 +926,6 @@ class ApiIntegrationTest {
       }
     }
     return Double.NaN;
-  }
-
-  /** M2 状态化测试 handler:"flaky" 任务首调抛普通异常(走重试/死信路径,非 CancellationException),次调成功。 */
-  static class FlakyHandler implements ExecutionHandler {
-    boolean failNext = true;
-
-    @Override public String ref() { return "flaky"; }
-
-    @Override public void handle(HandlerContext ctx) {
-      if (failNext) {
-        failNext = false; // 一次性失败:消耗后即恢复成功
-        throw new RuntimeException("flaky fail");
-      }
-      // no-op success on subsequent runs
-    }
   }
 
   /** 可复写的皮时钟:instant 由测试控制,getZone 固定 UTC。 */

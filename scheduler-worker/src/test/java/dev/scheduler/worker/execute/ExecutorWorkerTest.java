@@ -210,6 +210,64 @@ class ExecutorWorkerTest extends AbstractExecutorWorkerTest {
     assertEquals(0L, shardOutcomeCount(shardId, "DUE"));
   }
 
+  /** M6.3 relocate:3-shard、首个被认领的 shard 重试耗尽(FAILED+死信)时,FailureResolver.cancelSiblings
+   *  把其余 DUE 兄弟直编 CANCELED —— 原 server ApiIntegrationTest.failFast_endToEnd_... 的执行语义搬至此。 */
+  @Test void exhaustedShard_cancelSiblingDues() {
+    var rec = new RecordingHandler(true);
+    var registry = new MapHandlerRegistry(List.of(() -> rec));
+    long taskId = createTask("rec", 0, 1000, null, 3, 3); // shardCount=3, maxRetries=0 → 耗尽
+    long parentId = seedParentAndShards(taskId, 3);
+
+    boolean processed = worker(registry).workOne(); // 认领 id 最小的一枚 → 耗尽 FAILED + DLQ → FAIL_FAST
+
+    assertTrue(processed);
+    var ss = shards.findShards(parentId);
+    assertEquals(1, ss.stream().filter(s -> s.status() == ExecutionStatus.FAILED).count(), "恰好一条 FAILED");
+    assertEquals(2, ss.stream().filter(s -> s.status() == ExecutionStatus.CANCELED).count(),
+        "FAIL_FAST:其余 DUE 兄弟被直编 CANCELED");
+    assertEquals(Boolean.TRUE, jdbc.queryForObject(
+        "SELECT dead_letter FROM execution_shard WHERE id=? AND status='FAILED'",
+        Boolean.class, ss.get(0).id()), "耗尽 shard 置死信");
+  }
+
+  /** M6.3 relocate:重试调度后 next_retry_at 落未来闸,findCandidate 不得再认领;拨回过去闸才放行。
+   *  原 server ApiIntegrationTest.retryAfterFailure_thenBackoffGate_thenRerunReachesSuccess 的闸门语义。
+   *  用一次性失败 handler(镜像 server 的 FlakyHandler:首调抛错、次调成功)——RecordingHandler(fail=true)
+   *  恒抛,放行后再调度会耗尽而非成功,故不用它。 */
+  @Test void futureBackoffGate_blocksReclaim_thenPastGate_reruns() {
+    final int[] calls = {0};
+    var oneShot = new ExecutionHandler() {
+      boolean failNext = true;
+      @Override public String ref() { return "rec"; }
+      @Override public void handle(HandlerContext ctx) {
+        calls[0]++;
+        if (failNext) { failNext = false; throw new RuntimeException("gate fail"); } // 仅首调抛错
+      }
+    };
+    var registry = new MapHandlerRegistry(List.of(() -> oneShot));
+    long taskId = createTask("rec", 1, 1000, null, 1, 1); // maxRetries=1 → 可重试一次
+    long parentId = seedParentAndShards(taskId, 1);
+    long shardId = shard(parentId, 0).id();
+
+    assertTrue(worker(registry).workOne(), "首调认领并重试调度(落到 next_retry_at)");
+    Shard s = shards.findShard(shardId).orElseThrow();
+    assertEquals(ExecutionStatus.DUE, s.status(), "可重试 → 回 DUE");
+    assertNotNull(s.nextRetryAt(), "重试必须写 next_retry_at");
+    assertTrue(s.nextRetryAt().isAfter(CLOCK.instant()), "next_retry_at 在注入时钟未来");
+
+    jdbc.update("UPDATE execution_shard SET next_retry_at = now() + interval '1 hour' WHERE id=?",
+        shardId); // 拨到更远的未来(闸以 DB now() 判读 → 排除候选)
+    assertFalse(worker(registry).workOne(), "未来闸 → 候选被排除,不认领");
+    assertEquals(ExecutionStatus.DUE, shards.findShard(shardId).orElseThrow().status(), "仍 DUE,未被重认领");
+
+    jdbc.update("UPDATE execution_shard SET next_retry_at = now() - interval '1 second' WHERE id=?",
+        shardId); // 调回过去闸
+    assertTrue(worker(registry).workOne(), "过去闸 → 放行,次调成功");
+    assertEquals(ExecutionStatus.SUCCESS, shards.findShard(shardId).orElseThrow().status(),
+        "calls=2:handler 次调成功 → SUCCESS");
+    assertEquals(2, calls[0], "handler 恰被调度两次(首败重试 + 放行后成功)");
+  }
+
   @Test void handlerReceivesShardIndexAndCount() {
     var rec = new RecordingHandler(false);
     var registry = new MapHandlerRegistry(List.of(() -> rec));
