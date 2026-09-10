@@ -9,6 +9,7 @@ import dev.scheduler.persistence.TaskRepository;
 import dev.scheduler.persistence.WorkerRepository;
 import dev.scheduler.worker.execute.ExecutorWorker;
 import dev.scheduler.worker.handler.DemoHandler;
+import dev.scheduler.worker.handler.EchoHandler;
 import dev.scheduler.worker.handler.ExecutionHandler;
 import dev.scheduler.worker.handler.HandlerRegistry;
 import dev.scheduler.worker.handler.MapHandlerRegistry;
@@ -35,6 +36,7 @@ public class WorkerConfig {
   @Bean Clock clock() { return Clock.systemUTC(); }
 
   @Bean ExecutionHandler demoHandler() { return new DemoHandler(); }
+  @Bean ExecutionHandler echoHandler(Clock clock) { return new EchoHandler(clock); }
 
   @Bean
   HandlerRegistry handlerRegistry(List<ExecutionHandler> handlers) {
