@@ -37,14 +37,15 @@ Flyway 自动迁移 schema。多节点实例共享同一数据库，经 advisory
 
 ### 独立执行 worker（`scheduler-worker`）
 
-执行端与调度控制面分离：worker 是一个**纯数据库驱动的进程**（`scheduler-worker` 不引入
-`spring-boot-starter-web`，不对外提供 HTTP/REST），通过**共享 DB 心跳行**上报活性。启停内存、
-调度、重试逻辑自 M6 起由 worker 进程独立承载；worker 经 `execution_shard` 的原子认领与 server
-共享同一张执行表，多 worker 可并行分摊同一任务的散片。
+执行端与调度控制面分离：worker 是一个**数据库驱动**进程，通过**共享 DB 心跳行**上报活性作为主要存活来源，
+并额外暴露 `GET http://localhost:8081/actuator/health`（`spring-boot-starter-web` + actuator）作为 HTTP
+可探测健康端点，随 actuator 一起提供 `health,info,prometheus` 指标。启停内存、调度、重试逻辑自 M6 起由
+worker 进程独立承载；worker 经 `execution_shard` 的原子认领与 server 共享同一张执行表，多 worker 可并行
+分摊同一任务的散片。
 
 - 启动前需先由 server（Flyway V1–V5）建好 schema；worker 侧 `spring.flyway.enabled=false`，不迁移建表。
-- 活性契约 = DB `worker` 表的一行 `ALIVE`，且 `(now() - last_seen)` 随 10s 心跳保持为个位数秒；worker 无 HTTP health 端点可探测。
-- `server.port: 8081` 仅为**预留**端口（供未来接入 HTTP/actuator 用），当前 worker 不监听、不可达。
+- 活性契约 = DB `worker` 表的一行 `ALIVE`，且 `(now() - last_seen)` 随 10s 心跳保持为个位数秒（主要存活来源）；`/actuator/health` 的 HTTP 健康为额外可探测手段。
+- `server.port: 8081` 为真实监听端口：`GET /actuator/health` 返回 `{"status":"UP"}`，默认不暴露 DB 依赖探针。
 
 ```bash
 cd scheduler-worker
@@ -61,7 +62,7 @@ worker 配置（环境变量）：
 | 环境变量 | 默认 | 说明 |
 |----------|------|------|
 | `DB_URL` / `DB_USER` / `DB_PASSWORD` | `scheduler` 库同上 | 共享数据库连接 |
-| `SCHEDULER_WORKER_ID` | 空 | node workerId；空则生成 `worker@<uuid>` 并写入 `worker` 表 |
+| `SCHEDULER_WORKER_ID` | 空 | node workerId；空则生成 `worker@<hostname>`（跨重启稳定，在途租约可接续，避免累积陈旧 ALIVE 行） |
 | `SCHEDULER_LOOP_WORK_DELAY_MS` | `100` | 认领散片循环节流（`scheduler.loop.work-delay-ms`） |
 
 启动即注册一行 `worker`，随后按 `heartbeat.interval-ms`（默认 10s）周期心跳；每次心跳 upsert 覆盖该行 `last_seen`，即存活证据。

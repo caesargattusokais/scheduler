@@ -27,6 +27,7 @@ import org.springframework.scheduling.annotation.Scheduled;
 
 @Configuration
 public class WorkerConfig {
+  private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(WorkerConfig.class);
   // ---- 仓库 bean(worker 独立上下文,不能依赖 server Beans) ----
   @Bean TaskRepository taskRepository(JdbcTemplate jdbc) { return new JdbcTaskRepository(jdbc); }
   @Bean ShardRepository shardRepository(JdbcTemplate jdbc) { return new JdbcShardRepository(jdbc); }
@@ -49,7 +50,18 @@ public class WorkerConfig {
 
   @Bean
   String schedulerWorkerId(@Value("${scheduler.worker-id:}") String configured) {
-    return configured.isBlank() ? "worker@" + java.util.UUID.randomUUID() : configured;
+    return configured.isBlank() ? defaultWorkerId() : configured;
+  }
+
+  /** 稳定 worker 标识,进程重启后不换 id(在途租约可被接续;避免累积陈旧 ALIVE 行)。与 server 的
+   *  defaultWorkerId(<os>:<hostname>) 不同前缀,注册表不冲突。 */
+  private static String defaultWorkerId() {
+    try {
+      return "worker@" + java.net.InetAddress.getLocalHost().getHostName();
+    } catch (Throwable t) {
+      log.warn("could not resolve hostname for worker-id, falling back to uuid", t);
+      return "worker@" + java.util.UUID.randomUUID();
+    }
   }
 
   @Bean
@@ -87,13 +99,25 @@ public class WorkerConfig {
     private final ExecutorWorker worker;
     WorkLoop(ExecutorWorker worker) { this.worker = worker; }
     @Scheduled(fixedDelayString = "${scheduler.loop.work-delay-ms:100}")
-    public void tick() { worker.workOne(); }
+    public void tick() {
+      try {
+        worker.workOne();
+      } catch (Throwable t) {
+        log.warn("worker claim loop tick failed; continuing next tick", t);
+      }
+    }
   }
 
   public static final class HeartbeatLoop {
     private final WorkerRegistrar registrar;
     HeartbeatLoop(WorkerRegistrar registrar) { this.registrar = registrar; }
     @Scheduled(fixedDelayString = "${scheduler.heartbeat.interval-ms:10000}")
-    public void tick() { registrar.heartbeat(); }
+    public void tick() {
+      try {
+        registrar.heartbeat();
+      } catch (Throwable t) {
+        log.warn("worker heartbeat loop tick failed; continuing next tick", t);
+      }
+    }
   }
 }
