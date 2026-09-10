@@ -332,4 +332,11 @@ public class JdbcShardRepository implements ShardRepository {
     });
     return ok[0];
   }
+
+  @Override public boolean recordResultPayload(long shardId, String ownerWorkerId, String payload) {
+    int updated = jdbc.update(
+        "UPDATE execution_shard SET result_payload=? WHERE id=? AND worker_id=? AND status='SUCCESS'",
+        payload, shardId, ownerWorkerId);
+    return updated == 1;
+  }
 }

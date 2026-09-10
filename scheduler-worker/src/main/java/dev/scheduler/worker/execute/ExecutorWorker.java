@@ -71,7 +71,7 @@ public class ExecutorWorker {
       }
       CancellationToken token = new CancellationToken(shards.isCancelRequested(shard.id()));
       HandlerContext ctx = new HandlerContext(shard.executionId(), shard.id(), shard.shardIndex(),
-          parent.shardCount(), shard.shardData(), parent.args(), token);
+          parent.shardCount(), shard.shardData(), parent.args(), workerId, token);
       try {
         h.handle(ctx);
         // 正常返回后:若期间被请求取消,落 CANCELED;否则 SUCCESS。
@@ -79,6 +79,10 @@ public class ExecutorWorker {
           shards.markStatusOwned(shard.id(), ExecutionStatus.CANCELED, workerId, "cancelled after run");
         } else {
           shards.markStatusOwned(shard.id(), ExecutionStatus.SUCCESS, workerId, "ok");
+          String payload = h.resultPayload(ctx);
+          if (payload != null && !payload.isBlank()) {
+            shards.recordResultPayload(shard.id(), workerId, payload);
+          }
         }
       } catch (CancellationException cex) {
         // 协作取消信号:distinct 路径,不路由到 failureResolver(不重试/不死信)。

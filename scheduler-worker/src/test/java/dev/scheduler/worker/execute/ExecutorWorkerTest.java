@@ -124,6 +124,29 @@ class ExecutorWorkerTest extends AbstractExecutorWorkerTest {
         "父经汇聚终 SUCCESS");
   }
 
+  @Test void handlerResultPayload_writtenToShard_onSuccess() {
+    long taskId = createTask("rec", 3, 8);
+    long exec = seedParentAndShards(taskId, 3);
+    var payloadHandler = new ExecutionHandler() {
+      @Override public String ref() { return "rec"; }
+      @Override public void handle(HandlerContext ctx) { }
+      @Override public String resultPayload(HandlerContext ctx) {
+        return "{\"workerId\":\"" + ctx.workerId() + "\",\"shardIndex\":" + ctx.shardIndex() + "}";
+      }
+    };
+    var registry = new MapHandlerRegistry(List.of(() -> payloadHandler));
+    assertTrue(worker(registry).workOne());
+    var s = shard(exec, 0);
+    assertNotNull(s.resultPayload(), "SUCCESS 后 result_payload 应被写回");
+    assertTrue(s.resultPayload().contains("\"workerId\":\"worker-a\""),
+        "payload 应含调用方 workerId(经 HandlerContext.workerId)");
+    assertTrue(s.resultPayload().contains("\"shardIndex\":0"),
+        "payload 应含分片下标");
+    assertTrue(shards.findShards(exec).stream()
+        .noneMatch(x -> x.shardIndex() != 0 && x.resultPayload() != null),
+        "仅被认领执行的 shard 写 payload,其余保持空");
+  }
+
   @Test void missingHandler_failsShard_andWritesOutcome() {
     var rec = new RecordingHandler(false);
     var registry = new MapHandlerRegistry(List.of(() -> rec));
