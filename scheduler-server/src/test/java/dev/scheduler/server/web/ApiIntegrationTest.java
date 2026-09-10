@@ -163,7 +163,7 @@ class ApiIntegrationTest {
   @BeforeEach
   void resetDb() {
     jdbc.execute("TRUNCATE execution, execution_outcome, execution_shard, execution_shard_outcome,"
-        + " app_task RESTART IDENTITY CASCADE");
+        + " app_task, worker RESTART IDENTITY CASCADE");
     CLOCK.now = BASE;
     flakyHandler.failNext = true; // 每个用例从"下一调抛错"确定性起步
   }
@@ -193,12 +193,63 @@ class ApiIntegrationTest {
         .andExpect(jsonPath("$.name").value("create-list-task"));
   }
 
-  /** 表单下拉框的数据源:已注册 handler 的 ref 必须能枚举出来。 */
+  /** 表单下拉框的数据源 = 进程内 ∪ 存活 worker 并集(与 create/update 校验同源)。 */
   @Test
   void handlersEndpoint_listsRegisteredRefs() throws Exception {
+    Instant base = Instant.parse("2026-09-10T00:00:00Z");
+    CLOCK.now = base;
+    jdbc.update("INSERT INTO worker(id, refs, last_seen, status) "
+        + "VALUES('w-ping','ping',?,'ALIVE')", java.sql.Timestamp.from(base));
     mvc.perform(get("/api/v1/handlers"))
         .andExpect(status().isOk())
-        .andExpect(jsonPath("$[*]", hasItem("demo")));
+        .andExpect(jsonPath("$[*]", hasItem("demo")))    // 进程内
+        .andExpect(jsonPath("$[*]", hasItem("ping")));   // 存活 worker
+  }
+
+  /** M6.2:入口即拒绝孤儿 ref——无存活 worker、非进程内 handler 的 handlerRef 建不进去。 */
+  @Test
+  void createTask_orphanHandlerRef_returnsBadRequest() throws Exception {
+    String body = "{\"name\":\"orphan-task\",\"kind\":\"cron\",\"handlerRef\":\"no-such-handler\","
+        + "\"cron\":\"" + CRON + "\"}";
+    mvc.perform(post("/api/v1/tasks").contentType(MediaType.APPLICATION_JSON).content(body))
+        .andExpect(status().isBadRequest())
+        .andExpect(jsonPath("$.message").value(org.hamcrest.Matchers.containsString("no-such-handler")));
+  }
+
+  /** M6.2:注册到 worker 表且有新鲜 last_seen 的 worker 的 ref,是合法可创建目标(控制面只读 DB 注册视图)。 */
+  @Test
+  void createTask_liveWorkerRef_isAccepted() throws Exception {
+    Instant base = Instant.parse("2026-09-10T00:00:00Z");
+    CLOCK.now = base;
+    jdbc.update("INSERT INTO worker(id, refs, last_seen, status) "
+        + "VALUES('w-ping','ping',?,'ALIVE')", java.sql.Timestamp.from(base));
+    String body = "{\"name\":\"live-ref-task\",\"kind\":\"cron\",\"handlerRef\":\"ping\","
+        + "\"cron\":\"" + CRON + "\",\"shardCount\":1}";
+    mvc.perform(post("/api/v1/tasks").contentType(MediaType.APPLICATION_JSON).content(body))
+        .andExpect(status().isCreated());
+  }
+
+  /** M6.2:同源 stale(>30s)worker 的 ref 不算存活,建任务仍被拒(校验只采信新鲜注册)。 */
+  @Test
+  void createTask_staleWorkerRef_isRejected() throws Exception {
+    Instant base = Instant.parse("2026-09-10T00:00:00Z");
+    CLOCK.now = base;
+    jdbc.update("INSERT INTO worker(id, refs, last_seen, status) "
+        + "VALUES('w-stale','ping',?,'ALIVE')", java.sql.Timestamp.from(base.minusSeconds(60)));
+    String body = "{\"name\":\"stale-ref-task\",\"kind\":\"cron\",\"handlerRef\":\"ping\","
+        + "\"cron\":\"" + CRON + "\",\"shardCount\":1}";
+    mvc.perform(post("/api/v1/tasks").contentType(MediaType.APPLICATION_JSON).content(body))
+        .andExpect(status().isBadRequest());
+  }
+
+  /** M6.2:update 到孤儿 ref 同样 400(与 create 同一校验路径)。 */
+  @Test
+  void update_orphanHandlerRef_returnsBadRequest() throws Exception {
+    long id = postTask("update-orphan"); // 先建一个合法任务(process-in ref demo)
+    mvc.perform(put("/api/v1/tasks/" + id).contentType(MediaType.APPLICATION_JSON)
+            .content("{\"name\":\"still\",\"kind\":\"cron\",\"handlerRef\":\"no-such-handler\","
+                + "\"cron\":\"0 */6 * * * *\",\"shardCount\":1}"))
+        .andExpect(status().isBadRequest());
   }
 
   /** M3 回归:shardCount=0 不得创建任务(否则扇出 0 个 shard → 恒 DUE、无法汇聚终态的父)。 */

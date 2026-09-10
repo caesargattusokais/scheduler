@@ -24,10 +24,12 @@ public class TaskController {
 
   private final TaskRepository tasks;
   private final ShardRepository shards;
+  private final AvailableHandlerRefs availableRefs;
 
-  public TaskController(TaskRepository tasks, ShardRepository shards) {
+  public TaskController(TaskRepository tasks, ShardRepository shards, AvailableHandlerRefs availableRefs) {
     this.tasks = tasks;
     this.shards = shards;
+    this.availableRefs = availableRefs;
   }
 
   public record CreateTaskRequest(String name, String kind, String handlerRef, String cron,
@@ -49,6 +51,7 @@ public class TaskController {
     if (req.cron() == null || req.cron().isBlank()) {
       throw new IllegalArgumentException("cron is required");
     }
+    requireAvailableHandlerRef(req.handlerRef());
     checkDefinition(req.name(), req.handlerRef(), req.cron(), req.shardCount(),
         req.timeoutSeconds(), req.maxRetries(), req.backoffMs());
     Task created = tasks.create(new Task(
@@ -74,6 +77,7 @@ public class TaskController {
     if (req.cron() == null || req.cron().isBlank()) {
       throw new IllegalArgumentException("cron is required");
     }
+    requireAvailableHandlerRef(req.handlerRef());
     checkDefinition(req.name(), req.handlerRef(), req.cron(), req.shardCount(),
         req.timeoutSeconds(), req.maxRetries(), req.backoffMs());
     Task updated = new Task(id, req.name(), req.kind() == null ? existing.kind() : req.kind(),
@@ -139,6 +143,13 @@ public class TaskController {
 
   private Task requireTask(long id) {
     return tasks.findById(id).orElseThrow(() -> notFound("task " + id));
+  }
+
+  /** M6.2:入口即拒绝孤儿 ref——handlerRef 必须为进程内 ∪ 存活 worker 并集中的某 ref(否则建/改 400)。 */
+  private void requireAvailableHandlerRef(String handlerRef) {
+    if (!availableRefs.refs().contains(handlerRef)) {
+      throw new IllegalArgumentException("handler ref '" + handlerRef + "' served by no live worker");
+    }
   }
 
   /** 定义域数值合法性:负值即 400;cron 必须 6/7 字段。 */

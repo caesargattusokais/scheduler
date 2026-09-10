@@ -21,6 +21,7 @@ import dev.scheduler.worker.handler.MapHandlerRegistry;
 import dev.scheduler.server.leader.AdvisoryLockLeaderElection;
 import dev.scheduler.server.leader.LeaderElection;
 import dev.scheduler.server.reconcile.Reconciler;
+import dev.scheduler.server.web.AvailableHandlerRefs;
 import dev.scheduler.worker.retry.FailureResolver;
 import dev.scheduler.worker.retry.RetryPolicy;
 import dev.scheduler.server.trigger.TriggerEngine;
@@ -79,6 +80,12 @@ public class Beans {
   @Bean
   WorkerRepository workerRepository(JdbcTemplate jdbc) {
     return new JdbcWorkerRepository(jdbc);
+  }
+
+  /** M6.2:控制面校验的可用 handlerRef 并集(进程内 ∪ 存活 worker);TaskController 建/改 + handlers 下拉框同源。 */
+  @Bean
+  AvailableHandlerRefs availableHandlerRefs(HandlerRegistry handlerRegistry, WorkerRepository workerRepository, Clock clock) {
+    return new AvailableHandlerRefs(handlerRegistry, workerRepository, clock);
   }
 
   @Bean
