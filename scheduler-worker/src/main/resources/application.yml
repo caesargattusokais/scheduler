@@ -1,0 +1,25 @@
+spring:
+  application:
+    name: scheduler-worker
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/scheduler}
+    username: ${DB_USER:scheduler}
+    password: ${DB_PASSWORD:scheduler}
+  flyway:
+    enabled: false
+
+server:
+  port: 8081
+
+scheduler:
+  worker-id: ${SCHEDULER_WORKER_ID:}
+  loop:
+    work-delay-ms: 100
+  heartbeat:
+    interval-ms: 10000
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
