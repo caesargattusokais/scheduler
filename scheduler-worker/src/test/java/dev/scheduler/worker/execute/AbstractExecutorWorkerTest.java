@@ -1,4 +1,4 @@
-package dev.scheduler.server.execute;
+package dev.scheduler.worker.execute;
 
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.BeforeAll;

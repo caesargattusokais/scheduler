@@ -10,7 +10,8 @@
 |------|------|
 | `scheduler-core` | 领域模型、状态机、幂等键、leader 选举接口 |
 | `scheduler-persistence` | JDBC 仓储 + Flyway 迁移（PostgreSQL） |
-| `scheduler-server` | Spring Boot 应用、REST API、DAG Engine、Prometheus 指标 |
+| `scheduler-server` | Spring Boot 控制面：REST API、DAG Engine、调度触发、对账、Prometheus 指标；不执行业务 handler（仅按存活worker注册表校验 handlerRef） |
+| `scheduler-worker` | 独立执行 worker：共享 DB 心跳注册 + 原子认领散片运行 handler |
 | `web` | 控制台前端（React + TS + Vite，vite 代理到后端） |
 
 技术栈：Java 17、Spring Boot 3.2.5、PostgreSQL 16、Micrometer/Prometheus、React 19、Vite 6。
@@ -33,6 +34,38 @@ mvn spring-boot:run -pl scheduler-server
 | `SCHEDULER_LOOP_SCAN_DELAY_MS` | `5000` | 引擎扫描周期 |
 
 Flyway 自动迁移 schema。多节点实例共享同一数据库，经 advisory lock 选主协调。
+
+### 独立执行 worker（`scheduler-worker`）
+
+执行端与调度控制面分离：worker 是一个**数据库驱动**进程，通过**共享 DB 心跳行**上报活性作为主要存活来源，
+并额外暴露 `GET http://localhost:8081/actuator/health`（`spring-boot-starter-web` + actuator）作为 HTTP
+可探测健康端点，随 actuator 一起提供 `health,info,prometheus` 指标。启停内存、调度、重试逻辑自 M6 起由
+worker 进程独立承载；worker 经 `execution_shard` 的原子认领与 server 共享同一张执行表，多 worker 可并行
+分摊同一任务的散片。
+
+- 启动前需先由 server（Flyway V1–V5）建好 schema；worker 侧 `spring.flyway.enabled=false`，不迁移建表。
+- 活性契约 = DB `worker` 表的一行 `ALIVE`，且 `(now() - last_seen)` 随 10s 心跳保持为个位数秒（主要存活来源）；`/actuator/health` 的 HTTP 健康为额外可探测手段。
+- `server.port: 8081` 为真实监听端口：`GET /actuator/health` 返回 `{"status":"UP"}`，默认不暴露 DB 依赖探针。
+
+```bash
+cd scheduler-worker
+# 与 server 同款：生成含测试依赖的 classpath（供本地类路径启动）
+mvn -q -o dependency:build-classpath -Dmdep.outputFile=cp-test.txt -DincludeScope=test
+# 主类 == dev.scheduler.worker.WorkerApplication；DB 变量与 server 一致
+DB_URL=jdbc:postgresql://localhost:5433/scheduler \
+DB_USER=scheduler DB_PASSWORD=scheduler \
+java -cp "target/classes;$(cat cp-test.txt)" dev.scheduler.worker.WorkerApplication
+```
+
+worker 配置（环境变量）：
+
+| 环境变量 | 默认 | 说明 |
+|----------|------|------|
+| `DB_URL` / `DB_USER` / `DB_PASSWORD` | `scheduler` 库同上 | 共享数据库连接 |
+| `SCHEDULER_WORKER_ID` | 空 | node workerId；空则生成 `worker@<hostname>`（跨重启稳定，在途租约可接续，避免累积陈旧 ALIVE 行） |
+| `SCHEDULER_LOOP_WORK_DELAY_MS` | `100` | 认领散片循环节流（`scheduler.loop.work-delay-ms`） |
+
+启动即注册一行 `worker`，随后按 `heartbeat.interval-ms`（默认 10s）周期心跳；每次心跳 upsert 覆盖该行 `last_seen`，即存活证据。
 
 ### 前端（端口 `5173`）
 

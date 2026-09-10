@@ -1,16 +1,21 @@
-package dev.scheduler.server.handler;
+package dev.scheduler.worker.handler;
 
 import java.util.List;
 import java.util.Map;
+import java.util.HashMap;
 import java.util.function.Supplier;
-import java.util.stream.Collectors;
 
 public class MapHandlerRegistry implements HandlerRegistry {
   private final Map<String, ExecutionHandler> handlers;
 
   public MapHandlerRegistry(List<Supplier<ExecutionHandler>> suppliers) {
-    handlers = suppliers.stream().map(Supplier::get)
-        .collect(Collectors.toMap(ExecutionHandler::ref, h -> h, (a, b) -> a));
+    Map<String, ExecutionHandler> built = new HashMap<>();
+    for (ExecutionHandler h : suppliers.stream().map(Supplier::get).toList()) {
+      if (built.putIfAbsent(h.ref(), h) != null) {
+        throw new IllegalStateException("duplicate handler ref: " + h.ref());
+      }
+    }
+    handlers = built;
   }
 
   @Override public ExecutionHandler get(String ref) {

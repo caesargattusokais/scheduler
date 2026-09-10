@@ -11,6 +11,7 @@
     <module>scheduler-core</module>
     <module>scheduler-persistence</module>
     <module>scheduler-server</module>
+    <module>scheduler-worker</module>
   </modules>
   <properties>
     <maven.compiler.release>21</maven.compiler.release>

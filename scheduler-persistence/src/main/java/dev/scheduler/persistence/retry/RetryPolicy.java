@@ -1,4 +1,4 @@
-package dev.scheduler.server.retry;
+package dev.scheduler.persistence.retry;
 
 import dev.scheduler.core.Task;
 import java.util.regex.Pattern;

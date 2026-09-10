@@ -1,4 +1,4 @@
-package dev.scheduler.server.retry;
+package dev.scheduler.persistence.retry;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
