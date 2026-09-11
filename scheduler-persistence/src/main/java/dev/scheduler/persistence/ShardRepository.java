@@ -92,4 +92,8 @@ public interface ShardRepository {
   /** 死信分片重排回队:FAILED → DUE 并重置 attempt/next_retry_at/dead_letter(+DUE outcome)。CAS on status='FAILED':
    *  0 行=竞态/非 FAILED → 返回 false。 */
   boolean requeueShard(long shardId);
+
+  /** SUCCESS 后写回 result_payload,受 worker_id 归属守卫:行已不归该 owner(且非 SUCCESS)则静默返回 false。
+   *  payload 不是 outcome,不落 outcome 行。返回是否写入。 */
+  boolean recordResultPayload(long shardId, String ownerWorkerId, String payload);
 }

@@ -23,7 +23,9 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.CancellationException;
+import java.util.stream.Collectors;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -89,8 +91,10 @@ class ExecutorWorkerTest extends AbstractExecutorWorkerTest {
         Long.class, shardId, status);
   }
 
-  private ExecutorWorker worker(HandlerRegistry registry) {
-    return new ExecutorWorker(tasks, shards, registry, "worker-a",
+  private ExecutorWorker worker(HandlerRegistry registry) { return worker(registry, "worker-a"); }
+
+  private ExecutorWorker worker(HandlerRegistry registry, String workerId) {
+    return new ExecutorWorker(tasks, shards, registry, workerId,
         new FailureResolver(shards, new RetryPolicy(), CLOCK), CLOCK);
   }
 
@@ -122,6 +126,29 @@ class ExecutorWorkerTest extends AbstractExecutorWorkerTest {
     assertTrue(shards.finalizeParent(parentId, ExecutionStatus.SUCCESS, "all done"), "模拟 reconcile");
     assertEquals(ExecutionStatus.SUCCESS, shards.findParent(parentId).orElseThrow().status(),
         "父经汇聚终 SUCCESS");
+  }
+
+  @Test void handlerResultPayload_writtenToShard_onSuccess() {
+    long taskId = createTask("rec", 3, 8);
+    long exec = seedParentAndShards(taskId, 3);
+    var payloadHandler = new ExecutionHandler() {
+      @Override public String ref() { return "rec"; }
+      @Override public void handle(HandlerContext ctx) { }
+      @Override public String resultPayload(HandlerContext ctx) {
+        return "{\"workerId\":\"" + ctx.workerId() + "\",\"shardIndex\":" + ctx.shardIndex() + "}";
+      }
+    };
+    var registry = new MapHandlerRegistry(List.of(() -> payloadHandler));
+    assertTrue(worker(registry).workOne());
+    var s = shard(exec, 0);
+    assertNotNull(s.resultPayload(), "SUCCESS 后 result_payload 应被写回");
+    assertTrue(s.resultPayload().contains("\"workerId\":\"worker-a\""),
+        "payload 应含调用方 workerId(经 HandlerContext.workerId)");
+    assertTrue(s.resultPayload().contains("\"shardIndex\":0"),
+        "payload 应含分片下标");
+    assertTrue(shards.findShards(exec).stream()
+        .noneMatch(x -> x.shardIndex() != 0 && x.resultPayload() != null),
+        "仅被认领执行的 shard 写 payload,其余保持空");
   }
 
   @Test void missingHandler_failsShard_andWritesOutcome() {
@@ -398,5 +425,29 @@ class ExecutorWorkerTest extends AbstractExecutorWorkerTest {
 
   @Test void noWork_emptyTables_returnsFalse() {
     assertFalse(worker(new MapHandlerRegistry(List.of(() -> new RecordingHandler(false)))).workOne());
+  }
+
+  @Test void twoWorkers_distributeShards_eachClaimsDisjointSubset() {
+    long taskId = createTask("rec", 4, 8);
+    long exec = seedParentAndShards(taskId, 4);
+    var recA = new RecordingHandler(false);
+    var recB = new RecordingHandler(false);
+    var registryA = new MapHandlerRegistry(List.of(() -> recA));
+    var registryB = new MapHandlerRegistry(List.of(() -> recB));
+    // 交替驱动,直到无可认领(DUE 清空);DB 原子认领保证每片仅一个 worker 真正执行。
+    for (int i = 0; i < 4; i++) { worker(registryA, "worker-a").workOne(); worker(registryB, "worker-b").workOne(); }
+    List<Shard> all = shards.findShards(exec);
+    assertEquals(Set.of(0, 1, 2, 3),
+        all.stream().map(Shard::shardIndex).collect(Collectors.toSet()), "全部分片都被执行");
+    assertTrue(all.stream().allMatch(s -> s.status() == ExecutionStatus.SUCCESS));
+    var byWorker = all.stream().collect(Collectors.groupingBy(Shard::workerId,
+        Collectors.mapping(Shard::shardIndex, Collectors.toSet())));
+    assertEquals(2, byWorker.size(), "两个 worker 都分摊到分片");
+    assertTrue(byWorker.containsKey("worker-a"));
+    assertTrue(byWorker.containsKey("worker-b"));
+    long claimed = byWorker.values().stream().mapToLong(Set::size).sum();
+    assertEquals(4, claimed, "每个 shard 归属恰一个 worker,无重复认领 (disjoint + covering)");
+    assertEquals(2, recA.calls.size(), "worker-a 跑了 2 片");
+    assertEquals(2, recB.calls.size(), "worker-b 跑了 2 片");
   }
 }

@@ -9,6 +9,7 @@ import dev.scheduler.persistence.TaskRepository;
 import dev.scheduler.persistence.WorkerRepository;
 import dev.scheduler.worker.execute.ExecutorWorker;
 import dev.scheduler.worker.handler.DemoHandler;
+import dev.scheduler.worker.handler.EchoHandler;
 import dev.scheduler.worker.handler.ExecutionHandler;
 import dev.scheduler.worker.handler.HandlerRegistry;
 import dev.scheduler.worker.handler.MapHandlerRegistry;
@@ -35,6 +36,7 @@ public class WorkerConfig {
   @Bean Clock clock() { return Clock.systemUTC(); }
 
   @Bean ExecutionHandler demoHandler() { return new DemoHandler(); }
+  @Bean ExecutionHandler echoHandler(Clock clock) { return new EchoHandler(clock); }
 
   @Bean
   HandlerRegistry handlerRegistry(List<ExecutionHandler> handlers) {
@@ -55,9 +57,10 @@ public class WorkerConfig {
 
   /** 稳定 worker 标识,进程重启后不换 id(在途租约可被接续;避免累积陈旧 ALIVE 行)。与 server 的
    *  defaultWorkerId(<os>:<hostname>) 不同前缀,注册表不冲突。 */
-  private static String defaultWorkerId() {
+  static String defaultWorkerId() {
     try {
-      return "worker@" + java.net.InetAddress.getLocalHost().getHostName();
+      return "worker@" + java.net.InetAddress.getLocalHost().getHostName()
+          + ":" + java.lang.ProcessHandle.current().pid();
     } catch (Throwable t) {
       log.warn("could not resolve hostname for worker-id, falling back to uuid", t);
       return "worker@" + java.util.UUID.randomUUID();

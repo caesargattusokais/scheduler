@@ -62,10 +62,16 @@ worker 配置（环境变量）：
 | 环境变量 | 默认 | 说明 |
 |----------|------|------|
 | `DB_URL` / `DB_USER` / `DB_PASSWORD` | `scheduler` 库同上 | 共享数据库连接 |
-| `SCHEDULER_WORKER_ID` | 空 | node workerId；空则生成 `worker@<hostname>`（跨重启稳定，在途租约可接续，避免累积陈旧 ALIVE 行） |
+| `SCHEDULER_WORKER_ID` | 空 | node workerId；空则生成 `worker@<hostname>:<pid>`（同机多 worker 自动唯一，跨重启 PID 复用可接续在途租约） |
 | `SCHEDULER_LOOP_WORK_DELAY_MS` | `100` | 认领散片循环节流（`scheduler.loop.work-delay-ms`） |
 
 启动即注册一行 `worker`，随后按 `heartbeat.interval-ms`（默认 10s）周期心跳；每次心跳 upsert 覆盖该行 `last_seen`，即存活证据。
+
+- 多 worker 分摊：想增并行度，再多起 worker 进程指向同一 `scheduler` 库即可；散片经 `execution_shard` 原子认领分摊到各 worker，互不重复（执行详情每个 shard 的 `workerId` 可见归属）。
+- workerId 默认 `worker@<hostname>:<pid>`（同机多 worker 自动唯一）；固定身份用 `SCHEDULER_WORKER_ID` 覆盖（如 `worker-b`）。
+- 第二个真实 handler：`echo`（ref `echo`）。验证「不改控制面/前端加任务类型」——只需 worker 注册即在前端建任务下拉框出现。`echo` 的执行归属写在 `execution_shard.result_payload`：`{"echoed","workerId","shardIndex","at"}`。
+
+示例：起 server(:8080) + 两个 worker(:8081、:8082) 后，建 `echo` 任务 `shardCount=3` 并触发 → 3 个 shard 由两个 worker 分别认领执行、全 SUCCESS。
 
 ### 前端（端口 `5173`）
 
