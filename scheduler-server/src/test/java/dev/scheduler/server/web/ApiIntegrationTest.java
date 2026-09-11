@@ -6,6 +6,7 @@ import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.not;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
@@ -402,6 +403,31 @@ class ApiIntegrationTest {
 
   @Test void rerunExecution_missing_404() throws Exception {
     mvc.perform(post("/api/v1/executions/999999/rerun"))
+        .andExpect(status().isNotFound());
+  }
+
+  // ---------- 任务删除(仅删无子记录,否则 409) ----------
+
+  @Test void deleteTask_unreferenced_removesAnd404s() throws Exception {
+    long id = postTask("del-ok");
+    mvc.perform(delete("/api/v1/tasks/" + id))
+        .andExpect(status().isNoContent());
+    mvc.perform(get("/api/v1/tasks/" + id))
+        .andExpect(status().isNotFound());
+  }
+
+  @Test void deleteTask_hasExecution_rejected409() throws Exception {
+    long id = postTask("del-blocked");
+    triggerParent(id); // 建 1 轮执行 → 任务有了子记录
+    mvc.perform(delete("/api/v1/tasks/" + id))
+        .andExpect(status().isConflict())
+        .andExpect(status().reason(org.hamcrest.Matchers.containsString("执行记录")));
+    mvc.perform(get("/api/v1/tasks/" + id))
+        .andExpect(status().isOk()); // 任务仍在
+  }
+
+  @Test void deleteTask_missing_404() throws Exception {
+    mvc.perform(delete("/api/v1/tasks/999999"))
         .andExpect(status().isNotFound());
   }
 

@@ -40,4 +40,40 @@ class JdbcTaskRepositoryTest extends AbstractPostgresTest {
     assertTrue(cur.paused());
     assertFalse(repo.update(99999L, c)); // 不存在 → false
   }
+
+  @Test void delete_unreferenced_removesRow() {
+    var repo = new JdbcTaskRepository(jdbc);
+    var c = repo.create(new Task(null, "del1", "cron", "demo", "*/5 * * * *",
+        1, 300, 0, 1000, null, 8, true, false));
+    assertEquals(0, repo.executionCount(c.id()));
+    assertEquals(0, repo.dagReferenceCount(c.id()));
+    assertTrue(repo.delete(c.id()));
+    assertTrue(repo.findById(c.id()).isEmpty(), "删除后查无此任务");
+  }
+
+  @Test void delete_blockedByExecution_returnsFalseKeepsRow() {
+    var repo = new JdbcTaskRepository(jdbc);
+    var c = repo.create(new Task(null, "del2", "cron", "demo", "*/5 * * * *",
+        1, 300, 0, 1000, null, 8, true, false));
+    jdbc.update("INSERT INTO execution (task_id, status, idempotency_key) "
+        + "VALUES (?, 'SUCCESS', 'del-ik')", c.id());
+    assertEquals(1, repo.executionCount(c.id()));
+
+    assertFalse(repo.delete(c.id()), "有执行记录的任务不得被删");
+    assertTrue(repo.findById(c.id()).isPresent(), "被阻塞时任务必须留存");
+  }
+
+  @Test void delete_blockedByDagNode_returnsFalseKeepsRow() {
+    var repo = new JdbcTaskRepository(jdbc);
+    var c = repo.create(new Task(null, "del3", "cron", "demo", "*/5 * * * *",
+        1, 300, 0, 1000, null, 8, true, false));
+    long dagId = jdbc.queryForObject(
+        "INSERT INTO app_dag (name) VALUES ('d') RETURNING id", Long.class);
+    jdbc.update("INSERT INTO app_dag_node (dag_id, node_key, task_id) "
+        + "VALUES (?, 'n1', ?)", dagId, c.id());
+    assertEquals(1, repo.dagReferenceCount(c.id()));
+
+    assertFalse(repo.delete(c.id()), "被 DAG 节点引用的任务不得被删");
+    assertTrue(repo.findById(c.id()).isPresent());
+  }
 }

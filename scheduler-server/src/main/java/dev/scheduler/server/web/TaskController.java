@@ -4,10 +4,12 @@ import dev.scheduler.core.Execution;
 import dev.scheduler.core.Task;
 import dev.scheduler.persistence.ShardRepository;
 import dev.scheduler.persistence.TaskRepository;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -118,6 +120,28 @@ public class TaskController {
     requireTask(id);
     tasks.setPaused(id, false);
     return tasks.findById(id).orElseThrow(() -> notFound("task " + id));
+  }
+
+  /**
+   * 物理删除任务:仅当任务无任何 execution 且未被任何 DAG 节点/运行引用时允许(保留审计历史)。
+   * 有子记录 → 409 并说明被什么阻塞;任务不存在 → 404;成功 → 204。
+   */
+  @DeleteMapping("/{id}")
+  public ResponseEntity<Void> delete(@PathVariable long id) {
+    requireTask(id);
+    List<String> blockers = new ArrayList<>();
+    long ec = tasks.executionCount(id);
+    if (ec > 0) blockers.add(ec + " 条执行记录");
+    long dc = tasks.dagReferenceCount(id);
+    if (dc > 0) blockers.add("被 " + dc + " 处 DAG 节点/运行引用");
+    if (!blockers.isEmpty()) {
+      throw new ResponseStatusException(HttpStatus.CONFLICT,
+          "task " + id + " cannot be deleted: " + String.join("、", blockers));
+    }
+    if (!tasks.delete(id)) {
+      throw notFound("task " + id); // 竞态兜底:计数后并发插入的子记录
+    }
+    return ResponseEntity.noContent().build();
   }
 
   @PostMapping("/{id}/trigger")

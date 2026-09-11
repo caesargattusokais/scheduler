@@ -105,6 +105,7 @@ cd web && npm run dev                     # 开发，/api 与 /actuator 代理�
 | `POST` | `/api/v1/tasks/{id}/pause` | 暂停（不扫入新调度） |
 | `POST` | `/api/v1/tasks/{id}/resume` | 恢复 |
 | `POST` | `/api/v1/tasks/{id}/trigger` | 手动触发一次 → `200 Execution` |
+| `DELETE` | `/api/v1/tasks/{id}` | 物理删除任务：仅当无任何 `execution` 且未被任何 DAG 节点/运行引用（否则 `409` 说明阻塞项）；不存在 → `404`；成功 → `204`。有历史执行/被 DAG 引用的任务不可删 |
 
 任务字段：`name`、`kind`、`handlerRef`、`cron`、`shardCount`、`timeoutSeconds`、`maxRetries`、`backoffMs`、`retryableFailurePattern`、`maxActiveConcurrent`、`enabled`、`paused`。
 

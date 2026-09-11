@@ -59,4 +59,27 @@ public class JdbcTaskRepository implements TaskRepository {
   @Override public void setPaused(long id, boolean paused) {
     jdbc.update("UPDATE app_task SET paused=?, updated_at=now() WHERE id=?", paused, id);
   }
+
+  @Override public long executionCount(long taskId) {
+    return jdbc.queryForObject("SELECT count(*) FROM execution WHERE task_id=?", Long.class, taskId);
+  }
+
+  @Override public long dagReferenceCount(long taskId) {
+    // app_dag_node:当前 DAG 结构引用;dag_run_node:历史运行快照引用(task_id 同为外键)
+    return jdbc.queryForObject("""
+        SELECT (SELECT count(*) FROM app_dag_node WHERE task_id=?)
+             + (SELECT count(*) FROM dag_run_node WHERE task_id=?)""",
+        Long.class, taskId, taskId);
+  }
+
+  /** 物理删除,守卫保证被子记录引用时不动(返回 0);守卫与 FK 双保险。 */
+  @Override public boolean delete(long id) {
+    int rows = jdbc.update("""
+        DELETE FROM app_task t
+        WHERE t.id = ?
+          AND NOT EXISTS (SELECT 1 FROM execution e WHERE e.task_id = t.id)
+          AND NOT EXISTS (SELECT 1 FROM app_dag_node d WHERE d.task_id = t.id)
+          AND NOT EXISTS (SELECT 1 FROM dag_run_node r WHERE r.task_id = t.id)""", id);
+    return rows > 0;
+  }
 }

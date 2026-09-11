@@ -1,6 +1,6 @@
 import { FormEvent, useCallback, useEffect, useMemo, useState } from 'react';
 import {
-  createTask, listHandlerRefs, listTasks, pauseTask, resumeTask, triggerTask, updateTask,
+  createTask, deleteTask, listHandlerRefs, listTasks, pauseTask, resumeTask, triggerTask, updateTask,
 } from '../api/client';
 import type { CreateTaskRequest, Task } from '../api/types';
 import CronEditor from '../components/CronEditor';
@@ -48,6 +48,15 @@ export default function TasksPage() {
   }
   async function act(fn: () => Promise<unknown>) {
     try { await fn(); setErr(null); refresh(); } catch (x) { setErr(String(x)); }
+  }
+  /** 删除任务(仅无子记录可删):确认后调 DELETE;后端 409(有执行/DAG 引用)会以 err 呈现。 */
+  async function doDelete(t: Task) {
+    if (!window.confirm(`删除任务「${t.name}」(#${t.id})? 该任务须无执行记录且未被任何 DAG 引用。`)) return;
+    try {
+      await deleteTask(t.id);
+      if (editId === t.id) { setEditId(null); setForm(EMPTY); }
+      setErr(null); refresh();
+    } catch (x) { setErr(String(x)); }
   }
 
   const field = (key: keyof CreateTaskRequest, label: string, type = 'text') => (
@@ -129,6 +138,7 @@ export default function TasksPage() {
                     </button>
                     <button className="btn-ghost" onClick={() => act(() => triggerTask(t.id))}>触发</button>
                     <button className="btn-ghost" onClick={() => beginEdit(t)}>编辑</button>
+                    <button className="btn-ghost text-red-600" onClick={() => doDelete(t)}>删除</button>
                   </div>
                 </td>
               </tr>

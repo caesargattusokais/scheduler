@@ -19,6 +19,7 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
     ...init,
   });
   if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+  if (res.status === 204) return undefined as T; // 无响应体(如 DELETE)
   return res.json() as Promise<T>;
 }
 
@@ -32,6 +33,9 @@ export const updateTask = (id: number, b: UpdateTaskRequest) =>
 export const pauseTask = (id: number) => req<Task>(`/api/v1/tasks/${id}/pause`, { method: 'POST' });
 export const resumeTask = (id: number) => req<Task>(`/api/v1/tasks/${id}/resume`, { method: 'POST' });
 export const triggerTask = (id: number) => req<Execution>(`/api/v1/tasks/${id}/trigger`, { method: 'POST' });
+/** 删除任务:仅当无执行记录且未被 DAG 引用(否则后端 409);成功 → 204。 */
+export const deleteTask = (id: number) =>
+  req<void>(`/api/v1/tasks/${id}`, { method: 'DELETE' });
 
 export interface ListExecutionsParams {
   taskId?: number;
