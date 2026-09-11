@@ -95,7 +95,7 @@ class ExecutorWorkerTest extends AbstractExecutorWorkerTest {
 
   private ExecutorWorker worker(HandlerRegistry registry, String workerId) {
     return new ExecutorWorker(tasks, shards, registry, workerId,
-        new FailureResolver(shards, new RetryPolicy(), CLOCK), CLOCK);
+        new FailureResolver(shards, new RetryPolicy(), CLOCK), CLOCK, 120, 30);
   }
 
   @Test void happyPath_claimsShard_runsWithShardContext_writesSuccess() {

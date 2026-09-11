@@ -153,6 +153,14 @@ public class JdbcShardRepository implements ShardRepository {
     return c == null ? 0 : c;
   }
 
+  @Override public boolean renewLease(long shardId, String ownerWorkerId, Instant leaseUntil) {
+    // 所有权守卫续约:仅当仍归本 worker(RUNNING 且 worker_id 匹配)才延长;否则 0 行静默,让位给写回/回收判定。
+    return jdbc.update("""
+        UPDATE execution_shard SET lease_until=?
+         WHERE id=? AND status='RUNNING' AND worker_id=?""",
+        java.sql.Timestamp.from(leaseUntil), shardId, ownerWorkerId) == 1;
+  }
+
   @Override public List<ExpiredShard> findExpiredRunning(long taskId) {
     return jdbc.query(
         "SELECT s.id, s.attempt FROM execution_shard s JOIN execution e ON e.id = s.execution_id"

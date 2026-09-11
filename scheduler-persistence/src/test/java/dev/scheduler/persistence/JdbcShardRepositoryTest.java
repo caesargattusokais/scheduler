@@ -231,6 +231,25 @@ class JdbcShardRepositoryTest extends AbstractPostgresTest {
     assertEquals(1, shardRepo.countActive(taskId));
   }
 
+  @Test void renewLease_extendsWhileOwned_ignoresWhenLostOrFinal() {
+    long taskId = newTask(1, 8);
+    long parentId = seedParentAndShards(taskId, 1);
+    long shard0 = shard(parentId, 0).id();
+    claimShard(shard0, taskId, "w1", 8);
+
+    Instant renewed = Instant.now().plusSeconds(300);
+    assertTrue(shardRepo.renewLease(shard0, "w1", renewed), "持有者续约应成功");
+    assertEquals(renewed, shardRepo.findShard(shard0).get().leaseUntil());
+
+    // 非持有者(worker 变更)续约 → 0 行静默 false
+    assertFalse(shardRepo.renewLease(shard0, "w2", renewed.plusSeconds(10)));
+    assertEquals(renewed, shardRepo.findShard(shard0).get().leaseUntil(), "非持有者不得改变租约");
+
+    // 终态(如写回 SUCCESS)后不再续约
+    assertTrue(shardRepo.markStatusOwned(shard0, ExecutionStatus.SUCCESS, "w1", "ok"));
+    assertFalse(shardRepo.renewLease(shard0, "w1", renewed.plusSeconds(20)));
+  }
+
   @Test void excessiveConcurrencyRejectsSecondShard() {
     long taskId = newTask(2, 1); // maxActiveConcurrent=1
     long parentId = seedParentAndShards(taskId, 2);

@@ -14,6 +14,10 @@ import dev.scheduler.persistence.retry.FailureResolver;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.concurrent.CancellationException;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
 
 /**
  * 执行器工作循环:为每个任务找一个 DUE 候选分片、原子认领、按 handlerRef 派发 handler、回写
@@ -28,16 +32,27 @@ public class ExecutorWorker {
   private final String workerId;
   private final FailureResolver failureResolver;
   private final Clock clock;
+  private final int leaseSeconds;
+  private final int renewSeconds;
+  /** 运行中续约的共享调度执行器:长运行 handler 期间周期续租,保证分片不被 Reconciler 误回收。daemon 线程不阻塞 JVM 退出。 */
+  private final ScheduledExecutorService renewer = Executors.newSingleThreadScheduledExecutor(r -> {
+    Thread t = new Thread(r, "shard-lease-renewer");
+    t.setDaemon(true);
+    return t;
+  });
 
   public ExecutorWorker(TaskRepository tasks, ShardRepository shards,
                         HandlerRegistry handlers, String workerId,
-                        FailureResolver failureResolver, Clock clock) {
+                        FailureResolver failureResolver, Clock clock,
+                        int leaseSeconds, int renewSeconds) {
     this.tasks = tasks;
     this.shards = shards;
     this.handlers = handlers;
     this.workerId = workerId;
     this.failureResolver = failureResolver;
     this.clock = clock;
+    this.leaseSeconds = leaseSeconds;
+    this.renewSeconds = renewSeconds;
   }
 
   /** 处理一个分片,返回是否处理了(找到了候选且认领成功)。 */
@@ -53,49 +68,64 @@ public class ExecutorWorker {
       // 父 execution 只读(取 args/shardCount);worker 绝不对父行做任何写。
       Execution parent = shards.findParent(shard.executionId())
           .orElseThrow(() -> new IllegalStateException("no parent execution for shard " + shard.id()));
-      ExecutionHandler h;
-      try {
-        h = handlers.get(t.handlerRef());
-      } catch (IllegalArgumentException e) {
-        // 未注册 handler 也是失败。仅当本 worker 仍是该分片持有者(markStatusOwned 回写成功)时才判重试/死信;
-        // 若回写被 ownership 守卫拦截(分片已被他方接管),则静默放弃,不调度。
-        if (shards.markStatusOwned(shard.id(), ExecutionStatus.FAILED, workerId, e.getMessage())) {
-          failureResolver.handle(t, shard.id(), shard.attempt() + 1, e.getMessage());
+      // 长运行 handler(如分片批处理同步)会同步阻塞本循环超过一次租约时长;认领后立即起周期续租,运行期
+      // 保持 lease 有效,避免被 server 端 Reconciler 误回收,handler 写回终态后的 finally 中停租。
+      ScheduledFuture<?> renew = renewer.scheduleWithFixedDelay(() -> {
+        try {
+          shards.renewLease(shard.id(), workerId, clock.instant().plusSeconds(leaseSeconds));
+        } catch (Throwable ex) {
+          // 瞬时续租失败不中断调度任务;ownership 已失/终态由 renewLease 0 行静默,写回侧守卫兜底。
+          org.slf4j.LoggerFactory.getLogger(ExecutorWorker.class)
+              .warn("lease renew failed for shard {}", shard.id(), ex);
         }
-        return true;
-      }
-      // 运行前检查:已被请求取消则直接落 CANCELED,不再调度 handler(协作取消前置路径)。
-      if (shards.isCancelRequested(shard.id())) {
-        shards.markStatusOwned(shard.id(), ExecutionStatus.CANCELED, workerId, "cancelled before run");
-        return true;
-      }
-      CancellationToken token = new CancellationToken(shards.isCancelRequested(shard.id()));
-      HandlerContext ctx = new HandlerContext(shard.executionId(), shard.id(), shard.shardIndex(),
-          parent.shardCount(), shard.shardData(), parent.args(), workerId, token);
+      }, renewSeconds, renewSeconds, TimeUnit.SECONDS);
       try {
-        h.handle(ctx);
-        // 正常返回后:若期间被请求取消,落 CANCELED;否则 SUCCESS。
+        ExecutionHandler h;
+        try {
+          h = handlers.get(t.handlerRef());
+        } catch (IllegalArgumentException e) {
+          // 未注册 handler 也是失败。仅当本 worker 仍是该分片持有者(markStatusOwned 回写成功)时才判重试/死信;
+          // 若回写被 ownership 守卫拦截(分片已被他方接管),则静默放弃,不调度。
+          if (shards.markStatusOwned(shard.id(), ExecutionStatus.FAILED, workerId, e.getMessage())) {
+            failureResolver.handle(t, shard.id(), shard.attempt() + 1, e.getMessage());
+          }
+          return true;
+        }
+        // 运行前检查:已被请求取消则直接落 CANCELED,不再调度 handler(协作取消前置路径)。
         if (shards.isCancelRequested(shard.id())) {
-          shards.markStatusOwned(shard.id(), ExecutionStatus.CANCELED, workerId, "cancelled after run");
-        } else {
-          shards.markStatusOwned(shard.id(), ExecutionStatus.SUCCESS, workerId, "ok");
-          String payload = h.resultPayload(ctx);
-          if (payload != null && !payload.isBlank()) {
-            shards.recordResultPayload(shard.id(), workerId, payload);
+          shards.markStatusOwned(shard.id(), ExecutionStatus.CANCELED, workerId, "cancelled before run");
+          return true;
+        }
+        CancellationToken token = new CancellationToken(shards.isCancelRequested(shard.id()));
+        HandlerContext ctx = new HandlerContext(shard.executionId(), shard.id(), shard.shardIndex(),
+            parent.shardCount(), shard.shardData(), parent.args(), workerId, token);
+        try {
+          h.handle(ctx);
+          // 正常返回后:若期间被请求取消,落 CANCELED;否则 SUCCESS。
+          if (shards.isCancelRequested(shard.id())) {
+            shards.markStatusOwned(shard.id(), ExecutionStatus.CANCELED, workerId, "cancelled after run");
+          } else {
+            shards.markStatusOwned(shard.id(), ExecutionStatus.SUCCESS, workerId, "ok");
+            String payload = h.resultPayload(ctx);
+            if (payload != null && !payload.isBlank()) {
+              shards.recordResultPayload(shard.id(), workerId, payload);
+            }
+          }
+        } catch (CancellationException cex) {
+          // 协作取消信号:distinct 路径,不路由到 failureResolver(不重试/不死信)。
+          shards.markStatusOwned(shard.id(), ExecutionStatus.CANCELED, workerId, "cancelled by handler");
+        } catch (Throwable err) {
+          // 普通失败走统一判定:应重试则调度重试,否则 FAILED + 死信。ownership 守卫失败(stale)则整个重试/
+          // 死信决策一并抑制,避免 double-completion / spurious-failure。
+          String detail = String.valueOf(err);
+          if (shards.markStatusOwned(shard.id(), ExecutionStatus.FAILED, workerId, detail)) {
+            failureResolver.handle(t, shard.id(), shard.attempt() + 1, detail);
           }
         }
-      } catch (CancellationException cex) {
-        // 协作取消信号:distinct 路径,不路由到 failureResolver(不重试/不死信)。
-        shards.markStatusOwned(shard.id(), ExecutionStatus.CANCELED, workerId, "cancelled by handler");
-      } catch (Throwable err) {
-        // 普通失败走统一判定:应重试则调度重试,否则 FAILED + 死信。ownership 守卫失败(stale)则整个重试/
-        // 死信决策一并抑制,避免 double-completion / spurious-failure。
-        String detail = String.valueOf(err);
-        if (shards.markStatusOwned(shard.id(), ExecutionStatus.FAILED, workerId, detail)) {
-          failureResolver.handle(t, shard.id(), shard.attempt() + 1, detail);
-        }
+        return true;
+      } finally {
+        renew.cancel(false);
       }
-      return true;
     }
     return false;
   }

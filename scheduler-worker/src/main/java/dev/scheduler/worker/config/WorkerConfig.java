@@ -14,6 +14,7 @@ import dev.scheduler.worker.handler.ExecutionHandler;
 import dev.scheduler.worker.handler.HandlerRegistry;
 import dev.scheduler.worker.handler.MapHandlerRegistry;
 import dev.scheduler.worker.handler.MyJobHandler;
+import dev.scheduler.worker.handler.SyncDemoHandler;
 import dev.scheduler.worker.registration.WorkerRegistrar;
 import dev.scheduler.persistence.retry.FailureResolver;
 import dev.scheduler.persistence.retry.RetryPolicy;
@@ -39,6 +40,7 @@ public class WorkerConfig {
   @Bean ExecutionHandler demoHandler() { return new DemoHandler(); }
   @Bean ExecutionHandler echoHandler(Clock clock) { return new EchoHandler(clock); }
   @Bean ExecutionHandler myJobHandler(Clock clock) { return new MyJobHandler(clock); }
+  @Bean ExecutionHandler syncDemoHandler(JdbcTemplate jdbc) { return new SyncDemoHandler(jdbc); }
 
   @Bean
   HandlerRegistry handlerRegistry(List<ExecutionHandler> handlers) {
@@ -72,8 +74,11 @@ public class WorkerConfig {
   @Bean
   ExecutorWorker executorWorker(TaskRepository tasks, ShardRepository shards,
                                 HandlerRegistry handlers, String schedulerWorkerId,
-                                FailureResolver failureResolver, Clock clock) {
-    return new ExecutorWorker(tasks, shards, handlers, schedulerWorkerId, failureResolver, clock);
+                                FailureResolver failureResolver, Clock clock,
+                                @Value("${scheduler.lease.seconds:120}") int leaseSeconds,
+                                @Value("${scheduler.lease.renew-seconds:30}") int renewSeconds) {
+    return new ExecutorWorker(tasks, shards, handlers, schedulerWorkerId, failureResolver, clock,
+        leaseSeconds, renewSeconds);
   }
 
   @Bean

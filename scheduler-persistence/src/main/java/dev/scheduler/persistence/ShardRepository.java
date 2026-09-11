@@ -40,6 +40,11 @@ public interface ShardRepository {
   /** 某任务下仍持有有效租约(RUNNING 且 lease_until>now())的 shard 数,用于并发配额。 */
   long countActive(long taskId);
 
+  /** 运行中续约:仅当分片仍归 {@code ownerWorkerId}(worker_id 匹配)且仍 RUNNING 时延长 lease_until。
+   *  长运行 handler(千万级批处理同步阻塞)期间 worker 周期调用,避免租约短于任务时长被 Reconciler 误回收;
+   *  已终态(如写回 SUCCESS)或被接管(worker_id 变更)则 0 行 → 静默返回 false。无 outcome 行。 */
+  boolean renewLease(long shardId, String ownerWorkerId, Instant leaseUntil);
+
   /** 对账器扫描到的孤儿 RUNNING shard:租约已过期仍 RUNNING。只投影对账所需的 id 与 attempt。 */
   record ExpiredShard(long id, int attempt) {}
 
