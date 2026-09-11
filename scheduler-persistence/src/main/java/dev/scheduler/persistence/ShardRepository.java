@@ -4,6 +4,7 @@ import dev.scheduler.core.ExecutionStatus;
 import dev.scheduler.core.Shard;
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 /** 分片执行(execution_shard)。父/N-shard 创建 + 读取,以及 worker 侧的认领/写回/重试生命周期。
@@ -84,6 +85,9 @@ public interface ShardRepository {
 
   /** DUE 父直取消:RUNNING/DUE 的 shard 全编 CANCELED(+outcome),父置 CANCELED(终态)+outcome。 */
   void cancelParentImmediate(long parentId);
+
+  /** 某父执行下各分片最近一次 FAILED outcome 的 detail(shard_id → detail),即失败日志;无 FAILED 记录的分片无条目。 */
+  Map<Long, String> findFailureDetails(long executionId);
 
   /** 该父下是否仍有 RUNNING shard。 */
   boolean hasRunningShard(long parentId);

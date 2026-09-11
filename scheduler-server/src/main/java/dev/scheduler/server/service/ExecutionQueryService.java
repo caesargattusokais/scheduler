@@ -11,6 +11,7 @@ import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
@@ -76,12 +77,20 @@ public class ExecutionQueryService {
     return s;
   }
 
-  /** 执行详情:父 header + 其全部分片(按 shard_index 升序)。展示的父 status 为派生值,DB 中父仍存原值。 */
+  /** 执行详情:父 header + 其全部分片(按 shard_index 升序)。展示的父 status 为派生值,DB 中父仍存原值。
+   *  每个分片补充该分片最近一次 FAILED outcome 的 detail(failureDetail,失败日志;无则为 null)。 */
   public Optional<ExecutionDetail> getDetail(long id) {
     return executions.findById(id).map(parent -> {
       List<Shard> ss = shards.findShards(id);
+      Map<Long, String> failed = shards.findFailureDetails(id);
+      List<ExecutionDetail.ShardView> views = ss.stream()
+          .map(s -> new ExecutionDetail.ShardView(
+              s.id(), s.executionId(), s.shardIndex(), s.shardData(), s.status(), s.attempt(),
+              s.workerId(), s.leaseUntil(), s.nextRetryAt(), s.cancelRequested(), s.deadLetter(),
+              s.startedAt(), s.finishedAt(), s.resultPayload(), failed.get(s.id())))
+          .toList();
       return new ExecutionDetail(id, parent.taskId(), deriveStatus(parent, ss), ss.size(),
-          parent.rerunOf(), ss);
+          parent.rerunOf(), views);
     });
   }
 }

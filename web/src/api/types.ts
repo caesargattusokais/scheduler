@@ -47,6 +47,8 @@ export interface Shard {
   startedAt: string | null;
   finishedAt: string | null;
   resultPayload: string | null;
+  /** 执行详情独有:该分片最近一次 FAILED outcome 的 detail(失败日志);列表/DLQ 中恒为 null。 */
+  failureDetail?: string | null;
 }
 
 export interface ExecutionDetail {

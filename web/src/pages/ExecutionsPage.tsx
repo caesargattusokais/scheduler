@@ -86,6 +86,8 @@ export default function ExecutionsPage() {
     },
     [load]
   );
+  // 任务名映射(taskId → name),供列表展示名称。tasks 已为筛选下拉加载。
+  const taskNameById = new Map(tasks.map((t) => [t.id, t.name]));
   const apply = () => {
     setOffset(0);
   };
@@ -139,7 +141,7 @@ export default function ExecutionsPage() {
           <thead>
             <tr>
               <th className="num">id</th>
-              <th className="num">taskId</th>
+              <th>任务</th>
               <th>状态</th>
               <th className="num">分片</th>
               <th className="num">attempt</th>
@@ -150,7 +152,10 @@ export default function ExecutionsPage() {
             {rows.map((r) => (
               <tr key={r.id} onClick={() => openDetail(r.id)} className="cursor-pointer">
                 <td className="num">{r.id}</td>
-                <td className="num">{r.taskId}</td>
+                <td>
+                  {taskNameById.get(r.taskId)}
+                  <span className="ml-1 text-xs text-slate-400">#{r.taskId}</span>
+                </td>
                 <td><StatusBadge status={r.status} /></td>
                 <td className="num">{r.shardCount}</td>
                 <td className="num">{r.attempt}</td>
@@ -193,7 +198,8 @@ export default function ExecutionsPage() {
                   <th>状态</th>
                   <th className="num">attempt</th>
                   <th>workerId</th>
-                  <th>deadLetter</th>
+                  <th>死信</th>
+                  <th>失败日志</th>
                 </tr>
               </thead>
               <tbody>
@@ -205,6 +211,9 @@ export default function ExecutionsPage() {
                     <td className="num">{s.attempt}</td>
                     <td className="text-xs text-slate-500">{s.workerId ?? '—'}</td>
                     <td>{s.deadLetter ? <span className="badge badge-red">死信</span> : <span className="text-slate-300">—</span>}</td>
+                    <td className="text-xs text-red-700">
+                      {s.failureDetail ? <span className="break-words font-mono">{s.failureDetail}</span> : <span className="text-slate-300">—</span>}
+                    </td>
                   </tr>
                 ))}
               </tbody>

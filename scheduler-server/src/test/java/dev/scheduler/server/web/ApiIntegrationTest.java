@@ -688,6 +688,22 @@ class ApiIntegrationTest {
         "派生 RUNNING 仅读取映射,不写库:父仍存 DUE header");
   }
 
+  /** 失败日志:分片 FAILED 时,detail 里应带该分片最近一次 FAILED outcome 的 detail。 */
+  @Test
+  void getExecutionDetail_includesShardFailureDetail() throws Exception {
+    long id = postTask("fail-detail-task");
+    long parentId = triggerParent(id);
+    long shardId = shards.findShards(parentId).get(0).id();
+    String boom = "boom: things went wrong";
+    jdbc.update("UPDATE execution_shard SET status='FAILED' WHERE id=?", shardId);
+    jdbc.update("INSERT INTO execution_shard_outcome (shard_id, status, detail) VALUES (?, 'FAILED', ?)",
+        shardId, boom);
+
+    mvc.perform(get("/api/v1/executions/" + parentId))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.shards[0].failureDetail").value(boom));
+  }
+
   /** M3 父级取消级联:shardCount=3,无 RUNNING shard → cancelParentImmediate 直取消 → 父 CANCELED + 全 DUE shard 级联 CANCELED。 */
   @Test
   void cooperativeCancel_parentLevel_cascadesToShards() throws Exception {

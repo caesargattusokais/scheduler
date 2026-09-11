@@ -6,7 +6,9 @@ import dev.scheduler.core.ExecutionTransitions;
 import dev.scheduler.core.Shard;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -91,6 +93,21 @@ public class JdbcShardRepository implements ShardRepository {
 
   @Override public Optional<Shard> findShard(long shardId) {
     return jdbc.query("SELECT * FROM execution_shard WHERE id=?", MAP, shardId).stream().findFirst();
+  }
+
+  /** 分片最近一次 FAILED outcome 的 detail:DISTINCT ON(shard_id) 每组按 created_at/id 取最新一条。 */
+  @Override public Map<Long, String> findFailureDetails(long executionId) {
+    return jdbc.query("""
+        SELECT DISTINCT ON (s.id) s.id, o.detail
+        FROM execution_shard s
+        JOIN execution_shard_outcome o ON o.shard_id = s.id
+        WHERE s.execution_id = ? AND o.status = 'FAILED'
+        ORDER BY s.id, o.created_at DESC, o.id DESC""",
+        rs -> {
+          Map<Long, String> m = new LinkedHashMap<>();
+          while (rs.next()) m.put(rs.getLong(1), rs.getString(2));
+          return m;
+        }, executionId);
   }
 
   @Override public Optional<Shard> findCandidate(long taskId) {
