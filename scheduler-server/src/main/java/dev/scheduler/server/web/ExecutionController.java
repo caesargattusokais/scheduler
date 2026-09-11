@@ -10,6 +10,8 @@ import dev.scheduler.server.service.ExecutionQueryService;
 import java.time.Instant;
 import java.time.format.DateTimeParseException;
 import java.util.List;
+import java.util.Set;
+import java.util.UUID;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -66,6 +68,28 @@ public class ExecutionController {
   @GetMapping("/{id}")
   public ExecutionDetail get(@PathVariable long id) {
     return queryService.getDetail(id).orElseThrow(() -> notFound("execution " + id));
+  }
+
+  /** 可被重跑的源轮状态:终态(SUCCESS/FAILED/CANCELED)或 ORPHANED(已结束、不可复原地)轮。 */
+  private static final Set<ExecutionStatus> RERUNNABLE =
+      Set.of(ExecutionStatus.SUCCESS, ExecutionStatus.FAILED, ExecutionStatus.CANCELED,
+          ExecutionStatus.ORPHANED);
+
+  /**
+   * 重跑指定一轮执行(M6.5 真重跑):引用该源轮,复制其 args 并落 rerun_of 溯源,新建一轮父 + 全部分片。
+   * 源轮不存在 → 404;源轮非终态(DUE/RUNNING)→ 409。同一源轮可多次重跑,每次生成独立一轮(键 rerun:&lt;srcId&gt;:&lt;uuid&gt;)。
+   */
+  @PostMapping("/{id}/rerun")
+  public ResponseEntity<Execution> rerun(@PathVariable long id) {
+    Execution source = executions.findById(id).orElseThrow(() -> notFound("execution " + id));
+    if (!RERUNNABLE.contains(source.status())) {
+      throw new ResponseStatusException(HttpStatus.CONFLICT,
+          "execution " + id + " is " + source.status() + " and cannot be rerun (only terminal/orphaned can)");
+    }
+    String key = "rerun:" + source.id() + ":" + UUID.randomUUID();
+    Execution created = shards.createParentWithShards(
+        source.taskId(), key, source.shardCount(), source.args(), source.id());
+    return ResponseEntity.status(HttpStatus.CREATED).body(created);
   }
 
   /** DLQ 列表:FAILED 且已标 dead_letter 标记的分片,按 id 升序;空 → 200 []。 */
@@ -127,7 +151,7 @@ public class ExecutionController {
         ExecutionQueryService.deriveStatus(parent, ss),
         parent.idempotencyKey(), parent.args(), parent.shardIndex(), parent.shardCount(),
         parent.attempt(), parent.workerId(), parent.leaseUntil(), parent.nextRetryAt(),
-        parent.startedAt(), parent.finishedAt(), parent.resultPayload());
+        parent.startedAt(), parent.finishedAt(), parent.resultPayload(), parent.rerunOf());
   }
 
   private static ResponseStatusException notFound(String what) {

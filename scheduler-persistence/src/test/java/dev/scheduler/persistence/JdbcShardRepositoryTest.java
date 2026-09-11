@@ -143,6 +143,35 @@ class JdbcShardRepositoryTest extends AbstractPostgresTest {
     assertEquals(parent.id(), byId.get().executionId());
   }
 
+  // M6.5 重跑溯源:5 参重载须落 args + rerun_of;3 参重载缺省为 NULL/NULL
+  @Test void createParentWithShards_sixParams_storesArgsAndRerunOf() {
+    long taskId = newTask(2, 8);
+    long sourceId = shardRepo.createParentWithShards(taskId, "p:src", 2).id();
+
+    var rerun = shardRepo.createParentWithShards(taskId, "p:rerun", 2, "{\"x\":1}", sourceId);
+
+    assertEquals(2, rerun.shardCount());
+    assertEquals(2, shardCount(rerun.id()), "重跑轮同样扇出 2 shard");
+    assertEquals(sourceId, rerun.rerunOf(), "重跑轮 rerun_of 应指向源轮(溯源)");
+    assertEquals("{\"x\":1}", rerun.args(), "重跑轮继承源轮 args");
+    // 直查 DB 复核列确实落盘(非仅内存对象)
+    assertEquals(sourceId, jdbc.queryForObject(
+        "SELECT rerun_of FROM execution WHERE id=?", Long.class, rerun.id()));
+    assertEquals("{\"x\":1}", jdbc.queryForObject(
+        "SELECT args FROM execution WHERE id=?", String.class, rerun.id()));
+    // 源轮 rerun_of 恒 NULL
+    assertNull(jdbc.queryForObject(
+        "SELECT rerun_of FROM execution WHERE id=?", Long.class, sourceId));
+  }
+
+  @Test void createParentWithShards_threeParams_storesNullArgsAndRerunOf() {
+    long taskId = newTask(1, 8);
+    var parent = shardRepo.createParentWithShards(taskId, "p:plain", 1);
+
+    assertNull(parent.rerunOf(), "普通触发/cron 轮 rerun_of 恒 NULL");
+    assertNull(parent.args(), "普通轮不复制 args");
+  }
+
   // Task 2:worker 侧生命周期
   @Test void findCandidateReturnsDueShard() {
     long taskId = newTask(3, 8);

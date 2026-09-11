@@ -360,20 +360,49 @@ class ApiIntegrationTest {
         .andExpect(jsonPath("$", hasSize(1))); // 剩 1 条(3-2)
   }
 
-  @Test void rerunCreatesFreshExecution() throws Exception {
-    long id = postTask("rerun-me");
-    // 先手动触发一轮 → executions 现有 1 条
-    mvc.perform(post("/api/v1/tasks/" + id + "/trigger"))
-        .andExpect(status().isCreated());
-    // 重跑 → 再新建一轮(id 递增、父 DUE、taskId 匹配)
-    MvcResult r = mvc.perform(post("/api/v1/tasks/" + id + "/rerun"))
+  @Test void rerunExecution_terminalSource_createsFreshTraceableRound() throws Exception {
+    long id = postTask("rerun-e2e");
+    long sourceId = triggerParent(id); // DUE 父 + 1 DUE shard
+    // 确定性终结源轮(测试直接置 shard/父 SUCCESS;生产由 worker + 对账器完成)
+    for (Long sid : jdbc.queryForList("SELECT id FROM execution_shard WHERE execution_id=?",
+        Long.class, sourceId)) {
+      jdbc.update("UPDATE execution_shard SET status='SUCCESS', finished_at=now() WHERE id=?", sid);
+    }
+    assertEquals(1, jdbc.update(
+        "UPDATE execution SET status='SUCCESS', finished_at=now() WHERE id=? AND status='DUE'", sourceId));
+
+    MvcResult r = mvc.perform(post("/api/v1/executions/" + sourceId + "/rerun"))
         .andExpect(status().isCreated()).andReturn();
-    long newExec = objectMapper.readTree(r.getResponse().getContentAsString())
-        .path("id").asLong();
-    assertTrue(newExec > 0);
-    String body = mvc.perform(get("/api/v1/executions?taskId=" + id))
-        .andExpect(status().isOk()).andReturn().getResponse().getContentAsString();
-    assertEquals(2, objectMapper.readTree(body).size());
+    String bodyStr = r.getResponse().getContentAsString();
+    long newId = objectMapper.readTree(bodyStr).path("id").asLong();
+    assertTrue(newId != sourceId, "重跑应新建一轮而非复用源轮");
+    assertEquals("DUE", objectMapper.readTree(bodyStr).path("status").asText());
+    assertEquals(id, objectMapper.readTree(bodyStr).path("taskId").asLong());
+    assertEquals(sourceId, objectMapper.readTree(bodyStr).path("rerunOf").asLong(),
+        "重跑轮的 rerunOf 应指向源轮(溯源)");
+    assertEquals(1, objectMapper.readTree(bodyStr).path("shardCount").asInt());
+
+    // 溯源 READ:详情也带 rerunOf
+    mvc.perform(get("/api/v1/executions/" + newId))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.rerunOf").value(sourceId));
+
+    // 该任务共 2 轮(源 + 重跑)
+    String list = mvc.perform(get("/api/v1/executions?taskId=" + id)).andReturn()
+        .getResponse().getContentAsString();
+    assertEquals(2, objectMapper.readTree(list).size());
+  }
+
+  @Test void rerunExecution_nonTerminalSource_rejected409() throws Exception {
+    long id = postTask("rerun-409");
+    long sourceId = triggerParent(id); // 仍 DUE(非终态)
+    mvc.perform(post("/api/v1/executions/" + sourceId + "/rerun"))
+        .andExpect(status().isConflict());
+  }
+
+  @Test void rerunExecution_missing_404() throws Exception {
+    mvc.perform(post("/api/v1/executions/999999/rerun"))
+        .andExpect(status().isNotFound());
   }
 
   @Test

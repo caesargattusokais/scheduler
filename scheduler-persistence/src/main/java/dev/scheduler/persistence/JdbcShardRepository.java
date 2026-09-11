@@ -33,7 +33,7 @@ public class JdbcShardRepository implements ShardRepository {
       rs.getTimestamp("next_retry_at") != null ? rs.getTimestamp("next_retry_at").toInstant() : null,
       rs.getTimestamp("started_at") != null ? rs.getTimestamp("started_at").toInstant() : null,
       rs.getTimestamp("finished_at") != null ? rs.getTimestamp("finished_at").toInstant() : null,
-      rs.getString("result_payload"));
+      rs.getString("result_payload"), (Long) rs.getObject("rerun_of"));
 
   private static final RowMapper<Shard> MAP = (rs, i) -> new Shard(
       rs.getLong("id"), rs.getLong("execution_id"), rs.getInt("shard_index"),
@@ -47,16 +47,22 @@ public class JdbcShardRepository implements ShardRepository {
       rs.getString("result_payload"));
 
   @Override public Execution createParentWithShards(long taskId, String parentKey, int shardCount) {
+    return createParentWithShards(taskId, parentKey, shardCount, null, null);
+  }
+
+  @Override public Execution createParentWithShards(long taskId, String parentKey, int shardCount,
+                                                    String args, Long rerunOf) {
     // 防御守卫:M3 扇出按 shardCount 物化 N 个 shard;0 会得到 0 个 shard → 父 execution 恒 DUE 无法汇聚终态。
     if (shardCount < 1) throw new IllegalArgumentException("shardCount must be >= 1");
     // 单事务内:父 execution 创建(状态 DUE,幂等 by parent_key,works on update 兼容多次扫描)、
     // existing==0 闸、N 个 shard 批量插入 三者原子提交;中途崩溃不留孤儿父/部分 shard。
     Long parentId = tx.execute(s -> {
       Long id = jdbc.queryForObject("""
-        INSERT INTO execution (task_id, status, idempotency_key, shard_index, shard_count, started_at)
-        VALUES (?, 'DUE', ?, 0, ?, now())
+        INSERT INTO execution (task_id, status, idempotency_key, shard_index, shard_count,
+                               started_at, args, rerun_of)
+        VALUES (?, 'DUE', ?, 0, ?, now(), ?, ?)
         ON CONFLICT (idempotency_key) DO UPDATE SET idempotency_key = EXCLUDED.idempotency_key
-        RETURNING id""", Long.class, taskId, parentKey, shardCount);
+        RETURNING id""", Long.class, taskId, parentKey, shardCount, args, rerunOf);
       final long pid = id;
       int existing = jdbc.queryForObject(
           "SELECT count(*) FROM execution_shard WHERE execution_id=?", Integer.class, pid);

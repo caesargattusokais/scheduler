@@ -32,7 +32,6 @@ export const updateTask = (id: number, b: UpdateTaskRequest) =>
 export const pauseTask = (id: number) => req<Task>(`/api/v1/tasks/${id}/pause`, { method: 'POST' });
 export const resumeTask = (id: number) => req<Task>(`/api/v1/tasks/${id}/resume`, { method: 'POST' });
 export const triggerTask = (id: number) => req<Execution>(`/api/v1/tasks/${id}/trigger`, { method: 'POST' });
-export const rerunTask = (id: number) => req<Execution>(`/api/v1/tasks/${id}/rerun`, { method: 'POST' });
 
 export interface ListExecutionsParams {
   taskId?: number;
@@ -57,6 +56,9 @@ export const getExecutionDetail = (id: number) =>
 
 export const cancelExecution = (id: number) =>
   req<Execution>(`/api/v1/executions/${id}/cancel`, { method: 'POST' });
+/** M6.5 真重跑:引用某一轮终态执行,复制其 args 新建一轮并溯源(rerun_of)。源非终态 → 后端 409。 */
+export const rerunExecution = (id: number) =>
+  req<Execution>(`/api/v1/executions/${id}/rerun`, { method: 'POST' });
 
 export const getDlq = () => req<Shard[]>('/api/v1/executions/dlq');
 

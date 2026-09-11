@@ -29,6 +29,7 @@ export interface Execution {
   startedAt: string | null;
   finishedAt: string | null;
   resultPayload: string | null;
+  rerunOf: number | null;
 }
 
 export interface Shard {
@@ -53,6 +54,7 @@ export interface ExecutionDetail {
   taskId: number;
   status: string;
   shardCount: number;
+  rerunOf: number | null;
   shards: Shard[];
 }
 

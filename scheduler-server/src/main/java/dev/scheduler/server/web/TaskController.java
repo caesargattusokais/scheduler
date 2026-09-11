@@ -126,14 +126,7 @@ public class TaskController {
         .body(manualRun(id, UUID.randomUUID().toString()));
   }
 
-  /** 任务整体重跑:无条件新建一轮手动 run(spec §1.2;v1 无参)。 */
-  @PostMapping("/{id}/rerun")
-  public ResponseEntity<Execution> rerun(@PathVariable long id) {
-    return ResponseEntity.status(HttpStatus.CREATED)
-        .body(manualRun(id, "rerun-" + UUID.randomUUID()));
-  }
-
-  /** 手动触发:建父 execution + 其 shard(与 trigger 共用底座)。 */
+  /** 手动触发:建父 execution + 其 shard(重跑已 M6.5 移入 /executions/{id}/rerun)。 */
   private Execution manualRun(long taskId, String suffix) {
     Task t = requireTask(taskId);
     String key = "manual:" + t.id() + ":" + suffix;

@@ -11,8 +11,13 @@ import java.util.Optional;
 public interface ShardRepository {
 
   /** 创建父 execution(状态 DUE,幂等 by parentKey)+ 其 N 个 shard。单事务,父重复创建不重复插 shard。
-   *  {@code shardCount < 1} 抛 IllegalArgumentException("shardCount must be >= 1")(0 扇出会产生恒 DUE 无法汇聚的父)。 */
+   *  {@code shardCount < 1} 抛 IllegalArgumentException("shardCount must be >= 1")(0 扇出会产生恒 DUE 无法汇聚的父)。
+   *  无源轮:args = null、rerunOf = null(普通触发/cron/dag)。 */
   Execution createParentWithShards(long taskId, String parentKey, int shardCount);
+
+  /** 带源轮的重跑创建:同上,并复制源轮 args、落 rerun_of 溯源(引用的历史轮 id,新轮 READ 可见)。 */
+  Execution createParentWithShards(long taskId, String parentKey, int shardCount,
+                                   String args, Long rerunOf);
 
   /** 按父 execution id 读父行。 */
   Optional<Execution> findParent(long executionId);

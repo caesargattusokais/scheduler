@@ -13,6 +13,7 @@ import dev.scheduler.worker.handler.EchoHandler;
 import dev.scheduler.worker.handler.ExecutionHandler;
 import dev.scheduler.worker.handler.HandlerRegistry;
 import dev.scheduler.worker.handler.MapHandlerRegistry;
+import dev.scheduler.worker.handler.MyJobHandler;
 import dev.scheduler.worker.registration.WorkerRegistrar;
 import dev.scheduler.persistence.retry.FailureResolver;
 import dev.scheduler.persistence.retry.RetryPolicy;
@@ -37,6 +38,7 @@ public class WorkerConfig {
 
   @Bean ExecutionHandler demoHandler() { return new DemoHandler(); }
   @Bean ExecutionHandler echoHandler(Clock clock) { return new EchoHandler(clock); }
+  @Bean ExecutionHandler myJobHandler(Clock clock) { return new MyJobHandler(clock); }
 
   @Bean
   HandlerRegistry handlerRegistry(List<ExecutionHandler> handlers) {

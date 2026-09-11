@@ -36,7 +36,7 @@ public class ExecutionQueryService {
       rs.getTimestamp("next_retry_at") != null ? rs.getTimestamp("next_retry_at").toInstant() : null,
       rs.getTimestamp("started_at") != null ? rs.getTimestamp("started_at").toInstant() : null,
       rs.getTimestamp("finished_at") != null ? rs.getTimestamp("finished_at").toInstant() : null,
-      rs.getString("result_payload"));
+      rs.getString("result_payload"), (Long) rs.getObject("rerun_of"));
 
   /**
    * 执行列表:taskId/status/from/to 可选过滤 + limit/offset 分页。时间窗按 started_at 过滤
@@ -86,7 +86,8 @@ public class ExecutionQueryService {
   public Optional<ExecutionDetail> getDetail(long id) {
     return executions.findById(id).map(parent -> {
       List<Shard> ss = shards.findShards(id);
-      return new ExecutionDetail(id, parent.taskId(), deriveStatus(parent, ss), ss.size(), ss);
+      return new ExecutionDetail(id, parent.taskId(), deriveStatus(parent, ss), ss.size(),
+          parent.rerunOf(), ss);
     });
   }
 }

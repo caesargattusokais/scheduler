@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { listExecutions, getExecutionDetail, cancelExecution, listTasks } from '../api/client';
+import { listExecutions, getExecutionDetail, cancelExecution, listTasks, rerunExecution } from '../api/client';
 import { useInterval } from '../lib/useInterval';
 import { Execution, ExecutionDetail, Task } from '../api/types';
 import StatusBadge from '../components/StatusBadge';
@@ -64,6 +64,21 @@ export default function ExecutionsPage() {
         setErr(null);
         await load();
         setDetail(null);
+      } catch (e) {
+        setErr(String(e));
+      }
+    },
+    [load]
+  );
+  /** M6.5 真重跑:引用这一轮(须终态),复制其 args 新建一轮并溯源。源非终态 → 后端 409。 */
+  const doRerun = useCallback(
+    async (id: number) => {
+      if (!window.confirm('重跑这一轮会复制其参数新建一轮执行(并溯源 rerun_of),确定?')) return;
+      try {
+        await rerunExecution(id);
+        setErr(null);
+        setDetail(null); // 回到列表看这一轮 + 新增的重跑轮
+        await load();
       } catch (e) {
         setErr(String(e));
       }
@@ -160,9 +175,15 @@ export default function ExecutionsPage() {
             <div className="flex items-center gap-2 text-sm font-semibold text-slate-900">
               执行详情 #{detail.id}
               <StatusBadge status={detail.status} />
+              {detail.rerunOf != null && (
+                <span className="text-xs font-normal text-slate-500">· 重跑自 <a className="text-blue-600 hover:underline" onClick={() => openDetail(detail.rerunOf!)}>#{detail.rerunOf}</a></span>
+              )}
             </div>
             <div className="flex items-center gap-2">
               <button className="btn-secondary" onClick={() => setDetail(null)}>关闭</button>
+              {['SUCCESS', 'FAILED', 'CANCELED', 'ORPHANED'].includes(detail.status) && (
+                <button className="btn-secondary" onClick={() => doRerun(detail.id)}>重跑这轮</button>
+              )}
               <button className="btn-danger" onClick={() => doCancel(detail.id)}>取消执行</button>
             </div>
           </div>

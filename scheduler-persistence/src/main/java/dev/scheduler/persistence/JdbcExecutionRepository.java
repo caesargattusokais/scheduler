@@ -32,7 +32,7 @@ public class JdbcExecutionRepository implements ExecutionRepository {
       rs.getTimestamp("next_retry_at") != null ? rs.getTimestamp("next_retry_at").toInstant() : null,
       rs.getTimestamp("started_at") != null ? rs.getTimestamp("started_at").toInstant() : null,
       rs.getTimestamp("finished_at") != null ? rs.getTimestamp("finished_at").toInstant() : null,
-      rs.getString("result_payload"));
+      rs.getString("result_payload"), (Long) rs.getObject("rerun_of"));
 
   @Override public long createDue(Execution e) {
     String sql = """

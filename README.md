@@ -105,7 +105,6 @@ cd web && npm run dev                     # 开发，/api 与 /actuator 代理�
 | `POST` | `/api/v1/tasks/{id}/pause` | 暂停（不扫入新调度） |
 | `POST` | `/api/v1/tasks/{id}/resume` | 恢复 |
 | `POST` | `/api/v1/tasks/{id}/trigger` | 手动触发一次 → `200 Execution` |
-| `POST` | `/api/v1/tasks/{id}/rerun` | 整任务重跑一次 → `200 Execution` |
 
 任务字段：`name`、`kind`、`handlerRef`、`cron`、`shardCount`、`timeoutSeconds`、`maxRetries`、`backoffMs`、`retryableFailurePattern`、`maxActiveConcurrent`、`enabled`、`paused`。
 
@@ -114,7 +113,8 @@ cd web && npm run dev                     # 开发，/api 与 /actuator 代理�
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | `GET` | `/api/v1/executions` | 执行列表；query：`taskId`、`status`、`from`、`to`（ISO-8601 带偏移）、`limit`、`offset` |
-| `GET` | `/api/v1/executions/{id}` | 执行明细（含 shards） |
+| `GET` | `/api/v1/executions/{id}` | 执行明细（含 shards、`rerunOf`） |
+| `POST` | `/api/v1/executions/{id}/rerun` | **M6.5 真重跑**：引用某一轮终态执行（SUCCESS/FAILED/CANCELED/ORPHANED），复制其 `args` 新建一轮并溯源（`rerunOf`=源轮 id）→ `201 Execution`；源轮非终态 → `409`；不存在 → `404`。同一源轮可多次重跑，每次独立一轮（键 `rerun:<srcId>:<uuid>`）。 |
 | `POST` | `/api/v1/executions/{id}/cancel` | 取消执行 → `200 Execution` |
 | `GET` | `/api/v1/executions/dlq` | 死信 shard 列表 → `[Shard]` |
 | `POST` | `/api/v1/executions/shards/{shardId}/requeue` | 死信出队重跑 → `200 Shard` |

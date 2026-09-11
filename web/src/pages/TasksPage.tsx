@@ -1,8 +1,9 @@
 import { FormEvent, useCallback, useEffect, useMemo, useState } from 'react';
 import {
-  createTask, listHandlerRefs, listTasks, pauseTask, rerunTask, resumeTask, triggerTask, updateTask,
+  createTask, listHandlerRefs, listTasks, pauseTask, resumeTask, triggerTask, updateTask,
 } from '../api/client';
 import type { CreateTaskRequest, Task } from '../api/types';
+import CronEditor from '../components/CronEditor';
 import { useInterval } from '../lib/useInterval';
 
 const EMPTY: CreateTaskRequest = {
@@ -91,12 +92,14 @@ export default function TasksPage() {
               {handlerOptions.map((ref) => <option key={ref} value={ref}>{ref}</option>)}
             </select>
           </label>
-          {field('cron', 'Cron')}
           {field('shardCount', '分片数', 'number')}
           {field('timeoutSeconds', '超时 (s)', 'number')}
           {field('maxRetries', '重试次数', 'number')}
           {field('backoffMs', '退避 (ms)', 'number')}
           {field('maxActiveConcurrent', '最大并发', 'number')}
+        </div>
+        <div className="mt-3">
+          <CronEditor value={form.cron} onChange={(v) => setForm({ ...form, cron: v })} />
         </div>
         <div className="mt-3 flex items-center gap-2">
           <button type="submit" className="btn-primary">{editId === null ? '创建任务' : '保存修改'}</button>
@@ -125,7 +128,6 @@ export default function TasksPage() {
                       {t.paused ? '启用' : '暂停'}
                     </button>
                     <button className="btn-ghost" onClick={() => act(() => triggerTask(t.id))}>触发</button>
-                    <button className="btn-ghost" onClick={() => act(() => rerunTask(t.id))}>重跑</button>
                     <button className="btn-ghost" onClick={() => beginEdit(t)}>编辑</button>
                   </div>
                 </td>
