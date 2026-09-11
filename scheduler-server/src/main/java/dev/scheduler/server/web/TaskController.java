@@ -16,6 +16,7 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.server.ResponseStatusException;
 
@@ -98,9 +99,16 @@ public class TaskController {
     return tasks.findById(id).orElseThrow(() -> notFound("task " + id));
   }
 
+  /** 任务列表:name 子串、paused 过滤 + limit/offset 分页,返回 Page<Task>。 */
   @GetMapping
-  public List<Task> list() {
-    return tasks.findAll();
+  public Page<Task> list(
+      @RequestParam(required = false) String name,
+      @RequestParam(required = false) Boolean paused,
+      @RequestParam(required = false) Integer limit,
+      @RequestParam(required = false) Integer offset) {
+    Paging p = Paging.of(limit, offset);
+    return new Page<>(tasks.findPage(name, paused, p.limit(), p.offset()),
+        tasks.count(name, paused), p.offset(), p.limit());
   }
 
   @GetMapping("/{id}")

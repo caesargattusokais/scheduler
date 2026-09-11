@@ -4,6 +4,8 @@ import java.util.List;
 import java.util.Optional;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
+import java.util.ArrayList;
+import java.util.List;
 import org.springframework.jdbc.support.GeneratedKeyHolder;
 import org.springframework.jdbc.support.KeyHolder;
 
@@ -45,6 +47,33 @@ public class JdbcTaskRepository implements TaskRepository {
     return jdbc.query("SELECT * FROM app_task WHERE enabled AND NOT paused AND cron IS NOT NULL", MAP);
   }
   @Override public List<Task> findAll() { return jdbc.query("SELECT * FROM app_task ORDER BY id", MAP); }
+
+  /** WHERE 片段(name ILIKE / paused 过滤),与 {@link #whereArgs} 配套。 */
+  private String where(String name, Boolean paused) {
+    StringBuilder w = new StringBuilder();
+    if (name != null && !name.isBlank()) w.append(" AND name ILIKE ?");
+    if (paused != null) w.append(" AND paused = ?");
+    return w.toString();
+  }
+  private List<Object> filterArgs(String name, Boolean paused) {
+    List<Object> a = new ArrayList<>();
+    if (name != null && !name.isBlank()) a.add("%" + name.trim() + "%");
+    if (paused != null) a.add(paused);
+    return a;
+  }
+
+  @Override public List<Task> findPage(String name, Boolean paused, int limit, int offset) {
+    List<Object> a = filterArgs(name, paused);
+    a.add(limit); a.add(offset);
+    return jdbc.query("SELECT * FROM app_task WHERE 1=1" + where(name, paused)
+            + " ORDER BY id LIMIT ? OFFSET ?", MAP, a.toArray());
+  }
+
+  @Override public long count(String name, Boolean paused) {
+    Long c = jdbc.queryForObject("SELECT count(*) FROM app_task WHERE 1=1" + where(name, paused),
+        Long.class, filterArgs(name, paused).toArray());
+    return c == null ? 0 : c;
+  }
   @Override public boolean update(long id, Task t) {
     int rows = jdbc.update("""
         UPDATE app_task SET name=?, kind=?, handler_ref=?, cron=?, shard_count=?,

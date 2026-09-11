@@ -43,7 +43,7 @@ public class ExecutionController {
   }
 
   @GetMapping
-  public List<Execution> list(
+  public Page<Execution> list(
       @RequestParam(required = false) Long taskId,
       @RequestParam(required = false) String status,
       @RequestParam(required = false) String from,
@@ -92,10 +92,15 @@ public class ExecutionController {
     return ResponseEntity.status(HttpStatus.CREATED).body(created);
   }
 
-  /** DLQ 列表:FAILED 且已标 dead_letter 标记的分片,按 id 升序;空 → 200 []。 */
+  /** DLQ 列表:FAILED 且已标 dead_letter 标记的分片,taskId 过滤 + limit/offset 分页,返回 Page<Shard>。 */
   @GetMapping("/dlq")
-  public List<Shard> dlq() {
-    return shards.findDeathLetterShards();
+  public Page<Shard> dlq(
+      @RequestParam(required = false) Long taskId,
+      @RequestParam(required = false) Integer limit,
+      @RequestParam(required = false) Integer offset) {
+    Paging p = Paging.of(limit, offset);
+    return new Page<>(shards.findDeathLetterShards(taskId, p.limit(), p.offset()),
+        shards.countDeathLetterShards(taskId), p.offset(), p.limit());
   }
 
   /**

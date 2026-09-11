@@ -25,6 +25,10 @@ public interface DagRepository {
 
   Optional<Dag> findDag(long id);
   List<Dag> findAllDags();
+  /** DAG 列表:name 子串(ILIKE)过滤 + limit/offset 分页(ORDER BY id)。 */
+  List<Dag> findDagsPage(String name, int limit, int offset);
+  /** 与上同过滤条件(不含分页)的 DAG 全量计数。 */
+  long countDags(String name);
   /** enabled 且非 paused 且 cron 非空(镜像 TaskRepository.findCronEnabled)。 */
   List<Dag> findCronEnabledDags();
   List<DagNode> findNodes(long dagId);
@@ -40,6 +44,10 @@ public interface DagRepository {
   Optional<DagRunNode> findNode(long nodeId);
   /** run 列表;dagId 空则全部,ORDER BY id DESC。 */
   List<DagRun> findRuns(Long dagId);
+  /** run 列表分页:dagId 空则全部 + status 过滤 + limit/offset,ORDER BY id DESC。 */
+  List<DagRun> findRunsPage(Long dagId, String status, int limit, int offset);
+  /** 与上同过滤条件(不含分页)的 run 全量计数。 */
+  long countRuns(Long dagId, String status);
   /** 未终态 run(stored status='PENDING'),由 DagEngine 每周期推进。 */
   List<DagRun> findActiveRuns();
   /** 某 run 的全部节点,ORDER BY sort_order, id。 */

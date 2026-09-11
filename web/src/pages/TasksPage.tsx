@@ -4,7 +4,10 @@ import {
 } from '../api/client';
 import type { CreateTaskRequest, Task } from '../api/types';
 import CronEditor from '../components/CronEditor';
+import Pager from '../components/Pager';
 import { useInterval } from '../lib/useInterval';
+
+const PAGE_SIZE = 10;
 
 const EMPTY: CreateTaskRequest = {
   name: '', handlerRef: '', cron: '0 */5 * * * *', shardCount: 1,
@@ -13,14 +16,24 @@ const EMPTY: CreateTaskRequest = {
 
 export default function TasksPage() {
   const [tasks, setTasks] = useState<Task[]>([]);
+  const [total, setTotal] = useState(0);
+  const [name, setName] = useState('');
+  const [paused, setPaused] = useState('');
+  const [offset, setOffset] = useState(0);
   const [handlerRefs, setHandlerRefs] = useState<string[]>([]);
   const [form, setForm] = useState<CreateTaskRequest>(EMPTY);
   const [editId, setEditId] = useState<number | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
   const refresh = useCallback(() => {
-    listTasks().then(setTasks).catch((e) => setErr(String(e)));
-  }, []);
+    listTasks({
+      name: name || undefined,
+      paused: paused === '' ? undefined : paused === 'true',
+      limit: PAGE_SIZE,
+      offset,
+    }).then((page) => { setTasks(page.items); setTotal(page.total); })
+      .catch((e) => setErr(String(e)));
+  }, [name, paused, offset]);
   useEffect(() => { refresh(); }, [refresh]);
   useInterval(refresh, 5000);
 
@@ -80,12 +93,28 @@ export default function TasksPage() {
           <h1 className="page-title">任务</h1>
           <p className="page-sub">任务定义、手动触发与单任务重跑</p>
         </div>
-        {tasks.length > 0 && (
-          <div className="text-sm text-slate-500">共 {tasks.length} 个任务</div>
+        {total > 0 && (
+          <div className="text-sm text-slate-500">共 {total} 个任务</div>
         )}
       </div>
 
       {err && <div className="mb-4 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{err}</div>}
+
+      <div className="toolbar">
+        <label className="field">
+          <span className="label">名称</span>
+          <input className="input" placeholder="搜索名称…" value={name}
+            onChange={(e) => { setName(e.target.value); setOffset(0); }} />
+        </label>
+        <label className="field">
+          <span className="label">状态</span>
+          <select className="input" value={paused} onChange={(e) => { setPaused(e.target.value); setOffset(0); }}>
+            <option value="">全部</option>
+            <option value="true">暂停</option>
+            <option value="false">启用</option>
+          </select>
+        </label>
+      </div>
 
       <form onSubmit={handleSubmit} className="card mb-5 p-4">
         <h2 className="mb-3 text-sm font-semibold text-slate-900">
@@ -146,6 +175,8 @@ export default function TasksPage() {
           </tbody>
         </table>
       </div>
+
+      <Pager total={total} offset={offset} limit={PAGE_SIZE} onPage={setOffset} />
     </div>
   );
 }

@@ -71,7 +71,15 @@ public class DagController {
         dags.createDag(req.name(), req.description(), req.cron(), nodes, edges));
   }
 
-  @GetMapping public List<Dag> list() { return dags.findAllDags(); }
+  /** DAG 列表:name 子串过滤 + limit/offset 分页,返回 Page<Dag>。 */
+  @GetMapping
+  public Page<Dag> list(@RequestParam(required = false) String name,
+      @RequestParam(required = false) Integer limit,
+      @RequestParam(required = false) Integer offset) {
+    Paging p = Paging.of(limit, offset);
+    return new Page<>(dags.findDagsPage(name, p.limit(), p.offset()),
+        dags.countDags(name), p.offset(), p.limit());
+  }
 
   @GetMapping("/{id}")
   public DagDetail get(@PathVariable long id) {
@@ -89,8 +97,15 @@ public class DagController {
     return ResponseEntity.status(HttpStatus.CREATED).body(dags.createManualRun(id));
   }
 
-  @GetMapping("/runs") public List<DagRun> runs(@RequestParam(required = false) Long dagId) {
-    return query.listRuns(dagId);
+  /** run 列表:dagId/status 过滤 + limit/offset 分页,返回 Page<DagRun>。 */
+  @GetMapping("/runs")
+  public Page<DagRun> runs(@RequestParam(required = false) Long dagId,
+      @RequestParam(required = false) String status,
+      @RequestParam(required = false) Integer limit,
+      @RequestParam(required = false) Integer offset) {
+    Paging p = Paging.of(limit, offset);
+    return new Page<>(dags.findRunsPage(dagId, status, p.limit(), p.offset()),
+        dags.countRuns(dagId, status), p.offset(), p.limit());
   }
 
   @GetMapping("/runs/{runId}")

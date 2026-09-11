@@ -5,6 +5,8 @@ import dev.scheduler.core.ExecutionStatus;
 import dev.scheduler.core.Shard;
 import dev.scheduler.persistence.ExecutionRepository;
 import dev.scheduler.persistence.ShardRepository;
+import dev.scheduler.server.web.Page;
+import dev.scheduler.server.web.Paging;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -39,37 +41,29 @@ public class ExecutionQueryService {
       rs.getString("result_payload"), (Long) rs.getObject("rerun_of"));
 
   /**
-   * 执行列表:taskId/status/from/to 可选过滤 + limit/offset 分页。时间窗按 started_at 过滤
-   * (Timestamp.from 显式转 timestamptz 参数);确定序为 started_at DESC NULLS LAST, id DESC(稳定同毫秒平局)
-   * 支撑分页/时间窗;LIMIT/OFFSET 恒追加(where true 保证串合法)。limit 默认 100 上限 500,offset 默认 0。
+   * 执行列表:taskId/status/from/to 可选过滤 + limit/offset 分页,返回 Page{items,total,offset,limit}。
+   * 时间窗按 started_at 过滤(Timestamp.from 显式转 timestamptz 参数);确定序为
+   * started_at DESC NULLS LAST, id DESC(稳定同毫秒平局)支撑分页/时间窗。
+   * limit 默认 100 上限 500,offset 默认 0(经 {@link Paging} 归一)。
    */
-  public List<Execution> list(Long taskId, String status, Instant from, Instant to,
+  public Page<Execution> list(Long taskId, String status, Instant from, Instant to,
                               Integer limit, Integer offset) {
+    Paging p = Paging.of(limit, offset);
     StringBuilder sql = new StringBuilder("SELECT * FROM execution WHERE true");
+    StringBuilder cnt = new StringBuilder("SELECT count(*) FROM execution WHERE true");
     List<Object> args = new ArrayList<>();
-    if (taskId != null) {
-      sql.append(" AND task_id=?");
-      args.add(taskId);
-    }
-    if (status != null && !status.isBlank()) {
-      sql.append(" AND status=?");
-      args.add(status);
-    }
-    if (from != null) {
-      sql.append(" AND started_at >= ?");
-      args.add(Timestamp.from(from));
-    }
-    if (to != null) {
-      sql.append(" AND started_at <= ?");
-      args.add(Timestamp.from(to));
-    }
+    List<Object> cntArgs = new ArrayList<>();
+    if (taskId != null) { sql.append(" AND task_id=?"); cnt.append(" AND task_id=?"); args.add(taskId); cntArgs.add(taskId); }
+    if (status != null && !status.isBlank()) { sql.append(" AND status=?"); cnt.append(" AND status=?"); args.add(status); cntArgs.add(status); }
+    if (from != null) { sql.append(" AND started_at >= ?"); cnt.append(" AND started_at >= ?"); args.add(Timestamp.from(from)); cntArgs.add(Timestamp.from(from)); }
+    if (to != null) { sql.append(" AND started_at <= ?"); cnt.append(" AND started_at <= ?"); args.add(Timestamp.from(to)); cntArgs.add(Timestamp.from(to)); }
     sql.append(" ORDER BY started_at DESC NULLS LAST, id DESC");
-    int lim = (limit == null) ? 100 : Math.min(Math.max(limit, 1), 500);
-    int off = (offset == null) ? 0 : Math.max(offset, 0);
     sql.append(" LIMIT ? OFFSET ?");
-    args.add(lim);
-    args.add(off);
-    return jdbc.query(sql.toString(), ROW, args.toArray());
+    args.add(p.limit());
+    args.add(p.offset());
+    Long total = jdbc.queryForObject(cnt.toString(), Long.class, cntArgs.toArray());
+    return new Page<>(jdbc.query(sql.toString(), ROW, args.toArray()),
+        total == null ? 0 : total, p.offset(), p.limit());
   }
 
   /** 派生控制面展示的父 status:父非终态(DUE/RUNNING)且 ≥1 RUNNING shard → 读作 RUNNING。读取只映射,不写库。 */

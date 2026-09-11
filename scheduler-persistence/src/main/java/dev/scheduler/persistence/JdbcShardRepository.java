@@ -5,6 +5,7 @@ import dev.scheduler.core.ExecutionStatus;
 import dev.scheduler.core.ExecutionTransitions;
 import dev.scheduler.core.Shard;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import org.slf4j.Logger;
@@ -320,8 +321,29 @@ public class JdbcShardRepository implements ShardRepository {
   }
 
   @Override public List<Shard> findDeathLetterShards() {
-    return jdbc.query(
-        "SELECT * FROM execution_shard WHERE status='FAILED' AND dead_letter ORDER BY id", MAP);
+    return findDeathLetterShards(null, Integer.MAX_VALUE, 0);
+  }
+
+  /** taskId 过滤经 JOIN execution(s.* 只投影 shard 列,避免与 e 列歧义);无过滤时也带无害 JOIN。 */
+  @Override public List<Shard> findDeathLetterShards(Long taskId, int limit, int offset) {
+    StringBuilder sql = new StringBuilder(
+        "SELECT s.* FROM execution_shard s JOIN execution e ON e.id = s.execution_id"
+        + " WHERE s.status='FAILED' AND s.dead_letter");
+    List<Object> args = new ArrayList<>();
+    if (taskId != null) { sql.append(" AND e.task_id=?"); args.add(taskId); }
+    sql.append(" ORDER BY s.id LIMIT ? OFFSET ?");
+    args.add(limit); args.add(offset);
+    return jdbc.query(sql.toString(), MAP, args.toArray());
+  }
+
+  @Override public long countDeathLetterShards(Long taskId) {
+    StringBuilder sql = new StringBuilder(
+        "SELECT count(*) FROM execution_shard s JOIN execution e ON e.id = s.execution_id"
+        + " WHERE s.status='FAILED' AND s.dead_letter");
+    List<Object> args = new ArrayList<>();
+    if (taskId != null) { sql.append(" AND e.task_id=?"); args.add(taskId); }
+    Long c = jdbc.queryForObject(sql.toString(), Long.class, args.toArray());
+    return c == null ? 0 : c;
   }
 
   @Override public boolean requeueShard(long shardId) {

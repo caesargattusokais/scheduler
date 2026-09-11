@@ -8,6 +8,10 @@ public interface TaskRepository {
   Optional<Task> findById(long id);
   List<Task> findCronEnabled();
   List<Task> findAll();
+  /** 列表:name 子串(ILIKE)、paused 过滤 + limit/offset 分页(ORDER BY id)。 */
+  List<Task> findPage(String name, Boolean paused, int limit, int offset);
+  /** 与 findPage 同过滤条件的全量计数(不含分页)。 */
+  long count(String name, Boolean paused);
   boolean update(long id, Task t);
   void setPaused(long id, boolean paused);
   /** 该任务的执行轮数(含全部 execution),用于删除前置检查。 */

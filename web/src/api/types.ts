@@ -99,3 +99,5 @@ export interface NodeDetail { node: DagRunNode; shards: Shard[]; }
 export interface RunDetail { run: DagRun; status: string; nodes: NodeDetail[]; }
 /** /actuator/prometheus 解析后的单条系列。 */
 export interface ParsedMetric { name: string; tags: Record<string, string>; value: number; }
+/** 统一列表分页包裹(镜像后端 Page<T>):items 为当前页, total 为过滤后全量计数。 */
+export interface Page<T> { items: T[]; total: number; offset: number; limit: number; }

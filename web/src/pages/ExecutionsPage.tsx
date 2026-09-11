@@ -3,6 +3,7 @@ import { listExecutions, getExecutionDetail, cancelExecution, listTasks, rerunEx
 import { useInterval } from '../lib/useInterval';
 import { Execution, ExecutionDetail, Task } from '../api/types';
 import StatusBadge from '../components/StatusBadge';
+import Pager from '../components/Pager';
 
 const PAGE_SIZE = 10;
 const STATUSES = ['DUE', 'RUNNING', 'SUCCESS', 'FAILED', 'ORPHANED', 'CANCELED'];
@@ -14,8 +15,8 @@ export default function ExecutionsPage() {
   const [from, setFrom] = useState('');
   const [to, setTo] = useState('');
   const [rows, setRows] = useState<Execution[]>([]);
+  const [total, setTotal] = useState(0);
   const [offset, setOffset] = useState(0);
-  const [hasMore, setHasMore] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [detail, setDetail] = useState<ExecutionDetail | null>(null);
 
@@ -26,12 +27,12 @@ export default function ExecutionsPage() {
         status: status || undefined,
         from: from ? new Date(from).toISOString() : undefined,
         to: to ? new Date(to).toISOString() : undefined,
-        limit: PAGE_SIZE + 1,
+        limit: PAGE_SIZE,
         offset,
       };
-      const arr = await listExecutions(q);
-      setRows(arr.length > PAGE_SIZE ? arr.slice(0, PAGE_SIZE) : arr);
-      setHasMore(arr.length > PAGE_SIZE);
+      const page = await listExecutions(q);
+      setRows(page.items);
+      setTotal(page.total);
       setErr(null);
     } catch (e) {
       setErr(String(e));
@@ -44,8 +45,8 @@ export default function ExecutionsPage() {
   useInterval(load, 5000);
 
   useEffect(() => {
-    listTasks()
-      .then(setTasks)
+    listTasks({ limit: 100 })
+      .then((p) => setTasks(p.items))
       .catch(() => {});
   }, []);
 
@@ -163,11 +164,7 @@ export default function ExecutionsPage() {
         </table>
       </div>
 
-      {hasMore && (
-        <div className="mt-3 text-center">
-          <button className="btn-secondary" onClick={() => setOffset((o) => o + PAGE_SIZE)}>加载更多</button>
-        </div>
-      )}
+      <Pager total={total} offset={offset} limit={PAGE_SIZE} onPage={setOffset} />
 
       {detail && (
         <div className="card mt-5">

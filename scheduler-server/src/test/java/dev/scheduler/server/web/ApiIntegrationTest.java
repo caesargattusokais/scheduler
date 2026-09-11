@@ -150,8 +150,8 @@ class ApiIntegrationTest {
 
   @BeforeEach
   void resetDb() {
-    jdbc.execute("TRUNCATE execution, execution_outcome, execution_shard, execution_shard_outcome,"
-        + " app_task, worker RESTART IDENTITY CASCADE");
+    jdbc.execute("TRUNCATE app_dag CASCADE; TRUNCATE execution, execution_outcome, execution_shard,"
+        + " execution_shard_outcome, app_task, worker RESTART IDENTITY CASCADE");
     CLOCK.now = BASE;
     // M6.3:server 上下文无进程内 handler——测试建任务须先注册一个存活 worker 提供 handlerRef(demo);
     //  该 worker 在未拨动 CLOCK.now 的用例中恒存活(见 handlersEndpoint 用例拨钟后须重播种)。
@@ -180,7 +180,10 @@ class ApiIntegrationTest {
 
     mvc.perform(get("/api/v1/tasks"))
         .andExpect(status().isOk())
-        .andExpect(jsonPath("$[*].name", hasItem("create-list-task")));
+        .andExpect(jsonPath("$['items'][*].name", hasItem("create-list-task")))
+        .andExpect(jsonPath("$.total").value(1))
+        .andExpect(jsonPath("$.limit").value(100))
+        .andExpect(jsonPath("$.offset").value(0));
 
     mvc.perform(get("/api/v1/tasks/" + id))
         .andExpect(status().isOk())
@@ -315,8 +318,8 @@ class ApiIntegrationTest {
 
     mvc.perform(get("/api/v1/executions"))
         .andExpect(status().isOk())
-        .andExpect(jsonPath("$[*].id", hasItem((int) execId)))
-        .andExpect(jsonPath("$[?(@.id == " + execId + ")].status").value("DUE")); // worker 循环已关,保持 DUE
+        .andExpect(jsonPath("$['items'][*].id", hasItem((int) execId)))
+        .andExpect(jsonPath("$['items'][?(@.id == " + execId + ")].status").value("DUE")); // worker 循环已关,保持 DUE
   }
 
   /** M5.2:GET /executions from/to 时间窗过滤(started_at)。父 execution.started_at 在建父即回填 now()
@@ -332,15 +335,17 @@ class ApiIntegrationTest {
     mvc.perform(get("/api/v1/executions")
             .param("from", from).param("to", to))
         .andExpect(status().isOk())
-        .andExpect(jsonPath("$", hasSize(1)))
-        .andExpect(jsonPath("$[0].taskId", is((int) id)));
+        .andExpect(jsonPath("$['items']", hasSize(1)))
+        .andExpect(jsonPath("$['items'][0].taskId", is((int) id)))
+        .andExpect(jsonPath("$.total").value(1));
     // 窗口排除:过去 1 小时之前的窗口 → 0 条
     String pastFrom = Instant.now().minusSeconds(7200).toString();
     String pastTo = Instant.now().minusSeconds(3600).toString();
     mvc.perform(get("/api/v1/executions")
             .param("from", pastFrom).param("to", pastTo))
         .andExpect(status().isOk())
-        .andExpect(jsonPath("$", hasSize(0)));
+        .andExpect(jsonPath("$['items']", hasSize(0)))
+        .andExpect(jsonPath("$.total").value(0));
   }
 
   /** M5.2:GET /executions limit/offset 分页(ORDER BY started_at DESC NULLS LAST, id DESC 稳定同毫秒 now() 平局);
@@ -354,11 +359,13 @@ class ApiIntegrationTest {
     mvc.perform(post("/api/v1/tasks/" + id + "/trigger")).andExpect(status().isCreated()); // 3 个 execution 父
     mvc.perform(get("/api/v1/executions").param("limit", "2"))
         .andExpect(status().isOk())
-        .andExpect(jsonPath("$", hasSize(2)));
+        .andExpect(jsonPath("$['items']", hasSize(2)))
+        .andExpect(jsonPath("$.total").value(3));
     mvc.perform(get("/api/v1/executions")
             .param("limit", "2").param("offset", "2"))
         .andExpect(status().isOk())
-        .andExpect(jsonPath("$", hasSize(1))); // 剩 1 条(3-2)
+        .andExpect(jsonPath("$['items']", hasSize(1))) // 剩 1 条(3-2)
+        .andExpect(jsonPath("$.total").value(3));
   }
 
   @Test void rerunExecution_terminalSource_createsFreshTraceableRound() throws Exception {
@@ -391,7 +398,8 @@ class ApiIntegrationTest {
     // 该任务共 2 轮(源 + 重跑)
     String list = mvc.perform(get("/api/v1/executions?taskId=" + id)).andReturn()
         .getResponse().getContentAsString();
-    assertEquals(2, objectMapper.readTree(list).size());
+    assertEquals(2, objectMapper.readTree(list).path("items").size());
+    assertEquals(2, objectMapper.readTree(list).path("total").asLong());
   }
 
   @Test void rerunExecution_nonTerminalSource_rejected409() throws Exception {
@@ -431,6 +439,82 @@ class ApiIntegrationTest {
         .andExpect(status().isNotFound());
   }
 
+  // ---------- 分页信封契约(所有列表统一 Page{items,total,offset,limit}) ----------
+
+  @Test void tasksList_nameSubstringAndPausedFilterPagination() throws Exception {
+    long a = postTask("alice-task");
+    long b = postTask("bob-task");
+    postTask("alice-other");
+    mvc.perform(post("/api/v1/tasks/" + a + "/pause")).andExpect(status().isOk());
+
+    // name 子串(ILIKE)过滤
+    mvc.perform(get("/api/v1/tasks").param("name", "alice"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.total").value(2))
+        .andExpect(jsonPath("$['items']", hasSize(2)));
+    // paused 过滤 → 仅 alice-task
+    mvc.perform(get("/api/v1/tasks").param("paused", "true"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.total").value(1))
+        .andExpect(jsonPath("$['items'][0].id").value(a));
+    // 分页:limit=1 → items 1 条,total 恒为全量 3
+    mvc.perform(get("/api/v1/tasks").param("limit", "1"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$['items']", hasSize(1)))
+        .andExpect(jsonPath("$.total").value(3));
+    // 无过滤空条件:返回全部但恒 Page 信封
+    mvc.perform(get("/api/v1/tasks"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.total").value(3))
+        .andExpect(jsonPath("$.limit").value(100))
+        .andExpect(jsonPath("$.offset").value(0));
+  }
+
+  @Test void listDags_nameFilter() throws Exception {
+    long t = postTask("dagt");
+    postDag("report-daily", new long[]{t}, new String[]{"A"}, new String[][]{});
+    postDag("ingest-hourly", new long[]{t}, new String[]{"A"}, new String[][]{});
+
+    mvc.perform(get("/api/v1/dags"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.total").value(2))
+        .andExpect(jsonPath("$['items']", hasSize(2)));
+    mvc.perform(get("/api/v1/dags").param("name", "report"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.total").value(1))
+        .andExpect(jsonPath("$['items'][0].name").value("report-daily"));
+  }
+
+  @Test void listRuns_statusFilter() throws Exception {
+    long t = postTask("runt");
+    long dagId = postDag("run-dag", new long[]{t}, new String[]{"A"}, new String[][]{});
+    long r1 = triggerDag(dagId);
+
+    mvc.perform(get("/api/v1/dags/runs").param("dagId", String.valueOf(dagId)))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.total").value(1));
+    mvc.perform(get("/api/v1/dags/runs").param("status", "PENDING"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.total").value(1))
+        .andExpect(jsonPath("$['items'][0].id").value(r1));
+  }
+
+  @Test void dlqList_taskIdFilter() throws Exception {
+    long t1 = postTask("dlq1");
+    long t2 = postTask("dlq2");
+    Shard s1 = seedDeadLetter(t1);
+    seedDeadLetter(t2);
+
+    mvc.perform(get("/api/v1/executions/dlq"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.total").value(2));
+    mvc.perform(get("/api/v1/executions/dlq").param("taskId", String.valueOf(t1)))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.total").value(1))
+        .andExpect(jsonPath("$['items']", hasSize(1)))
+        .andExpect(jsonPath("$['items'][0].id").value(s1.id()));
+  }
+
   @Test
   void leadershipHeldScanOnce_shardStaysDue_absentWorker() throws Exception {
     long id = postTask("scan-success-task");
@@ -442,7 +526,7 @@ class ApiIntegrationTest {
     assertEquals("DUE", shardStatus(parentId), "触发扇出 → 1 条 DUE shard");
     mvc.perform(get("/api/v1/executions"))
         .andExpect(status().isOk())
-        .andExpect(jsonPath("$[*].status", hasItem("DUE")));
+        .andExpect(jsonPath("$['items'][*].status", hasItem("DUE")));
 
     boolean processed = false; // 无执行器:不再有 workOne
     reconciler.scanOnce();
@@ -450,7 +534,7 @@ class ApiIntegrationTest {
     assertEquals("DUE", parentStatus(parentId), "非全部终态 → 父仍 DUE");
     mvc.perform(get("/api/v1/executions").param("taskId", String.valueOf(id)))
         .andExpect(status().isOk())
-        .andExpect(jsonPath("$[0].status").value("DUE"));
+        .andExpect(jsonPath("$['items'][0].status").value("DUE"));
   }
 
   @Test
@@ -532,9 +616,10 @@ class ApiIntegrationTest {
     // GET /dlq → 含该死信 shard(status FAILED,带父 id + shard_index)
     mvc.perform(get("/api/v1/executions/dlq"))
         .andExpect(status().isOk())
-        .andExpect(jsonPath("$[*].id", hasItem((int) shardId)))
-        .andExpect(jsonPath("$[0].status").value("FAILED"))
-        .andExpect(jsonPath("$[0].executionId").value(dlq.executionId().intValue()));
+        .andExpect(jsonPath("$['items'][*].id", hasItem((int) shardId)))
+        .andExpect(jsonPath("$['items'][0].status").value("FAILED"))
+        .andExpect(jsonPath("$['items'][0].executionId").value(dlq.executionId().intValue()))
+        .andExpect(jsonPath("$.total").value(1));
 
     // POST /shards/{id}/requeue → 200 + 现态(DUE, attempt=0)
     mvc.perform(post("/api/v1/executions/shards/" + shardId + "/requeue"))
@@ -653,7 +738,8 @@ class ApiIntegrationTest {
 
     mvc.perform(get("/api/v1/dags/runs").param("dagId", String.valueOf(dagId)))
         .andExpect(status().isOk())
-        .andExpect(jsonPath("$.length()").value(1));
+        .andExpect(jsonPath("$['items']", hasSize(1)))
+        .andExpect(jsonPath("$.total").value(1));
 
     mvc.perform(get("/api/v1/dags/runs/" + runId))
         .andExpect(status().isOk())
@@ -801,6 +887,7 @@ class ApiIntegrationTest {
     jdbc.update("INSERT INTO app_task (id, name, kind, handler_ref, cron, shard_count, enabled, paused)"
         + " VALUES (?, 'metrics-seed-task', 'cron', 'demo', ?, 1, false, false)",
         METRICS_TASK_ID, "0 */5 * * * *");
+    jdbc.update("INSERT INTO app_dag (id, name) VALUES (?, 'metrics-dag')", METRICS_DAG_ID);
     jdbc.update("INSERT INTO app_dag_node (dag_id, node_key, task_id, sort_order) VALUES (?, 'A', ?, 0)",
         METRICS_DAG_ID, METRICS_TASK_ID);
     dagRepository.createManualRun(METRICS_DAG_ID); // 一条 PENDING → active 计数 = 1

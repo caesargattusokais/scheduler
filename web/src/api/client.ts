@@ -6,6 +6,7 @@ import type {
   DagRunNode,
   Execution,
   ExecutionDetail,
+  Page,
   ParsedMetric,
   RunDetail,
   Shard,
@@ -23,7 +24,25 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
   return res.json() as Promise<T>;
 }
 
-export const listTasks = () => req<Task[]>('/api/v1/tasks');
+/** 把可选查询参数拼成查询串(空值/空串跳过)。 */
+function qstr(p: object): string {
+  const q = new URLSearchParams();
+  for (const [k, v] of Object.entries(p)) {
+    if (v !== undefined && v !== null && v !== '') q.set(k, String(v));
+  }
+  const s = q.toString();
+  return s ? `?${s}` : '';
+}
+
+// ---- 任务 ----
+export interface ListTasksParams {
+  name?: string;
+  paused?: boolean;
+  limit?: number;
+  offset?: number;
+}
+export const listTasks = (p: ListTasksParams = {}): Promise<Page<Task>> =>
+  req<Page<Task>>(`/api/v1/tasks${qstr(p)}`);
 /** 已注册 handler 的 ref 列表,供任务表单下拉框枚举。 */
 export const listHandlerRefs = () => req<string[]>('/api/v1/handlers');
 export const createTask = (b: CreateTaskRequest) =>
@@ -46,14 +65,8 @@ export interface ListExecutionsParams {
   offset?: number;
 }
 
-export const listExecutions = (p: ListExecutionsParams = {}): Promise<Execution[]> => {
-  const q = new URLSearchParams();
-  for (const [k, v] of Object.entries(p)) {
-    if (v !== undefined && v !== null && v !== '') q.set(k, String(v));
-  }
-  const s = q.toString();
-  return req<Execution[]>(`/api/v1/executions${s ? `?${s}` : ''}`);
-};
+export const listExecutions = (p: ListExecutionsParams = {}): Promise<Page<Execution>> =>
+  req<Page<Execution>>(`/api/v1/executions${qstr(p)}`);
 
 export const getExecutionDetail = (id: number) =>
   req<ExecutionDetail>(`/api/v1/executions/${id}`);
@@ -64,19 +77,37 @@ export const cancelExecution = (id: number) =>
 export const rerunExecution = (id: number) =>
   req<Execution>(`/api/v1/executions/${id}/rerun`, { method: 'POST' });
 
-export const getDlq = () => req<Shard[]>('/api/v1/executions/dlq');
+export interface ListDlqParams {
+  taskId?: number;
+  limit?: number;
+  offset?: number;
+}
+export const getDlq = (p: ListDlqParams = {}): Promise<Page<Shard>> =>
+  req<Page<Shard>>(`/api/v1/executions/dlq${qstr(p)}`);
 
 export const requeueShard = (shardId: number) =>
   req<Shard>(`/api/v1/executions/shards/${shardId}/requeue`, { method: 'POST' });
 
 // ---- DAG ----
-export const listDags = () => req<Dag[]>('/api/v1/dags');
+export interface ListDagsParams {
+  name?: string;
+  limit?: number;
+  offset?: number;
+}
+export const listDags = (p: ListDagsParams = {}): Promise<Page<Dag>> =>
+  req<Page<Dag>>(`/api/v1/dags${qstr(p)}`);
 export const getDag = (id: number) => req<DagDetail>(`/api/v1/dags/${id}`);
 export const pauseDag = (id: number) => req<Dag>(`/api/v1/dags/${id}/pause`, { method: 'POST' });
 export const resumeDag = (id: number) => req<Dag>(`/api/v1/dags/${id}/resume`, { method: 'POST' });
 export const triggerDag = (id: number) => req<DagRun>(`/api/v1/dags/${id}/trigger`, { method: 'POST' });
-export const listDagRuns = (dagId?: number) =>
-  req<DagRun[]>(`/api/v1/dags/runs${dagId ? `?dagId=${dagId}` : ''}`);
+export interface ListDagRunsParams {
+  dagId?: number;
+  status?: string;
+  limit?: number;
+  offset?: number;
+}
+export const listDagRuns = (p: ListDagRunsParams = {}): Promise<Page<DagRun>> =>
+  req<Page<DagRun>>(`/api/v1/dags/runs${qstr(p)}`);
 export const getRunDetail = (runId: number) => req<RunDetail>(`/api/v1/dags/runs/${runId}`);
 export const cancelRun = (runId: number) =>
   req<RunDetail>(`/api/v1/dags/runs/${runId}/cancel`, { method: 'POST' });

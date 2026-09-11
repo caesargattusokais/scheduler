@@ -130,6 +130,23 @@ public class JdbcDagRepository implements DagRepository {
   @Override public List<Dag> findAllDags() {
     return jdbc.query("SELECT * FROM app_dag ORDER BY id", DAG_MAP);
   }
+  @Override public List<Dag> findDagsPage(String name, int limit, int offset) {
+    List<Object> a = new ArrayList<>();
+    if (name != null && !name.isBlank()) a.add("%" + name.trim() + "%");
+    a.add(limit); a.add(offset);
+    return jdbc.query("SELECT * FROM app_dag WHERE 1=1"
+        + (name != null && !name.isBlank() ? " AND name ILIKE ?" : "")
+        + " ORDER BY id LIMIT ? OFFSET ?", DAG_MAP, a.toArray());
+  }
+  @Override public long countDags(String name) {
+    if (name != null && !name.isBlank()) {
+      Long c = jdbc.queryForObject("SELECT count(*) FROM app_dag WHERE name ILIKE ?",
+          Long.class, "%" + name.trim() + "%");
+      return c == null ? 0 : c;
+    }
+    Long c = jdbc.queryForObject("SELECT count(*) FROM app_dag", Long.class);
+    return c == null ? 0 : c;
+  }
   @Override public List<Dag> findCronEnabledDags() {
     return jdbc.query(
         "SELECT * FROM app_dag WHERE enabled AND NOT paused AND cron IS NOT NULL ORDER BY id", DAG_MAP);
@@ -184,6 +201,23 @@ public class JdbcDagRepository implements DagRepository {
     return dagId == null
         ? jdbc.query("SELECT * FROM dag_run ORDER BY id DESC", RUN_MAP)
         : jdbc.query("SELECT * FROM dag_run WHERE dag_id=? ORDER BY id DESC", RUN_MAP, dagId);
+  }
+  @Override public List<DagRun> findRunsPage(Long dagId, String status, int limit, int offset) {
+    StringBuilder sql = new StringBuilder("SELECT * FROM dag_run WHERE 1=1");
+    List<Object> a = new ArrayList<>();
+    if (dagId != null) { sql.append(" AND dag_id=?"); a.add(dagId); }
+    if (status != null && !status.isBlank()) { sql.append(" AND status=?"); a.add(status); }
+    sql.append(" ORDER BY id DESC LIMIT ? OFFSET ?");
+    a.add(limit); a.add(offset);
+    return jdbc.query(sql.toString(), RUN_MAP, a.toArray());
+  }
+  @Override public long countRuns(Long dagId, String status) {
+    StringBuilder sql = new StringBuilder("SELECT count(*) FROM dag_run WHERE 1=1");
+    List<Object> a = new ArrayList<>();
+    if (dagId != null) { sql.append(" AND dag_id=?"); a.add(dagId); }
+    if (status != null && !status.isBlank()) { sql.append(" AND status=?"); a.add(status); }
+    Long c = jdbc.queryForObject(sql.toString(), Long.class, a.toArray());
+    return c == null ? 0 : c;
   }
   @Override public List<DagRun> findActiveRuns() {
     return jdbc.query("SELECT * FROM dag_run WHERE status='PENDING' ORDER BY id", RUN_MAP);

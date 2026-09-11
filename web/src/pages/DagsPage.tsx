@@ -3,24 +3,31 @@ import { cancelRun, getRunDetail, listDagRuns, listDags, rerunNode, triggerDag }
 import type { Dag, DagRun, RunDetail } from '../api/types';
 import { useInterval } from '../lib/useInterval';
 import StatusBadge from '../components/StatusBadge';
+import Pager from '../components/Pager';
 
 const TERMINAL = new Set(['SUCCESS', 'FAILED', 'CANCELED', 'SKIPPED']);
+const RUNS_PAGE = 10;
 
 export default function DagsPage() {
   const [err, setErr] = useState<string | null>(null);
   const [dags, setDags] = useState<Dag[]>([]);
   const [selected, setSelected] = useState<number | null>(null);
   const [runs, setRuns] = useState<DagRun[]>([]);
+  const [runsTotal, setRunsTotal] = useState(0);
+  const [runsOffset, setRunsOffset] = useState(0);
   const [detail, setDetail] = useState<RunDetail | null>(null);
 
-  const loadDags = () => listDags().then(setDags).catch((e: unknown) => setErr(String(e)));
-  const loadRuns = (dagId: number) => listDagRuns(dagId).then(setRuns).catch((e: unknown) => setErr(String(e)));
+  const loadDags = () => listDags({ limit: 100 }).then((p) => setDags(p.items)).catch((e: unknown) => setErr(String(e)));
+  const loadRuns = (dagId: number, offset: number) =>
+    listDagRuns({ dagId, limit: RUNS_PAGE, offset }).then((p) => { setRuns(p.items); setRunsTotal(p.total); })
+      .catch((e: unknown) => setErr(String(e)));
   const loadDetail = (runId: number) => getRunDetail(runId).then(setDetail).catch((e: unknown) => setErr(String(e)));
 
   useEffect(() => { loadDags(); }, []);
   useInterval(loadDags, 5000);
-  useEffect(() => { if (selected != null) loadRuns(selected); }, [selected]);
-  useInterval(() => { if (selected != null) loadRuns(selected); }, 5000);
+  // 选中 DAG 时按当前 runs 分页加载;切 DAG/翻页都会触发(selected 或 runsOffset 变化)
+  useEffect(() => { if (selected != null) loadRuns(selected, runsOffset); }, [selected, runsOffset]);
+  useInterval(() => { if (selected != null) loadRuns(selected, runsOffset); }, 5000);
   useInterval(() => { const runId = detail?.run?.id; if (runId != null) loadDetail(runId); }, 5000);
 
   async function onRerun(nodeId: number) {
@@ -31,11 +38,11 @@ export default function DagsPage() {
   async function onCancel() {
     const runId = detail?.run?.id;
     if (runId == null || selected == null) return;
-    try { setDetail(await cancelRun(runId)); await loadRuns(selected); } catch (e) { setErr(String(e)); }
+    try { setDetail(await cancelRun(runId)); await loadRuns(selected, runsOffset); } catch (e) { setErr(String(e)); }
   }
   async function onTrigger() {
     if (selected == null) return;
-    try { await triggerDag(selected); await loadRuns(selected); } catch (e) { setErr(String(e)); }
+    try { await triggerDag(selected); await loadRuns(selected, runsOffset); } catch (e) { setErr(String(e)); }
   }
 
   const nodes = detail?.nodes ?? [];
@@ -53,7 +60,7 @@ export default function DagsPage() {
           <select
             className="input"
             value={selected ?? ''}
-            onChange={(e) => { setSelected(e.target.value ? Number(e.target.value) : null); setDetail(null); }}
+            onChange={(e) => { setSelected(e.target.value ? Number(e.target.value) : null); setDetail(null); setRunsOffset(0); }}
           >
             <option value="">选择 DAG…</option>
             {dags.map((d) => <option key={d.id} value={d.id}>{d.name} (id={d.id})</option>)}
@@ -88,6 +95,10 @@ export default function DagsPage() {
           </tbody>
         </table>
       </div>
+
+      {selected != null && (
+        <Pager total={runsTotal} offset={runsOffset} limit={RUNS_PAGE} onPage={setRunsOffset} />
+      )}
 
       {detail && (
         <div className="card mt-5">

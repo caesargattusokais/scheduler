@@ -94,6 +94,11 @@ public interface ShardRepository {
   /** DLQ 读:FAILED 且已标 dead_letter 的分片,按 id 升序。 */
   List<Shard> findDeathLetterShards();
 
+  /** DLQ 分页:taskId 过滤(经 execution 关联)+ limit/offset,ORDER BY s.id。taskId 可为 null=全部。 */
+  List<Shard> findDeathLetterShards(Long taskId, int limit, int offset);
+  /** 与上同过滤条件的 DLQ 全量计数(不含分页)。 */
+  long countDeathLetterShards(Long taskId);
+
   /** 死信分片重排回队:FAILED → DUE 并重置 attempt/next_retry_at/dead_letter(+DUE outcome)。CAS on status='FAILED':
    *  0 行=竞态/非 FAILED → 返回 false。 */
   boolean requeueShard(long shardId);

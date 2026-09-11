@@ -94,11 +94,13 @@ cd web && npm run dev                     # 开发，/api 与 /actuator 代理�
 
 统一前缀 `/api/v1`。错误统一走 `ApiExceptionHandler`：4xx 业务错误（含 404 不存在、409 并发/非法状态）、5xx 服务端异常。
 
+**列表统一分页包裹**：所有列表端点返回 `Page<T> = { items: T[], total, offset, limit }`（`items` 当前页，`total` 为过滤后全量计数，前端用它渲染页数与计数器）。query 参数 `limit`（默认 100，钳制 1–500）、`offset`（默认 0）对下列所有列表端点通用。
+
 ### Tasks
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| `GET` | `/api/v1/tasks` | 列出任务 |
+| `GET` | `/api/v1/tasks` | 列出任务；query：`name`（子串，不区分大小写）、`paused`（`true`/`false`） |
 | `GET` | `/api/v1/tasks/{id}` | 单个任务 |
 | `POST` | `/api/v1/tasks` | 创建任务 |
 | `PUT` | `/api/v1/tasks/{id}` | 更新任务 |
@@ -113,23 +115,23 @@ cd web && npm run dev                     # 开发，/api 与 /actuator 代理�
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| `GET` | `/api/v1/executions` | 执行列表；query：`taskId`、`status`、`from`、`to`（ISO-8601 带偏移）、`limit`、`offset` |
+| `GET` | `/api/v1/executions` | 执行列表（`Page<Execution>`）；query：`taskId`、`status`、`from`、`to`（ISO-8601 带偏移） |
 | `GET` | `/api/v1/executions/{id}` | 执行明细（含 shards、`rerunOf`） |
 | `POST` | `/api/v1/executions/{id}/rerun` | **M6.5 真重跑**：引用某一轮终态执行（SUCCESS/FAILED/CANCELED/ORPHANED），复制其 `args` 新建一轮并溯源（`rerunOf`=源轮 id）→ `201 Execution`；源轮非终态 → `409`；不存在 → `404`。同一源轮可多次重跑，每次独立一轮（键 `rerun:<srcId>:<uuid>`）。 |
 | `POST` | `/api/v1/executions/{id}/cancel` | 取消执行 → `200 Execution` |
-| `GET` | `/api/v1/executions/dlq` | 死信 shard 列表 → `[Shard]` |
+| `GET` | `/api/v1/executions/dlq` | 死信 shard 列表（`Page<Shard>`）；query：`taskId` |
 | `POST` | `/api/v1/executions/shards/{shardId}/requeue` | 死信出队重跑 → `200 Shard` |
 
 ### Dags（工作流，M5.3）
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| `GET` | `/api/v1/dags` | 列出 DAG |
+| `GET` | `/api/v1/dags` | 列出 DAG（`Page<Dag>`）；query：`name`（子串） |
 | `GET` | `/api/v1/dags/{id}` | DAG 详情（含 nodes + edges） |
 | `POST` | `/api/v1/dags` | 创建 DAG |
 | `POST` | `/api/v1/dags/{id}/pause` / `.../resume` | 暂停 / 恢复 |
 | `POST` | `/api/v1/dags/{id}/trigger` | 触发一次批次 → `200 DagRun` |
-| `GET` | `/api/v1/dags/runs` | 批次列表；`?dagId=` 过滤 |
+| `GET` | `/api/v1/dags/runs` | 批次列表（`Page<DagRun>`）；query：`dagId`、`status` |
 | `GET` | `/api/v1/dags/runs/{runId}` | run 详情（节点 + 各节点 shard） |
 | `POST` | `/api/v1/dags/runs/{runId}/cancel` | 终止批次 → `200 RunDetail` |
 | `POST` | `/api/v1/dags/runs/{runId}/nodes/{nodeId}/rerun` | **单节点重跑**：终态节点回 RUNNING 并重开批次（同事务置 run 为 PENDING）；非终态/竞态 → `409`；不存在 → `404`。→ `200 DagRunNode` |
