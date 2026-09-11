@@ -62,7 +62,7 @@ worker 配置（环境变量）：
 | 环境变量 | 默认 | 说明 |
 |----------|------|------|
 | `DB_URL` / `DB_USER` / `DB_PASSWORD` | `scheduler` 库同上 | 共享数据库连接 |
-| `SCHEDULER_WORKER_ID` | 空 | node workerId；空则生成 `worker@<hostname>`（跨重启稳定，在途租约可接续，避免累积陈旧 ALIVE 行） |
+| `SCHEDULER_WORKER_ID` | 空 | node workerId；空则生成 `worker@<hostname>:<pid>`（同机多 worker 自动唯一，跨重启 PID 复用可接续在途租约） |
 | `SCHEDULER_LOOP_WORK_DELAY_MS` | `100` | 认领散片循环节流（`scheduler.loop.work-delay-ms`） |
 
 启动即注册一行 `worker`，随后按 `heartbeat.interval-ms`（默认 10s）周期心跳；每次心跳 upsert 覆盖该行 `last_seen`，即存活证据。
