@@ -5,6 +5,8 @@ import dev.scheduler.core.Shard;
 import dev.scheduler.core.Task;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
+import java.util.List;
+import java.util.Map;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -385,6 +387,33 @@ class JdbcShardRepositoryTest extends AbstractPostgresTest {
 
     assertTrue(deadLetter(shard0));
     assertEquals(before, outcomes(shard0), "dead_letter is not a status transition: no outcome row");
+  }
+
+  /** DLQ 诊断带出:各分片取最近一次 FAILED detail(DISTINCT ON);不同任务名的 handlerRef 一并解析。 */
+  @Test void failureDetailsByShardIds_andTaskRefsByShardIds() {
+    long t1 = newTask(2, 8);
+    long parentId = seedParentAndShards(t1, 2);
+    long s0 = shard(parentId, 0).id();
+    long s1 = shard(parentId, 1).id();
+    // 该父仍 DUE 未认领,task 名直接查库对齐
+    String taskName = jdbc.queryForObject("SELECT name FROM app_task WHERE id=?", String.class, t1);
+    String handlerRef = jdbc.queryForObject("SELECT handler_ref FROM app_task WHERE id=?", String.class, t1);
+
+    claimShard(s0, t1, "w1", 8);
+    shardRepo.markStatus(s0, ExecutionStatus.FAILED, "w1", "boom"); // FAILED detail=boom
+    // 再插一条更旧的 FAILED detail(created_at 早 1h),验证 DISTINCT ON 取最新而非任意
+    jdbc.update("INSERT INTO execution_shard_outcome (shard_id, status, created_at, detail) "
+        + "VALUES (?, 'FAILED', now()-interval '1 hour', 'older-failed')", s0);
+    // s1 无 FAILED outcome
+    Map<Long, String> failed = shardRepo.findFailureDetailsByShardIds(List.of(s0, s1));
+    assertEquals(1, failed.size(), "仅带 FAILED outcome 的分片有 detail");
+    assertEquals("boom", failed.get(s0), "DISTINCT ON 取最近一条 FAILED detail");
+
+    Map<Long, TaskRef> refs = shardRepo.findTaskRefsByShardIds(List.of(s0, s1, 999999L));
+    assertEquals(2, refs.size(), "两个分片各解析出所属任务;不存在 shard 无条目");
+    assertEquals(taskName, refs.get(s0).name());
+    assertEquals(handlerRef, refs.get(s0).handlerRef());
+    assertEquals(taskName, refs.get(s1).name());
   }
 
   @Test void isCancelRequested_defaultsFalse_readsTrue() {

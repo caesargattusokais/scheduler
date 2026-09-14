@@ -5,11 +5,14 @@ import dev.scheduler.core.ExecutionStatus;
 import dev.scheduler.core.Shard;
 import dev.scheduler.persistence.ExecutionRepository;
 import dev.scheduler.persistence.ShardRepository;
+import dev.scheduler.persistence.TaskRef;
+import dev.scheduler.server.service.DlqView;
 import dev.scheduler.server.service.ExecutionDetail;
 import dev.scheduler.server.service.ExecutionQueryService;
 import java.time.Instant;
 import java.time.format.DateTimeParseException;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import org.springframework.http.HttpStatus;
@@ -92,15 +95,28 @@ public class ExecutionController {
     return ResponseEntity.status(HttpStatus.CREATED).body(created);
   }
 
-  /** DLQ 列表:FAILED 且已标 dead_letter 标记的分片,taskId 过滤 + limit/offset 分页,返回 Page<Shard>。 */
+  /** DLQ 列表:FAILED 且已标 dead_letter 标记的分片,taskId 过滤 + limit/offset 分页。
+   *  每行补所属任务名/handlerRef 与该分片最近一次失败日志(failureDetail),供诊断页展示。 */
   @GetMapping("/dlq")
-  public Page<Shard> dlq(
+  public Page<DlqView> dlq(
       @RequestParam(required = false) Long taskId,
       @RequestParam(required = false) Integer limit,
       @RequestParam(required = false) Integer offset) {
     Paging p = Paging.of(limit, offset);
-    return new Page<>(shards.findDeathLetterShards(taskId, p.limit(), p.offset()),
-        shards.countDeathLetterShards(taskId), p.offset(), p.limit());
+    List<Shard> ss = shards.findDeathLetterShards(taskId, p.limit(), p.offset());
+    long total = shards.countDeathLetterShards(taskId);
+    List<Long> ids = ss.stream().map(Shard::id).toList();
+    Map<Long, String> failed = shards.findFailureDetailsByShardIds(ids);
+    Map<Long, TaskRef> refs = shards.findTaskRefsByShardIds(ids);
+    List<DlqView> items = ss.stream().map(s -> {
+      TaskRef r = refs.get(s.id());
+      return new DlqView(
+          s.id(), s.executionId(), s.shardIndex(), s.shardData(), s.status(), s.attempt(),
+          s.workerId(), s.leaseUntil(), s.nextRetryAt(), s.cancelRequested(), s.deadLetter(),
+          s.startedAt(), s.finishedAt(), s.resultPayload(),
+          r == null ? null : r.name(), r == null ? null : r.handlerRef(), failed.get(s.id()));
+    }).toList();
+    return new Page<>(items, total, p.offset(), p.limit());
   }
 
   /**

@@ -16,10 +16,16 @@ public class RetryPolicy {
    * failureDetail 上命中)。pattern 非空且 failureDetail 为 null 时视为不命中。
    */
   public boolean shouldRetry(Task task, int attempt, String failureDetail) {
-    if (attempt > task.maxRetries()) return false;
+    if (attempt > task.maxRetries()) {
+        return false;
+    }
     String pat = task.retryableFailurePattern();
-    if (pat == null || pat.isBlank()) return true;
-    if (failureDetail == null) return false;
+    if (pat == null || pat.isBlank()) {
+        return true;
+    }
+    if (failureDetail == null) {
+        return false;
+    }
     return Pattern.compile(pat).matcher(failureDetail).find();
   }
 
@@ -28,10 +34,14 @@ public class RetryPolicy {
    * 移位溢出 long 或超过上限时返回封顶值。
    */
   public long delayMs(long backoffMs, int attempt) {
-    if (attempt <= 1) return Math.min(backoffMs, CAP);
+    if (attempt <= 1) {
+        return Math.min(backoffMs, CAP);
+    }
     long result = backoffMs;
     for (int i = 1; i < attempt; i++) {
-      if (result > CAP / 2) return CAP;
+      if (result > CAP / 2) {
+          return CAP;
+      }
       result <<= 1;
     }
     return Math.min(result, CAP);

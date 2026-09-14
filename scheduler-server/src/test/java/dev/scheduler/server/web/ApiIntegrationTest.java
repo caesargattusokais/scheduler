@@ -619,6 +619,8 @@ class ApiIntegrationTest {
         .andExpect(jsonPath("$['items'][*].id", hasItem((int) shardId)))
         .andExpect(jsonPath("$['items'][0].status").value("FAILED"))
         .andExpect(jsonPath("$['items'][0].executionId").value(dlq.executionId().intValue()))
+        .andExpect(jsonPath("$['items'][0].taskName").value("dlq-task"))
+        .andExpect(jsonPath("$['items'][0].handlerRef").value("demo"))
         .andExpect(jsonPath("$.total").value(1));
 
     // POST /shards/{id}/requeue → 200 + 现态(DUE, attempt=0)
@@ -702,6 +704,23 @@ class ApiIntegrationTest {
     mvc.perform(get("/api/v1/executions/" + parentId))
         .andExpect(status().isOk())
         .andExpect(jsonPath("$.shards[0].failureDetail").value(boom));
+  }
+
+  /** 重排复位:分片有旧 FAILED 记录但当前已非 FAILED(如 requeue 后成功)时,失败原因为 null,不挂过期日志。 */
+  @Test
+  void getExecutionDetail_hidesFailureDetailWhenShardNoLongerFailed() throws Exception {
+    long id = postTask("requeued-detail-task");
+    long parentId = triggerParent(id);
+    long shardId = shards.findShards(parentId).get(0).id();
+    // 旧 FAILED 记录仍在(requeue 重排只复位状态、不删历史 outcome),但当前状态已成功
+    jdbc.update("UPDATE execution_shard SET status='FAILED' WHERE id=?", shardId);
+    jdbc.update("INSERT INTO execution_shard_outcome (shard_id, status, detail) VALUES (?, 'FAILED', 'old boom')", shardId);
+    jdbc.update("UPDATE execution_shard SET status='SUCCESS' WHERE id=?", shardId);
+
+    mvc.perform(get("/api/v1/executions/" + parentId))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.shards[0].status").value("SUCCESS"))
+        .andExpect(jsonPath("$.shards[0].failureDetail").value(org.hamcrest.Matchers.nullValue()));
   }
 
   /** M3 父级取消级联:shardCount=3,无 RUNNING shard → cancelParentImmediate 直取消 → 父 CANCELED + 全 DUE shard 级联 CANCELED。 */

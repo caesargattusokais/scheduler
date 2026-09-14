@@ -94,6 +94,12 @@ public interface ShardRepository {
   /** 某父执行下各分片最近一次 FAILED outcome 的 detail(shard_id → detail),即失败日志;无 FAILED 记录的分片无条目。 */
   Map<Long, String> findFailureDetails(long executionId);
 
+  /** 给定分片集合内,各分片最近一次 FAILED outcome 的 detail(shard_id → 失败日志);无 FAILED 记录的分片无条目。 */
+  Map<Long, String> findFailureDetailsByShardIds(java.util.Collection<Long> shardIds);
+
+  /** 给定分片集合内,各分片所属任务的任务名/handlerRef(shard_id → TaskRef);经 execution→task 关联。 */
+  Map<Long, TaskRef> findTaskRefsByShardIds(java.util.Collection<Long> shardIds);
+
   /** 该父下是否仍有 RUNNING shard。 */
   boolean hasRunningShard(long parentId);
 

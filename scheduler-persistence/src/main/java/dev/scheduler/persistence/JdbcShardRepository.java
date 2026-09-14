@@ -6,6 +6,8 @@ import dev.scheduler.core.ExecutionTransitions;
 import dev.scheduler.core.Shard;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -108,6 +110,41 @@ public class JdbcShardRepository implements ShardRepository {
           while (rs.next()) m.put(rs.getLong(1), rs.getString(2));
           return m;
         }, executionId);
+  }
+
+  /** 给定分片集合内各分片最近一次 FAILED outcome 的 detail(空集时直接返回空表,避免空 IN)。 */
+  @Override public Map<Long, String> findFailureDetailsByShardIds(Collection<Long> shardIds) {
+    if (shardIds.isEmpty()) return Map.of();
+    String in = String.join(",", Collections.nCopies(shardIds.size(), "?"));
+    return jdbc.query("""
+        SELECT DISTINCT ON (s.id) s.id, o.detail
+        FROM execution_shard s
+        JOIN execution_shard_outcome o ON o.shard_id = s.id
+        WHERE s.id IN (%s) AND o.status = 'FAILED'
+        ORDER BY s.id, o.created_at DESC, o.id DESC""".formatted(in),
+        rs -> {
+          Map<Long, String> m = new LinkedHashMap<>();
+          while (rs.next()) m.put(rs.getLong(1), rs.getString(2));
+          return m;
+        }, shardIds.toArray());
+  }
+
+  /** 给定分片集合内各分片所属任务名/handlerRef(空集时直接返回空表)。 */
+  @Override public Map<Long, TaskRef> findTaskRefsByShardIds(Collection<Long> shardIds) {
+    if (shardIds.isEmpty()) return Map.of();
+    String in = String.join(",", Collections.nCopies(shardIds.size(), "?"));
+    return jdbc.query("""
+        SELECT s.id AS sid, t.name AS tname, t.handler_ref AS href
+        FROM execution_shard s
+        JOIN execution e ON e.id = s.execution_id
+        JOIN app_task t ON t.id = e.task_id
+        WHERE s.id IN (%s)
+        ORDER BY s.id""".formatted(in),
+        rs -> {
+          Map<Long, TaskRef> m = new LinkedHashMap<>();
+          while (rs.next()) m.put(rs.getLong(1), new TaskRef(rs.getString("tname"), rs.getString("href")));
+          return m;
+        }, shardIds.toArray());
   }
 
   @Override public Optional<Shard> findCandidate(long taskId) {

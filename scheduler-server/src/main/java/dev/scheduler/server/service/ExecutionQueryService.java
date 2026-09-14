@@ -87,7 +87,8 @@ public class ExecutionQueryService {
           .map(s -> new ExecutionDetail.ShardView(
               s.id(), s.executionId(), s.shardIndex(), s.shardData(), s.status(), s.attempt(),
               s.workerId(), s.leaseUntil(), s.nextRetryAt(), s.cancelRequested(), s.deadLetter(),
-              s.startedAt(), s.finishedAt(), s.resultPayload(), failed.get(s.id())))
+              s.startedAt(), s.finishedAt(), s.resultPayload(),
+              s.status() == ExecutionStatus.FAILED ? failed.get(s.id()) : null))
           .toList();
       return new ExecutionDetail(id, parent.taskId(), deriveStatus(parent, ss), ss.size(),
           parent.rerunOf(), views);
