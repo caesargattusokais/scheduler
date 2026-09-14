@@ -43,7 +43,7 @@ Flyway 自动迁移 schema。多节点实例共享同一数据库，经 advisory
 worker 进程独立承载；worker 经 `execution_shard` 的原子认领与 server 共享同一张执行表，多 worker 可并行
 分摊同一任务的散片。
 
-- 启动前需先由 server（Flyway V1–V5）建好 schema；worker 侧 `spring.flyway.enabled=false`，不迁移建表。
+- 启动前需先由 server（Flyway V1–V8）建好 schema；worker 侧 `spring.flyway.enabled=false`，不迁移建表。
 - 活性契约 = DB `worker` 表的一行 `ALIVE`，且 `(now() - last_seen)` 随 10s 心跳保持为个位数秒（主要存活来源）；`/actuator/health` 的 HTTP 健康为额外可探测手段。
 - `server.port: 8081` 为真实监听端口：`GET /actuator/health` 返回 `{"status":"UP"}`，默认不暴露 DB 依赖探针。
 
@@ -87,7 +87,7 @@ cd web && npm run dev                     # 开发，/api 与 /actuator 代理�
 | `/tasks` | 任务列表 | 任务 CRUD、编辑、暂停/恢复、手动触发、重跑；5s 轮询 |
 | `/executions` | 执行列表 | 按 任务/状态/时间窗 过滤 + 分页；查看执行明细；取消执行 |
 | `/dlq` | 死信队列 | 列出 `dead_letter` shard；单条 requeue 回队 |
-| `/dags` | 工作流 (DAG) | DAG 列表、run 批次、run 详情、单节点重跑、终止批次；5s 轮询 |
+| `/dags` | 工作流 (DAG) | 工作流列表（启停/分页）+ 新建工作流可视化构建器（添加步骤、每步勾选上游）+ run 批次/详情 + 单节点重跑、终止批次；5s 轮询 |
 | `/metrics` | 指标面板 | 5 核心指标卡 + 内联 SVG sparkline；5s 轮询 |
 
 ## REST API
@@ -119,7 +119,7 @@ cd web && npm run dev                     # 开发，/api 与 /actuator 代理�
 | `GET` | `/api/v1/executions/{id}` | 执行明细（含 shards、`rerunOf`） |
 | `POST` | `/api/v1/executions/{id}/rerun` | **M6.5 真重跑**：引用某一轮终态执行（SUCCESS/FAILED/CANCELED/ORPHANED），复制其 `args` 新建一轮并溯源（`rerunOf`=源轮 id）→ `201 Execution`；源轮非终态 → `409`；不存在 → `404`。同一源轮可多次重跑，每次独立一轮（键 `rerun:<srcId>:<uuid>`）。 |
 | `POST` | `/api/v1/executions/{id}/cancel` | 取消执行 → `200 Execution` |
-| `GET` | `/api/v1/executions/dlq` | 死信 shard 列表（`Page<Shard>`）；query：`taskId` |
+| `GET` | `/api/v1/executions/dlq` | 死信 shard 列表（`Page<DlqRow>`，行含 `taskName`/`handlerRef` 与 `failureDetail` 最近一次失败日志）；query：`taskId` |
 | `POST` | `/api/v1/executions/shards/{shardId}/requeue` | 死信出队重跑 → `200 Shard` |
 
 ### Dags（工作流，M5.3）
@@ -140,15 +140,15 @@ cd web && npm run dev                     # 开发，/api 与 /actuator 代理�
 
 ## 指标（Prometheus）
 
-后端暴露 `/actuator/prometheus`（`management.endpoints.web.exposure.include: health,info,prometheus`）。控制台 `/metrics` 页聚合为 5 张卡：
+后端暴露 `/actuator/prometheus`（`management.endpoints.web.exposure.include: health,info,prometheus`）。控制台 `/metrics` 页聚合为 5 张卡。**全部为全局懒查询 gauge**（scrape 时实读 DB，不带任何标签）：新建任务/DAG 无需重启即计入。
 
-| 指标 | 含义 | 标签 |
-|------|------|------|
-| `scheduler_active_runs` | 活跃执行数 | `task_id`,`task_name` |
-| `scheduler_due_queue_max_age_seconds` | DUE 队列最深队龄（秒） | `task_id`,`task_name` |
-| `scheduler_dag_runs_active` | 活跃 DAG 批次数 | `dag_id`,`dag_name` |
-| `scheduler_dlq_depth` | 死信队列深度（全局，scrape 时实读 DB） | 无 |
-| `scheduler_worker_active` | 当前节点是否持选主锁（调度主，`1`/`0`） | 无 |
+| 指标 | 含义 |
+|------|------|
+| `scheduler_active_runs` | 活跃分片数：所有 `RUNNING` 且租约有效（`lease_until > now()`）的 `execution_shard` |
+| `scheduler_due_queue_max_age_seconds` | DUE 队列最深队龄（秒）：最老 DUE 分片自入队（`shard.queued_at`）至今，重试/重排后从重新入队起算 |
+| `scheduler_dag_runs_active` | 活跃 DAG 批次数：全部 `PENDING` 的 `dag_run` |
+| `scheduler_dlq_depth` | 死信队列深度：`FAILED AND dead_letter` 的 shard 数 |
+| `scheduler_worker_active` | 存活 worker 数：`worker` 表 `last_seen` 距今 ≤30s 且 `ALIVE` 的进程数（读心跳表，非选主锁） |
 
 ## 开发方式
 

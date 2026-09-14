@@ -553,13 +553,13 @@ class ApiIntegrationTest {
     String prom = mvc.perform(get("/actuator/prometheus"))
         .andExpect(status().isOk())
         .andReturn().getResponse().getContentAsString();
-    // 断言绑定时刻存活任务的 tagged series(task_id 标签存在),而非仅裸指标名。
-    assertTrue(prom.contains("scheduler_active_runs{task_id=\"" + METRICS_TASK_ID + "\","),
-        "missing per-task scheduler_active_runs{task_id=...} series in prometheus:\n" + prom);
-    assertTrue(prom.contains("scheduler_due_queue_max_age_seconds{task_id=\"" + METRICS_TASK_ID + "\","),
-        "missing per-task scheduler_due_queue_max_age_seconds{task_id=...} series in prometheus:\n" + prom);
-    assertEquals(1.0, promGauge(prom, "scheduler_active_runs", METRICS_TASK_ID), 0.0,
-        "scheduler_active_runs 应按 RUNNING shard 计数(1 条 RUNNING)");
+    // 指标为全局无标签懒查询 gauge(新建任务无需重启即计入),断言裸指标名 + 全局采样值,不再按 task_id。
+    assertTrue(prom.contains("scheduler_active_runs "),
+        "missing global scheduler_active_runs series in prometheus:\n" + prom);
+    assertTrue(prom.contains("scheduler_due_queue_max_age_seconds "),
+        "missing global scheduler_due_queue_max_age_seconds series in prometheus:\n" + prom);
+    assertEquals(1.0, promGauge(prom, "scheduler_active_runs"), 0.0,
+        "scheduler_active_runs 应按全局 RUNNING shard 计数(1 条 RUNNING)");
   }
 
   @Test
@@ -916,7 +916,7 @@ class ApiIntegrationTest {
 
   /** M4:每 DAG 指标。绑定时刻前 seed 的 METRICS_DAG 由 @BeforeAll 预注册 series(@BeforeEach 仅清 app_task /
    *  app_dag_node,app_dag 头是父表不受 CASCADE truncate);此处重载 task 行与节点引用,触发一条 PENDING
-   *  dag_run → scheduler_dag_runs_active 按非终态 dag_run 计数 = 1。 */
+   *  dag_run → scheduler_dag_runs_active 按非终态 dag_run 全局计数 = 1(现为无标签全局懒查询 gauge)。 */
   @Test
   void prometheus_dagRunActiveMetric() throws Exception {
     jdbc.update("INSERT INTO app_task (id, name, kind, handler_ref, cron, shard_count, enabled, paused)"
@@ -930,10 +930,10 @@ class ApiIntegrationTest {
     String prom = mvc.perform(get("/actuator/prometheus"))
         .andExpect(status().isOk())
         .andReturn().getResponse().getContentAsString();
-    assertTrue(prom.contains("scheduler_dag_runs_active{dag_id=\"" + METRICS_DAG_ID + "\","),
-        "missing per-dag scheduler_dag_runs_active{dag_id=...} series in prometheus:\n" + prom);
-    assertEquals(1.0, promDagGauge(prom, "scheduler_dag_runs_active", METRICS_DAG_ID), 0.0,
-        "scheduler_dag_runs_active 应计该 dag 非终态 dag_run 数(1 条 PENDING)");
+    assertTrue(prom.contains("scheduler_dag_runs_active "),
+        "missing global scheduler_dag_runs_active series in prometheus:\n" + prom);
+    assertEquals(1.0, promGauge(prom, "scheduler_dag_runs_active"), 0.0,
+        "scheduler_dag_runs_active 应计全局非终态 dag_run 数(1 条 PENDING)");
   }
 
   /** M5.3 §1.5:全局指标 gauge scheduler_dlq_depth 与 scheduler_worker_active。种子一条 FAILED+dead_letter shard。 */
@@ -949,8 +949,9 @@ class ApiIntegrationTest {
     assertEquals(1.0, promGauge(prom, "scheduler_dlq_depth"), 0.0,
         "scheduler_dlq_depth 应计 FAILED+dead_letter shard 数(1)");
     assertTrue(prom.contains("scheduler_worker_active"), "missing scheduler_worker_active in prometheus");
-    assertEquals(leader.isLeader() ? 1.0 : 0.0, promGauge(prom, "scheduler_worker_active"), 0.0,
-        "scheduler_worker_active 应等于本进程选主锁持有判定");
+    // 存活 worker = 读 worker 心跳表(非选主锁):@BeforeEach 恒种子 2 条 ALIVE worker(w-demo/w-flaky)。
+    assertEquals(2.0, promGauge(prom, "scheduler_worker_active"), 0.0,
+        "scheduler_worker_active 应等于存活 worker 数(2)");
   }
 
   /** 取 prometheus 文本中无标签 gauge 的数值(单 series)。 */
@@ -1083,28 +1084,7 @@ class ApiIntegrationTest {
         "SELECT status FROM execution_shard WHERE execution_id=?", String.class, parentId);
   }
 
-  /** 解析 prometheus 文本中某 per-task gauge 系列行尾的采样值(ruling R2 口径即经此断言 shard 计数)。 */
-  private double promGauge(String prom, String metric, long taskId) {
-    for (String line : prom.split("\n")) {
-      if (line.startsWith(metric + "{task_id=\"" + taskId + "\"")) {
-        int sp = line.lastIndexOf(' ');
-        return Double.parseDouble(line.substring(sp + 1));
-      }
-    }
-    return Double.NaN;
-  }
-
-  /** 解析 prometheus 文本中某 per-dag gauge 系列行尾的采样值(M4:scheduler_dag_runs_active)。 */
-  private double promDagGauge(String prom, String metric, long dagId) {
-    for (String line : prom.split("\n")) {
-      if (line.startsWith(metric + "{dag_id=\"" + dagId + "\"")) {
-        int sp = line.lastIndexOf(' ');
-        return Double.parseDouble(line.substring(sp + 1));
-      }
-    }
-    return Double.NaN;
-  }
-
+  
   /** 可复写的皮时钟:instant 由测试控制,getZone 固定 UTC。 */
   static final class MutableClock extends Clock {
     Instant now;
