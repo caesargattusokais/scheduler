@@ -51,6 +51,13 @@ export interface Shard {
   failureDetail?: string | null;
 }
 
+/** DLQ 行:Shard 全字段 + 所属任务名/handlerRef + 该分片最近一次失败日志(failureDetail)。 */
+export interface DlqRow extends Shard {
+  taskName: string | null;
+  handlerRef: string | null;
+  failureDetail: string | null;
+}
+
 export interface ExecutionDetail {
   id: number;
   taskId: number;
@@ -87,6 +94,13 @@ export interface Dag {
 export interface DagDetail { dag: Dag; nodes: DagNode[]; edges: DagEdge[]; }
 export interface DagNode { id: number; dagId: number; nodeKey: string; taskId: number; sortOrder: number; }
 export interface DagEdge { id: number; dagId: number; fromNodeId: number; toNodeId: number; }
+/** 建工作流请求(镜像 DagController.CreateDagRequest)。 */
+export interface CreateDagNode { nodeKey: string; taskId: number; sortOrder: number; }
+export interface CreateDagEdge { from: string; to: string; }
+export interface CreateDagRequest {
+  name: string; description: string | null; cron: string;
+  nodes: CreateDagNode[]; edges: CreateDagEdge[];
+}
 export interface DagRun {
   id: number; dagId: number; idempotencyKey: string;
   status: string; triggerReason: string; cancelRequested: boolean;

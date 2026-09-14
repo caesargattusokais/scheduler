@@ -1,14 +1,16 @@
 import { useCallback, useEffect, useState } from 'react';
 import { getDlq, listTasks, requeueShard } from '../api/client';
 import { useInterval } from '../lib/useInterval';
-import { Shard, Task } from '../api/types';
+import { DlqRow, Task } from '../api/types';
 import StatusBadge from '../components/StatusBadge';
 import Pager from '../components/Pager';
 
 const PAGE_SIZE = 20;
 
+const truncate = (s: string, n: number) => (s.length > n ? `${s.slice(0, n)}…` : s);
+
 export default function DlqPage() {
-  const [rows, setRows] = useState<Shard[]>([]);
+  const [rows, setRows] = useState<DlqRow[]>([]);
   const [total, setTotal] = useState(0);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [taskId, setTaskId] = useState('');
@@ -69,24 +71,33 @@ export default function DlqPage() {
           <table className="table">
             <thead>
               <tr>
-                <th className="num">shardId</th>
-                <th className="num">execId</th>
+                <th>任务</th>
                 <th className="num">idx</th>
                 <th>状态</th>
                 <th className="num">attempt</th>
-                <th>startedAt</th>
+                <th>失败原因</th>
+                <th>入死信</th>
                 <th className="text-right">操作</th>
               </tr>
             </thead>
             <tbody>
               {rows.map((s) => (
                 <tr key={s.id}>
-                  <td className="num">{s.id}</td>
-                  <td className="num">{s.executionId}</td>
+                  <td>
+                    <div className="font-medium">{s.taskName ?? `任务 #${s.executionId}`}</div>
+                    <div className="text-xs text-slate-500">
+                      {s.handlerRef ?? '—'} · exec #{s.executionId}
+                    </div>
+                  </td>
                   <td className="num">{s.shardIndex}</td>
                   <td><StatusBadge status={s.status} /></td>
                   <td className="num">{s.attempt}</td>
-                  <td className="text-xs text-slate-500">{s.startedAt ?? '—'}</td>
+                  <td>
+                    {s.failureDetail
+                      ? <span className="break-words font-mono text-xs" title={s.failureDetail}>{truncate(s.failureDetail, 90)}</span>
+                      : <span className="text-slate-300">—</span>}
+                  </td>
+                  <td className="text-xs text-slate-500">{s.finishedAt ?? '—'}</td>
                   <td className="text-right">
                     <button className="btn-danger" onClick={() => doRequeue(s.id)}>重放出队</button>
                   </td>

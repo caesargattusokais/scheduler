@@ -1,9 +1,11 @@
 import type {
   CreateTaskRequest,
+  CreateDagRequest,
   Dag,
   DagDetail,
   DagRun,
   DagRunNode,
+  DlqRow,
   Execution,
   ExecutionDetail,
   Page,
@@ -82,8 +84,8 @@ export interface ListDlqParams {
   limit?: number;
   offset?: number;
 }
-export const getDlq = (p: ListDlqParams = {}): Promise<Page<Shard>> =>
-  req<Page<Shard>>(`/api/v1/executions/dlq${qstr(p)}`);
+export const getDlq = (p: ListDlqParams = {}): Promise<Page<DlqRow>> =>
+  req<Page<DlqRow>>(`/api/v1/executions/dlq${qstr(p)}`);
 
 export const requeueShard = (shardId: number) =>
   req<Shard>(`/api/v1/executions/shards/${shardId}/requeue`, { method: 'POST' });
@@ -96,6 +98,9 @@ export interface ListDagsParams {
 }
 export const listDags = (p: ListDagsParams = {}): Promise<Page<Dag>> =>
   req<Page<Dag>>(`/api/v1/dags${qstr(p)}`);
+/** 建工作流:DAG 定义是数据,仅存 dag/dag_node/dag_edge 三表,不改代码。 */
+export const createDag = (b: CreateDagRequest) =>
+  req<Dag>('/api/v1/dags', { method: 'POST', body: JSON.stringify(b) });
 export const getDag = (id: number) => req<DagDetail>(`/api/v1/dags/${id}`);
 export const pauseDag = (id: number) => req<Dag>(`/api/v1/dags/${id}/pause`, { method: 'POST' });
 export const resumeDag = (id: number) => req<Dag>(`/api/v1/dags/${id}/resume`, { method: 'POST' });
