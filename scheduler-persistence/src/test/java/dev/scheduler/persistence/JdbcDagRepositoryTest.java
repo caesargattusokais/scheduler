@@ -220,4 +220,16 @@ class JdbcDagRepositoryTest extends AbstractPostgresTest {
 
     assertEquals(2, dagRepo.countActiveRuns(dagId));
   }
+
+  /** 全局口径:跨所有 dag 计入非终态 run(终态不计);无 dag_id 过滤。 */
+  @Test void countActiveRuns_global() {
+    long dagA = newDag();
+    long dagB = newDag();
+    dagRepo.createScheduledRun(dagA, Instant.ofEpochMilli(1L));
+    dagRepo.createScheduledRun(dagA, Instant.ofEpochMilli(2L));
+    long rb = dagRepo.createScheduledRun(dagB, Instant.ofEpochMilli(3L)).id();
+    dagRepo.finalizeRun(rb, DagRunStatus.SUCCESS, "done");
+
+    assertEquals(2, dagRepo.countActiveRuns()); // A×2 非终态;rb 已终态不计
+  }
 }

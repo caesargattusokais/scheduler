@@ -1,7 +1,5 @@
 package dev.scheduler.server.config;
 
-import dev.scheduler.core.Dag;
-import dev.scheduler.core.Task;
 import dev.scheduler.persistence.DagRepository;
 import dev.scheduler.persistence.ExecutionRepository;
 import dev.scheduler.persistence.JdbcDagRepository;
@@ -113,51 +111,40 @@ public class Beans {
   }
 
   /**
-   * 每任务指标(§5.2):为每个任务各注册一条 series,任一带 task_id 标签,
-   * 避免单个热点任务掩盖被饿死的任务的可见性。
-   * 已知限制:新创建的任务要等下一次重启才出现 series(M1 接受此重启边界)。
-   * M3:指标口径切到 execution_shard——active 按 RUNNING shard 计数,队龄取最老 DUE shard 的父 created_at。
+   * 全局执行指标(§5.2):活跃 shard 数 + DUE 最深队龄。全局 gauge lazy 查 DB(scrape 时求值)→ 新建任务无需重启即计入,修正原 per-task 启动快照局限。
+   * 口径:active 按 RUNNING shard 计数;队龄按 shard.queued_at(每次入队置 now,重试/重排不虚高)。
    */
   @Bean
-  MeterBinder schedulerMetrics(TaskRepository tasks, ShardRepository shards, JdbcTemplate jdbc) {
+  MeterBinder schedulerMetrics(ShardRepository shards) {
     return registry -> {
-      for (Task t : tasks.findAll()) {
-        long taskId = t.id();
-        String name = t.name();
-        Gauge.builder("scheduler_active_runs", () -> (double) shards.countActive(taskId))
-            .tag("task_id", Long.toString(taskId))
-            .tag("task_name", name)
-            .register(registry);
-        Gauge.builder("scheduler_due_queue_max_age_seconds", () -> dueQueueMaxAgeSeconds(jdbc, taskId))
-            .tag("task_id", Long.toString(taskId))
-            .tag("task_name", name)
-            .register(registry);
-      }
+      Gauge.builder("scheduler_active_runs", () -> (double) shards.countActive()).register(registry);
+      Gauge.builder("scheduler_due_queue_max_age_seconds", () -> (double) shards.maxDueQueueAgeSeconds()).register(registry);
     };
   }
 
-  /** 每 DAG 指标(spec §6):active 未终态 dag_run 计数。已知重启边界:新 DAG 重启后才有 series(镜像 per-task)。 */
+  /** 活跃 DAG 批次(全部未终态 run 计数)。全局 gauge lazy 查 DB(scrape 时求值)→ 新建的 DAG 无需重启立即可见,修正原 per-dag 系列启动快照局限。 */
   @Bean
   MeterBinder dagMetrics(DagRepository dags) {
     return registry -> {
-      for (Dag d : dags.findAllDags()) {
-        Gauge.builder("scheduler_dag_runs_active", () -> (double) dags.countActiveRuns(d.id()))
-            .tag("dag_id", Long.toString(d.id()))
-            .tag("dag_name", d.name())
-            .register(registry);
-      }
+      Gauge.builder("scheduler_dag_runs_active", () -> (double) dags.countActiveRuns()).register(registry);
     };
   }
 
-  /** M5.3 §1.5 全局指标:DLQ 深度(全局 gauge) + worker 存活(0/1 = 本进程是否持选主锁)。
-   *  死信计数 lazy 读 DB(scrape 时求值);worker 存活判定 isLeader()。v1 无 per-runner 心跳,选主锁持有即活性边界。 */
+  /** M5.3 §1.5 全局指标:DLQ 深度(全局 gauge) + 存活 worker 数(读 M6.1 worker 心跳表)。
+   *  死信计数 lazy 读 DB;worker 存活 = worker 表 last_seen 距今 ≤ 30s 且 status=ALIVE 的进程数(与 AvailableHandlerRefs 同窗),
+   *  而非旧的"本进程是否持选主锁"(M6.1 拆执行到独立 worker 后,选主≠执行存活)。 */
   @Bean
-  MeterBinder schedulerGlobalMetrics(ShardRepository shards, LeaderElection leader) {
+  MeterBinder schedulerGlobalMetrics(ShardRepository shards, WorkerRepository workers, Clock clock) {
     return registry -> {
       Gauge.builder("scheduler_dlq_depth", () -> (double) shards.countDeadLetter()).register(registry);
-      Gauge.builder("scheduler_worker_active", () -> leader.isLeader() ? 1.0 : 0.0).register(registry);
+      Gauge.builder("scheduler_worker_active",
+          () -> (double) workers.findAllAlive(clock.instant().minus(WORKER_LIVE_WINDOW)).size())
+          .register(registry);
     };
   }
+
+  /** worker 存活判定窗口:last_seen 距今 ≤ 30s 视为存活(与 AvailableHandlerRefs 同窗)。 */
+  private static final java.time.Duration WORKER_LIVE_WINDOW = java.time.Duration.ofSeconds(30);
 
   /**
    * V7 demo-sync 数据种子(运行时、默认关闭):仅当 {@code scheduler.demo.sync-seed-rows > 0} 且 demo_sync_source
@@ -282,15 +269,4 @@ public class Beans {
     }
   }
 
-  private static double dueQueueMaxAgeSeconds(JdbcTemplate jdbc, long taskId) {
-    // execution_shard 无 created_at:父与 shard 同事务创建、shard id 单调,故取该任务最小的 DUE shard id,
-    // 其父 execution.created_at 恰为该最老 DUE shard 的年龄。无 DUE shard → 子查询 NULL → 归 0.0。
-    Double v = jdbc.queryForObject(
-        "SELECT EXTRACT(EPOCH FROM (now() - ("
-            + "SELECT e.created_at FROM execution e"
-            + " JOIN execution_shard s ON e.id=s.execution_id"
-            + " WHERE s.status='DUE' AND e.task_id=? ORDER BY s.id LIMIT 1)))::float8",
-        Double.class, taskId);
-    return v == null ? 0.0 : v;
   }
-}

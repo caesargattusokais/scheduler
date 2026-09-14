@@ -304,4 +304,10 @@ public class JdbcDagRepository implements DagRepository {
         "SELECT count(*) FROM dag_run WHERE dag_id=? AND status='PENDING'", Long.class, dagId);
     return c == null ? 0 : c;
   }
+
+  @Override public long countActiveRuns() {
+    Long c = jdbc.queryForObject(
+        "SELECT count(*) FROM dag_run WHERE status='PENDING'", Long.class);
+    return c == null ? 0 : c;
+  }
 }

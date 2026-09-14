@@ -79,4 +79,7 @@ public interface DagRepository {
 
   /** 某 dag 下未终态 run 计数(metrics/active gauge)。 */
   long countActiveRuns(long dagId);
+
+  /** 全局未终态 run 计数(跨所有 dag;metrics 全局 gauge,懒查 → 新建 DAG 无需重启即计入)。 */
+  long countActiveRuns();
 }

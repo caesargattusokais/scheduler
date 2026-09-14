@@ -40,6 +40,13 @@ public interface ShardRepository {
   /** 某任务下仍持有有效租约(RUNNING 且 lease_until>now())的 shard 数,用于并发配额。 */
   long countActive(long taskId);
 
+  /** 全局活跃 shard 数(RUNNING 且租约有效,跨全部任务)——指标全局 gauge,懒查,新建任务无需重启即计入。 */
+  long countActive();
+
+  /** 全局「DUE 最深队龄」(秒):最老的 DUE shard 自入队(queued_at)至今的秒数;无 DUE 则 0。
+   *  queued_at 在每次进入 DUE 时置 now(),故重试/重排后队龄从重新入队算起,不会虚高。 */
+  long maxDueQueueAgeSeconds();
+
   /** 运行中续约:仅当分片仍归 {@code ownerWorkerId}(worker_id 匹配)且仍 RUNNING 时延长 lease_until。
    *  长运行 handler(千万级批处理同步阻塞)期间 worker 周期调用,避免租约短于任务时长被 Reconciler 误回收;
    *  已终态(如写回 SUCCESS)或被接管(worker_id 变更)则 0 行 → 静默返回 false。无 outcome 行。 */

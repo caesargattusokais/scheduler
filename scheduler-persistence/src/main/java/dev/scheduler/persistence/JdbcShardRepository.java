@@ -190,6 +190,21 @@ public class JdbcShardRepository implements ShardRepository {
     return c == null ? 0 : c;
   }
 
+  @Override public long countActive() {
+    Long c = jdbc.queryForObject(
+        "SELECT count(*) FROM execution_shard s WHERE s.status='RUNNING' AND s.lease_until > now()",
+        Long.class);
+    return c == null ? 0 : c;
+  }
+
+  @Override public long maxDueQueueAgeSeconds() {
+    Long v = jdbc.queryForObject(
+        "SELECT COALESCE(MAX(EXTRACT(EPOCH FROM (now() - s.queued_at))::int8), 0)::int8"
+            + " FROM execution_shard s WHERE s.status='DUE'",
+        Long.class);
+    return v == null ? 0 : v;
+  }
+
   @Override public boolean renewLease(long shardId, String ownerWorkerId, Instant leaseUntil) {
     // 所有权守卫续约:仅当仍归本 worker(RUNNING 且 worker_id 匹配)才延长;否则 0 行静默,让位给写回/回收判定。
     return jdbc.update("""
@@ -258,7 +273,7 @@ public class JdbcShardRepository implements ShardRepository {
     java.sql.Timestamp ts = java.sql.Timestamp.from(retryAt);
     tx.executeWithoutResult(s -> {
       int updated = jdbc.update(
-          "UPDATE execution_shard SET status='DUE', next_retry_at=? WHERE id=? AND status='FAILED'",
+          "UPDATE execution_shard SET status='DUE', next_retry_at=?, queued_at=now() WHERE id=? AND status='FAILED'",
           ts, shardId);
       if (updated == 0) {
         log.debug("scheduleRetry lost CAS race: shard {} no longer FAILED; "
@@ -413,7 +428,7 @@ public class JdbcShardRepository implements ShardRepository {
     final boolean[] ok = {false};
     tx.executeWithoutResult(s -> {
       if (jdbc.update(
-          "UPDATE execution_shard SET status='DUE', attempt=0, next_retry_at=NULL, dead_letter=false"
+          "UPDATE execution_shard SET status='DUE', attempt=0, next_retry_at=NULL, dead_letter=false, queued_at=now()"
               + " WHERE id=? AND status='FAILED'", shardId) == 1) {
         jdbc.update("INSERT INTO execution_shard_outcome (shard_id, status, detail) VALUES (?,?,?)",
             shardId, "DUE", "requeue");

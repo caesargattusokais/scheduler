@@ -11,7 +11,7 @@ const CARDS: CardDef[] = [
   { key: 'scheduler_due_queue_max_age_seconds', label: 'DUE 最深队龄', unit: 's', agg: 'max', nice: (v) => `${v.toFixed(0)}s` },
   { key: 'scheduler_dag_runs_active', label: '活跃 DAG 批次', agg: 'sum', nice: (v) => String(Math.round(v)) },
   { key: 'scheduler_dlq_depth', label: 'DLQ 深度', agg: 'raw', nice: (v) => String(Math.round(v)) },
-  { key: 'scheduler_worker_active', label: '调度进程存活', agg: 'raw', nice: (v) => (v >= 1 ? '存活' : '下线') },
+  { key: 'scheduler_worker_active', label: '存活 worker', agg: 'raw', nice: (v) => `${Math.round(v)} 个` },
 ];
 
 const HISTORY = 20;

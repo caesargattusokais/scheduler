@@ -266,6 +266,32 @@ class JdbcShardRepositoryTest extends AbstractPostgresTest {
     assertEquals(ExecutionStatus.DUE, shardRepo.findShard(shard1).get().status());
   }
 
+  /** 全局口径:跨全部任务数 RUNNING 且租约有效的 shard(指标卡;不受任务创建时机影响)。 */
+  @Test void countActive_globalAcrossAllTasks() {
+    long t1 = newTask(2, 8);
+    long t2 = newTask(1, 8);
+    claimShard(shard(seedParentAndShards(t1, 2), 0).id(), t1, "w1", 8);
+    claimShard(shard(seedParentAndShards(t2, 1), 0).id(), t2, "w2", 8);
+
+    assertEquals(2, shardRepo.countActive(), "两任务各 1 个 RUNNING → 全局 2");
+    assertEquals(1, shardRepo.countActive(t1), "per-task 口径仍按任务过滤");
+  }
+
+  /** 队龄按 queued_at 量(而非父 created_at);FAILD→DUE requeue 重置 queued_at,重排后不虚高。 */
+  @Test void maxDueQueueAge_fromQueuedAt_resetOnRequeue() {
+    long taskId = newTask(2, 8);
+    long parentId = seedParentAndShards(taskId, 2);
+    long shard0 = shard(parentId, 0).id();
+    jdbc.update("UPDATE execution_shard SET status='DUE', queued_at=now() - interval '120 seconds' WHERE id=?", shard0);
+
+    assertTrue(shardRepo.maxDueQueueAgeSeconds() >= 120, "队龄按 queued_at 量,应 ≥120s");
+
+    // requeue(FAILED→DUE)把 queued_at 重置为 now,队龄应回落到 ~0(另一分片同为新建 ≈0)
+    jdbc.update("UPDATE execution_shard SET status='FAILED' WHERE id=?", shard0);
+    assertTrue(shardRepo.requeueShard(shard0));
+    assertEquals(0L, shardRepo.maxDueQueueAgeSeconds(), "requeue 重置 queued_at,队龄应回 0");
+  }
+
   @Test void markStatusWritesSuccessAndOutcome() {
     long taskId = newTask(1, 8);
     long parentId = seedParentAndShards(taskId, 1);
@@ -364,6 +390,19 @@ class JdbcShardRepositoryTest extends AbstractPostgresTest {
         "SELECT count(*) FROM execution_shard_outcome WHERE shard_id=? AND status='DUE' AND detail='boom'",
         Integer.class, shard0);
     assertEquals(1, dueOutcomes, "retry must append a DUE outcome carrying the original failure detail");
+  }
+
+  /** 重试(FAILED→DUE,最常见的再入队路径)重置 queued_at → 队龄从"重新入队"起算,不再虚高。 */
+  @Test void scheduleRetry_resetsQueuedAt() {
+    long taskId = newTask(1, 8);
+    long shard0 = failedShard(taskId, 1);
+    // 制造"很久前入队"假象:若不重置 queued_at,重试后队龄会虚高到 ~120s
+    jdbc.update("UPDATE execution_shard SET queued_at=now() - interval '120 seconds' WHERE id=?", shard0);
+
+    shardRepo.scheduleRetry(shard0, Instant.now().plusSeconds(10), "boom");
+
+    assertEquals(ExecutionStatus.DUE, shardRepo.findShard(shard0).get().status());
+    assertEquals(0L, shardRepo.maxDueQueueAgeSeconds(), "重试重置 queued_at,队龄应回 0,而非沿用 120s 前的入队时间");
   }
 
   @Test void scheduleRetryOnNonFailedSilent() {
