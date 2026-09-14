@@ -4,6 +4,7 @@ import dev.scheduler.core.ExecutionStatus;
 import dev.scheduler.core.Shard;
 import dev.scheduler.core.Task;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -237,7 +238,7 @@ class JdbcShardRepositoryTest extends AbstractPostgresTest {
     long shard0 = shard(parentId, 0).id();
     claimShard(shard0, taskId, "w1", 8);
 
-    Instant renewed = Instant.now().plusSeconds(300);
+    Instant renewed = Instant.now().plusSeconds(300).truncatedTo(ChronoUnit.MICROS);
     assertTrue(shardRepo.renewLease(shard0, "w1", renewed), "持有者续约应成功");
     assertEquals(renewed, shardRepo.findShard(shard0).get().leaseUntil());
 

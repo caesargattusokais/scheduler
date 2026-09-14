@@ -26,7 +26,9 @@ import java.time.Clock;
 import javax.sql.DataSource;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.boot.ApplicationRunner;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -154,6 +156,44 @@ public class Beans {
     return registry -> {
       Gauge.builder("scheduler_dlq_depth", () -> (double) shards.countDeadLetter()).register(registry);
       Gauge.builder("scheduler_worker_active", () -> leader.isLeader() ? 1.0 : 0.0).register(registry);
+    };
+  }
+
+  /**
+   * V7 demo-sync 数据种子(运行时、默认关闭):仅当 {@code scheduler.demo.sync-seed-rows > 0} 且 demo_sync_source
+   * 为空时一次性播种(幂等)。默认 0 → 测试与默认启动不灌数;开发栈由 start-dev.sh 设为 10000000,保留
+   * 首次启动即灌千万行的演示能力,又不让每次全新 Testcontainers 测试库重灌拖慢套件。 */
+  @Bean
+  ApplicationRunner seedDemoSync(JdbcTemplate jdbc,
+                                 @Value("${scheduler.demo.sync-seed-rows:0}") long rows) {
+    return args -> {
+      if (rows <= 0) return;
+      Integer existing = jdbc.queryForObject("SELECT count(*) FROM demo_sync_source", Integer.class);
+      if (existing != null && existing > 0) {
+        log.info("demo_sync_source already has {} rows; skipping seed", existing);
+        return;
+      }
+      log.info("seeding demo_sync_source with {} rows (demo sync)...", rows);
+      long t0 = System.currentTimeMillis();
+      jdbc.update("""
+          INSERT INTO demo_sync_source
+            (id, batch_no, acct_no, amount, quantity, rate, active, category, email, region, memo, check_flag, cfg_json, created_at, updated_at)
+          SELECT gs,
+                 (gs / 10000)::bigint,
+                 'acct-' || lpad((gs % 500000)::text, 8, '0'),
+                 (gs % 2000000 + 1)::numeric / 100,
+                  gs % 5000,
+                (gs % 1000)::double precision / 10,
+                (gs % 2)::int = 1,
+                chr(65 + (gs % 6)) || '-cat',
+                'user' || (gs % 800000)::text || '@corp.example.com',
+                CASE gs % 4 WHEN 0 THEN 'CN' WHEN 1 THEN 'US' WHEN 2 THEN 'EU' ELSE 'JP' END,
+                'row-' || gs,
+                 gs % 7,
+                jsonb_build_object('seq', gs, 'mod97', gs % 97),
+                now(), now()
+          FROM generate_series(1::bigint, ?::bigint) AS gs""", rows);
+      log.info("seeded demo_sync_source in {} ms", System.currentTimeMillis() - t0);
     };
   }
 

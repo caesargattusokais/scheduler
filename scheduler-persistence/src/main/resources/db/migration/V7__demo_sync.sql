@@ -1,6 +1,6 @@
--- V7: 真实业务同步演示表。建表 + 源表一次性灌 1000 万行(种子,仅当源为空,幂等)。
--- 供 ref=sync 的 worker handler 做「数据同步」:把源表各主键区间批量 INSERT 到目标表,验证
--- 调度的分片并行 + 父汇本能撑住千万级批处理。
+-- V7: 真实业务同步演示表。仅建 DDL(源表 + 目标表);数据种子不再放在迁移里,改由 server 端
+-- 按需的运行时 seeder(scheduler.demo.sync-seed-rows)在启动后播种——避免每次全新 Testcontainers
+-- 测试库都重灌千万行拖慢整个测试套件。种子逻辑见 dev.scheduler.server.config.Beans#seedDemoSync。
 CREATE TABLE IF NOT EXISTS demo_sync_source (
   id          BIGINT PRIMARY KEY,
   batch_no    BIGINT              NOT NULL DEFAULT 0,
@@ -23,24 +23,3 @@ CREATE TABLE IF NOT EXISTS demo_sync_target (LIKE demo_sync_source INCLUDING ALL
 
 CREATE INDEX IF NOT EXISTS idx_sync_source_synced ON demo_sync_source(synced_at);
 CREATE INDEX IF NOT EXISTS idx_sync_source_category ON demo_sync_source(category);
-
--- 仅当源表为空时播种(幂等;重复启动不再重灌)。约 1000 万行。
-INSERT INTO demo_sync_source
-  (id, batch_no, acct_no, amount, quantity, rate, active, category, email, region, memo, check_flag, cfg_json, created_at, updated_at)
-SELECT gs,
-       (gs / 10000)::bigint,
-       'acct-' || lpad((gs % 500000)::text, 8, '0'),
-       (gs % 2000000 + 1)::numeric / 100,
-        gs % 5000,
-      (gs % 1000)::double precision / 10,
-      (gs % 2)::int = 1,
-      chr(65 + (gs % 6)) || '-cat',
-      'user' || (gs % 800000)::text || '@corp.example.com',
-      CASE gs % 4 WHEN 0 THEN 'CN' WHEN 1 THEN 'US' WHEN 2 THEN 'EU' ELSE 'JP' END,
-      'row-' || gs,
-       gs % 7,
-      jsonb_build_object('seq', gs, 'mod97', gs % 97),
-      now(), now()
-FROM generate_series(1, 10000000) AS gs
-WHERE NOT EXISTS (SELECT 1 FROM demo_sync_source LIMIT 1)
-ON CONFLICT (id) DO NOTHING;

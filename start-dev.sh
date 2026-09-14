@@ -24,7 +24,8 @@ boot_server() {
   local cp; cp="scheduler-server/target/classes;$(cat "$(ensure_cp scheduler-server)")"
   echo "[start-dev] 启动 server 控制面 :8080 ..."
   DB_URL="$DB_URL" DB_USER="$DB_USER" DB_PASSWORD="$DB_PASSWORD" \
-  SERVER_PORT=8080 java -cp "$cp" dev.scheduler.server.SchedulerApplication
+  SERVER_PORT=8080 SCHEDULER_DEMO_SYNC_SEED_ROWS="${SCHEDULER_DEMO_SYNC_SEED_ROWS:-10000000}" \
+  java -cp "$cp" dev.scheduler.server.SchedulerApplication
 }
 
 boot_worker() {
