@@ -34,4 +34,13 @@ class JdbcWorkerRepositoryTest extends AbstractPostgresTest {
     assertEquals(List.of("fresh"), alive.stream().map(WorkerRegistration::id).toList());
     assertEquals(List.of("demo"), alive.get(0).refs());
   }
+
+  /** 死行清理:last_seen 早于阈值即删;活行(last_seen >= 阈值)保留。 */
+  @Test
+  void purgeStale_removesOld_keepsRecent() {
+    repo.upsertHeartbeat(new WorkerRegistration("old", List.of("a"), BASE.minusSeconds(60), "ALIVE"));
+    repo.upsertHeartbeat(new WorkerRegistration("recent", List.of("b"), BASE.plusSeconds(10), "ALIVE"));
+    repo.purgeStale(BASE.minusSeconds(30));
+    assertEquals(List.of("recent"), jdbc.queryForList("SELECT id FROM worker", String.class));
+  }
 }

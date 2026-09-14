@@ -39,4 +39,9 @@ public class JdbcWorkerRepository implements WorkerRepository {
     return jdbc.query("SELECT id, refs, last_seen, status FROM worker "
         + "WHERE status='ALIVE' AND last_seen >= ?", MAP, java.sql.Timestamp.from(lastSeenAtLeast));
   }
+
+  @Override
+  public void purgeStale(Instant olderThan) {
+    jdbc.update("DELETE FROM worker WHERE last_seen < ?", java.sql.Timestamp.from(olderThan));
+  }
 }
