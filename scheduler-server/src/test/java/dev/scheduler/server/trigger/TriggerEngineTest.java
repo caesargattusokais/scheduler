@@ -50,7 +50,7 @@ class TriggerEngineTest extends AbstractTriggerEngineTest {
     var leader = new AdvisoryLockLeaderElection(jdbc);
     try {
       long taskId = createTask(CRON_EVERY_5, /* shardCount */ 3, 1);
-      var engine = new TriggerEngine(tasks, executions, shards, leader, FIXED_CLOCK);
+      var engine = new TriggerEngine(tasks, executions, shards, leader, FIXED_CLOCK, 200);
       engine.scanOnce();
 
       // 恰 1 父 execution(不是 N 条平铺 execution)
@@ -69,7 +69,7 @@ class TriggerEngineTest extends AbstractTriggerEngineTest {
     var leader = new AdvisoryLockLeaderElection(jdbc);
     try {
       long taskId = createTask(CRON_EVERY_5, /* shardCount */ 3, 1);
-      var engine = new TriggerEngine(tasks, executions, shards, leader, FIXED_CLOCK);
+      var engine = new TriggerEngine(tasks, executions, shards, leader, FIXED_CLOCK, 200);
       engine.scanOnce();
       long parentId = executions.findCandidate(taskId).orElseThrow().id();
       int shardCountAfterFirst = shards.findShards(parentId).size();
@@ -86,12 +86,12 @@ class TriggerEngineTest extends AbstractTriggerEngineTest {
     var leader = new AdvisoryLockLeaderElection(jdbc);
     try {
       long taskId = createTask(CRON_EVERY_5, 1, 1);
-      var engine = new TriggerEngine(tasks, executions, shards, leader, FIXED_CLOCK);
+      var engine = new TriggerEngine(tasks, executions, shards, leader, FIXED_CLOCK, 200);
       engine.scanOnce();
       long before = countExecutions(taskId);
       assertTrue(before >= 1);
 
-      tasks.setPaused(taskId, true); // 离开 findCronEnabled 结果集
+      tasks.setPaused(taskId, true); // 离开 findCronEnabledPage 结果集
       engine.scanOnce();
       assertEquals(before, countExecutions(taskId)); // pause 守卫:不再新增
     } finally { leader.close(); }
@@ -108,7 +108,7 @@ class TriggerEngineTest extends AbstractTriggerEngineTest {
         taskId, "quota-occupying-key");
       assertEquals(1L, executions.countActive(taskId));
 
-      var engine = new TriggerEngine(tasks, executions, shards, leader, FIXED_CLOCK);
+      var engine = new TriggerEngine(tasks, executions, shards, leader, FIXED_CLOCK, 200);
       engine.scanOnce();
       // §2.4 背压:配额占满也仍下发一条 DUE(积压),绝不静默丢 tick
       assertEquals(2, countExecutions(taskId));
@@ -128,10 +128,28 @@ class TriggerEngineTest extends AbstractTriggerEngineTest {
       try {
         assertFalse(nonLeader.isLeader());
         long taskId = createTask(CRON_EVERY_5, 1, 1);
-        var engine = new TriggerEngine(tasks, executions, shards, nonLeader, FIXED_CLOCK);
+        var engine = new TriggerEngine(tasks, executions, shards, nonLeader, FIXED_CLOCK, 200);
         engine.scanOnce();
         assertEquals(0, countExecutions(taskId)); // leader 守卫:非 leader 不产生任何执行
       } finally { nonLeader.close(); }
     } finally { holder.close(); }
+  }
+
+  /** §4 游标分批:两个候选任务(minute 内各命中一次)在 batch=1 时跨 tick 覆盖,不重不漏。 */
+  @Test void scanOnce_batchesAcrossTicks_coversAllTasksOnce() throws Exception {
+    var leader = new AdvisoryLockLeaderElection(jdbc);
+    try {
+      long tA = createTask(CRON_EVERY_5, 1, 1);
+      long tB = createTask(CRON_EVERY_5, 1, 1);
+      var engine = new TriggerEngine(tasks, executions, shards, leader, FIXED_CLOCK, 1);
+      engine.scanOnce(); // tick 1:第一页(仅最小 id 任务)
+      assertEquals(1, countExecutions(tA) + countExecutions(tB),
+          "batch=1 时首 tick 只处理一个任务 → 恰 1 条 execution");
+      engine.scanOnce(); // tick 2:第二页(游标推进)
+      assertEquals(2, countExecutions(tA) + countExecutions(tB),
+          "batch=1 时两 tick 应覆盖两任务且不重复");
+      assertEquals(1, countExecutions(tA), "任务 A 恰好一条(无重复 DUE)");
+      assertEquals(1, countExecutions(tB), "任务 B 恰好一条(无重复 DUE)");
+    } finally { leader.close(); }
   }
 }

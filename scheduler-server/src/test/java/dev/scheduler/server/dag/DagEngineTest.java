@@ -94,7 +94,12 @@ class DagEngineTest {
   }
 
   private DagEngine engine(AdvisoryLockLeaderElection leader) {
-    return new DagEngine(dags, tasks, shards, leader, CLOCK);
+    return new DagEngine(dags, tasks, shards, leader, CLOCK, 200);
+  }
+
+  private int runningNodeCount() {
+    return jdbc.queryForObject(
+        "SELECT count(*) FROM dag_run_node WHERE status='RUNNING'", Integer.class);
   }
 
   private DagRunNode node(long runId, String key) {
@@ -315,6 +320,29 @@ class DagEngineTest {
       assertEquals(DagRunNodeStatus.CANCELED, node(run.id(), "B").status());
       assertNull(node(run.id(), "B").executionId(), "读侧取消收敛的 PENDING 下游绝不 spawn");
       assertEquals(DagRunStatus.CANCELED, dags.findRun(run.id()).orElseThrow().status());
+    } finally { leader.close(); }
+  }
+
+  /** §4 游标分批:三条活跃 run 在 batch=1 时跨 tick 逐条传播,三 tick 后全部被 spawn(节点非 PENDING),不重不漏。 */
+  @Test void scanPropagation_batchesAcrossTicks_coversAllActiveRuns() {
+    long t1 = newTask(1), t2 = newTask(1), t3 = newTask(1);
+    Dag dag1 = newDag(null, Map.of("A", t1), List.of());
+    Dag dag2 = newDag(null, Map.of("B", t2), List.of());
+    Dag dag3 = newDag(null, Map.of("C", t3), List.of());
+    var leader = new AdvisoryLockLeaderElection(jdbc);
+    try {
+      dags.createManualRun(dag1.id());
+      dags.createManualRun(dag2.id());
+      dags.createManualRun(dag3.id());
+      var engine = new DagEngine(dags, tasks, shards, leader, CLOCK, 1);
+      engine.scanOnce(); // tick 1:传播只推进第一个 PENDING run
+      assertEquals(1, runningNodeCount(), "batch=1 时首 tick 只 spawn 一个 run 的根节点");
+      engine.scanOnce(); // tick 2:游标推进 → 第二个
+      assertEquals(2, runningNodeCount(), "第二个 run 的根节点同 tick 被 spawn");
+      engine.scanOnce(); // tick 3:第三个 + 游标回卷
+      assertEquals(3, runningNodeCount(), "三 tick 后三条 run 的根节点全部被 spawn(节点非 PENDING)");
+      assertEquals(3, dags.findActiveRunsPage(0L, 100).size(),
+          "节点 RUNNING 非终态 → 三条 run 均仍为活跃 PENDING,未被重复/漏处理");
     } finally { leader.close(); }
   }
 }

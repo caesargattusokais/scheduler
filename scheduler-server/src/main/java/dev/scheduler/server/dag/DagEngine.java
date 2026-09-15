@@ -39,14 +39,18 @@ public class DagEngine {
   private final ShardRepository shards;
   private final LeaderElection leader;
   private final Clock clock;
+  private final int batchSize;   // 单 tick 每阶段最多处理的行数(§4 游标分批;页满推进、页未满回卷)
+  private long lastDagId;        // 游标:阶段一上次扫到的最大 dag id;回卷=0 表示下轮从头
+  private long lastRunId;        // 游标:阶段二上次扫到的最大 run id;回卷=0 表示下轮从头
 
   public DagEngine(DagRepository dags, TaskRepository tasks, ShardRepository shards,
-                   LeaderElection leader, Clock clock) {
+                   LeaderElection leader, Clock clock, int scanBatchSize) {
     this.dags = dags;
     this.tasks = tasks;
     this.shards = shards;
     this.leader = leader;
     this.clock = clock;
+    this.batchSize = scanBatchSize;
   }
 
   /** 扫描一次:仅 leader(镜像 TriggerEngine 的 leader 守卫)。 */
@@ -56,11 +60,12 @@ public class DagEngine {
     scanPropagation();
   }
 
-  /** 阶段一:对 enabled 且非 paused 的 cron DAG,分钟窗内命中 tick → 幂等建一条 dag_run(含全 PENDING 节点)。 */
+  /** 阶段一:每 tick 至多处理 batchSize 个 enabled 且非 paused 的 cron DAG,分钟窗内命中 tick → 幂等建一条 dag_run(含全 PENDING 节点)。 */
   private void scanTriggers() {
     ZoneId zone = clock.getZone();
     ZonedDateTime now = clock.instant().atZone(zone);
-    for (Dag d : dags.findCronEnabledDags()) {
+    List<Dag> page = dags.findCronEnabledDagsPage(lastDagId, batchSize);
+    for (Dag d : page) {
       try {
         var cron = CronExpression.parse(d.cron());
         ZonedDateTime fired = cron.next(now.minusSeconds(61));
@@ -73,15 +78,18 @@ public class DagEngine {
             d.id(), d.cron(), badCron.toString());
       }
     }
+    lastDagId = (page.size() == batchSize) ? page.get(page.size() - 1).id() : 0L;
   }
 
-  /** 阶段二:对每个活跃(未终态)run 应用 spec §3 的确定性传播规则。跨周期收敛:单 scan 只推进一层。 */
+  /** 阶段二:每 tick 至多处理 batchSize 个活跃(未终态)run,应用 spec §3 的确定性传播规则。跨周期收敛:单 scan 只推进一步。 */
   private void scanPropagation() {
-    for (DagRun run : dags.findActiveRuns()) {
+    List<DagRun> page = dags.findActiveRunsPage(lastRunId, batchSize);
+    for (DagRun run : page) {
       List<DagRunNode> nodes = dags.findNodesOfRun(run.id());
       if (nodes.isEmpty()) continue;
       propagateRun(run, nodes);
     }
+    lastRunId = (page.size() == batchSize) ? page.get(page.size() - 1).id() : 0L;
   }
 
   /** 上游表:nodeKey → 直接上游 nodeKey 列表(读 dag 定义的边 + 节点 id↔key 映射)。 */

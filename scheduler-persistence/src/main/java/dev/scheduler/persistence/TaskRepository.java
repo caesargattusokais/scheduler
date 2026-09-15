@@ -6,7 +6,6 @@ import java.util.Optional;
 public interface TaskRepository {
   Task create(Task t);
   Optional<Task> findById(long id);
-  List<Task> findCronEnabled();
   /** 游标分批:返回 id>afterId 的 enabled+cron 任务,至多 limit 行;afterId=0 从头。配合 §4 扫描分批。 */
   List<Task> findCronEnabledPage(long afterId, int limit);
   List<Task> findAll();

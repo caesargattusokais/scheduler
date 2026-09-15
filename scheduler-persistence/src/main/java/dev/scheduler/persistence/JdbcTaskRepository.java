@@ -43,9 +43,6 @@ public class JdbcTaskRepository implements TaskRepository {
   @Override public Optional<Task> findById(long id) {
     return jdbc.query("SELECT * FROM app_task WHERE id=?", MAP, id).stream().findFirst();
   }
-  @Override public List<Task> findCronEnabled() {
-    return jdbc.query("SELECT * FROM app_task WHERE enabled AND NOT paused AND cron IS NOT NULL", MAP);
-  }
   @Override public List<Task> findCronEnabledPage(long afterId, int limit) {
     return jdbc.query(
         "SELECT * FROM app_task WHERE enabled AND NOT paused AND cron IS NOT NULL AND id > ?"

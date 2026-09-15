@@ -29,8 +29,6 @@ public interface DagRepository {
   List<Dag> findDagsPage(String name, int limit, int offset);
   /** 与上同过滤条件(不含分页)的 DAG 全量计数。 */
   long countDags(String name);
-  /** enabled 且非 paused 且 cron 非空(镜像 TaskRepository.findCronEnabled)。 */
-  List<Dag> findCronEnabledDags();
   /** 游标分批:返回 id>afterId 的 enabled cron DAG,至多 limit 行;afterId=0 从头。 */
   List<Dag> findCronEnabledDagsPage(long afterId, int limit);
   List<DagNode> findNodes(long dagId);
@@ -50,9 +48,7 @@ public interface DagRepository {
   List<DagRun> findRunsPage(Long dagId, String status, int limit, int offset);
   /** 与上同过滤条件(不含分页)的 run 全量计数。 */
   long countRuns(Long dagId, String status);
-  /** 未终态 run(stored status='PENDING'),由 DagEngine 每周期推进。 */
-  List<DagRun> findActiveRuns();
-  /** 游标分批:返回 id>afterId 的 PENDING 活跃 run,至多 limit 行;afterId=0 从头。 */
+  /** 游标分批:返回 id>afterId 的 PENDING 活跃 run,至多 limit 行;afterId=0 从头,由 DagEngine 每周期推进。 */
   List<DagRun> findActiveRunsPage(long afterId, int limit);
   /** 某 run 的全部节点,ORDER BY sort_order, id。 */
   List<DagRunNode> findNodesOfRun(long runId);
@@ -73,7 +69,7 @@ public interface DagRepository {
 
   /** 单节点重跑(仅 operator):把终态节点回绕到新一轮运行——CAS on status IN (SUCCESS,FAILED,SKIPPED,CANCELED)
    *  置 status='RUNNING'、execution_id 重挂新 execution、finished_at 清 NULL;并把 dag_run 重开为 'PENDING'
-   *  (finished_at=NULL)使 findActiveRuns 重新纳入、引擎随后重派生。同事务落 dag_run_node_outcome(RUNNING,'node rerun')。
+   *  (finished_at=NULL)使 findActiveRunsPage 重新纳入、引擎随后重派生。同事务落 dag_run_node_outcome(RUNNING,'node rerun')。
    *  CAS 0 行=节点已非终态/竞态 → false,不落 outcome。调用方必须是 DagEngine(引擎是运行表唯一写者)。
    */
   boolean rerunNodeToExecution(long runId, long nodeId, long newExecutionId);

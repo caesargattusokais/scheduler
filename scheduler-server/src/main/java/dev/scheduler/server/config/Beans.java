@@ -89,13 +89,13 @@ public class Beans {
   @Bean
   TriggerEngine triggerEngine(TaskRepository tasks, ExecutionRepository execs,
                               ShardRepository shards, LeaderElection leader, Clock clock) {
-    return new TriggerEngine(tasks, execs, shards, leader, clock);
+    return new TriggerEngine(tasks, execs, shards, leader, clock, 200); // §4 单 tick 批上限(5s 周期 ×200)
   }
 
   @Bean
   DagEngine dagEngine(DagRepository dags, TaskRepository tasks, ShardRepository shards,
                       LeaderElection leader, Clock clock) {
-    return new DagEngine(dags, tasks, shards, leader, clock);
+    return new DagEngine(dags, tasks, shards, leader, clock, 200); // §4 单 tick 批上限(5s 周期 ×200,触发/传播各 200)
   }
 
   /** 重试决策纯类:只判定"应否重试/退避多久",不含 DB 与时钟。 */

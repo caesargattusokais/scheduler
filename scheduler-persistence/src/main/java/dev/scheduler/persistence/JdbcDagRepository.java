@@ -147,10 +147,6 @@ public class JdbcDagRepository implements DagRepository {
     Long c = jdbc.queryForObject("SELECT count(*) FROM app_dag", Long.class);
     return c == null ? 0 : c;
   }
-  @Override public List<Dag> findCronEnabledDags() {
-    return jdbc.query(
-        "SELECT * FROM app_dag WHERE enabled AND NOT paused AND cron IS NOT NULL ORDER BY id", DAG_MAP);
-  }
   @Override public List<Dag> findCronEnabledDagsPage(long afterId, int limit) {
     return jdbc.query(
         "SELECT * FROM app_dag WHERE enabled AND NOT paused AND cron IS NOT NULL AND id > ?"
@@ -223,9 +219,6 @@ public class JdbcDagRepository implements DagRepository {
     if (status != null && !status.isBlank()) { sql.append(" AND status=?"); a.add(status); }
     Long c = jdbc.queryForObject(sql.toString(), Long.class, a.toArray());
     return c == null ? 0 : c;
-  }
-  @Override public List<DagRun> findActiveRuns() {
-    return jdbc.query("SELECT * FROM dag_run WHERE status='PENDING' ORDER BY id", RUN_MAP);
   }
   @Override public List<DagRun> findActiveRunsPage(long afterId, int limit) {
     return jdbc.query(

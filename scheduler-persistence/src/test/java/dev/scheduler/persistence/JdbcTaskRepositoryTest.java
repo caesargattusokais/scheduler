@@ -5,7 +5,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 class JdbcTaskRepositoryTest extends AbstractPostgresTest {
-  /** 不依赖其它测试类的 TRUNCATE 顺序:共享静态 PG 容器会累积 app_task 行,本类断言 findCronEnabled 数量需隔离。 */
+  /** 不依赖其它测试类的 TRUNCATE 顺序:共享静态 PG 容器会累积 app_task 行,本类断言 findCronEnabledPage 数量需隔离。 */
   @BeforeEach void clean() {
     jdbc.update("TRUNCATE app_task, execution, execution_outcome RESTART IDENTITY CASCADE");
   }
@@ -16,9 +16,9 @@ class JdbcTaskRepositoryTest extends AbstractPostgresTest {
         1, 300, 0, 1000, null, 8, true, false));
     assertTrue(created.id() > 0);
     assertTrue(repo.findById(created.id()).isPresent());
-    assertEquals(1, repo.findCronEnabled().size());
+    assertEquals(1, repo.findCronEnabledPage(0L, 10).size());
     repo.setPaused(created.id(), true);
-    assertTrue(repo.findCronEnabled().isEmpty());
+    assertTrue(repo.findCronEnabledPage(0L, 10).isEmpty());
   }
 
   @Test void findCronEnabledPage_resumesPastCursor_withoutSkipping() {
