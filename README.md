@@ -32,6 +32,8 @@ mvn spring-boot:run -pl scheduler-server
 | `DB_USER` / `DB_PASSWORD` | `scheduler` / `scheduler` | 数据库账号 |
 | `SCHEDULER_WORKER_ID` | 空 | 节点 workerId；空则用 hostname 派生 |
 | `SCHEDULER_LOOP_SCAN_DELAY_MS` | `5000` | 引擎扫描周期 |
+| `SCHEDULER_WORKER_STALE_AFTER_SECONDS` | `30` | owner worker 心跳失联判定窗口(活性优先接管) |
+| `SCHEDULER_RECONCILE_DELAY_MS` | `15000` | 对账回收/终态汇聚周期 |
 
 Flyway 自动迁移 schema。多节点实例共享同一数据库，经 advisory lock 选主协调。
 
@@ -64,6 +66,8 @@ worker 配置（环境变量）：
 | `DB_URL` / `DB_USER` / `DB_PASSWORD` | `scheduler` 库同上 | 共享数据库连接 |
 | `SCHEDULER_WORKER_ID` | 空 | node workerId；空则生成 `worker@<hostname>:<pid>`（同机多 worker 自动唯一，跨重启 PID 复用可接续在途租约） |
 | `SCHEDULER_LOOP_WORK_DELAY_MS` | `100` | 认领散片循环节流（`scheduler.loop.work-delay-ms`） |
+| `SCHEDULER_LEASE_SECONDS` | `60` | 运行分片在线续租目标(健康 worker 续租周期保住) |
+| `SCHEDULER_LEASE_RENEW_SECONDS` | `15` | worker 续租检查周期 |
 
 启动即注册一行 `worker`，随后按 `heartbeat.interval-ms`（默认 10s）周期心跳；每次心跳 upsert 覆盖该行 `last_seen`，即存活证据。
 

@@ -75,8 +75,8 @@ public class WorkerConfig {
   ExecutorWorker executorWorker(TaskRepository tasks, ShardRepository shards,
                                 HandlerRegistry handlers, String schedulerWorkerId,
                                 FailureResolver failureResolver, Clock clock,
-                                @Value("${scheduler.lease.seconds:120}") int leaseSeconds,
-                                @Value("${scheduler.lease.renew-seconds:30}") int renewSeconds) {
+                                @Value("${scheduler.lease.seconds:60}") int leaseSeconds,
+                                @Value("${scheduler.lease.renew-seconds:15}") int renewSeconds) {
     return new ExecutorWorker(tasks, shards, handlers, schedulerWorkerId, failureResolver, clock,
         leaseSeconds, renewSeconds);
   }

@@ -240,7 +240,7 @@ public class Beans {
       this.leader = leader;
     }
 
-    @Scheduled(fixedDelayString = "${scheduler.reconcile.delay-ms:30000}")
+    @Scheduled(fixedDelayString = "${scheduler.reconcile.delay-ms:15000}")
     public void tick() {
       if (!leader.isLeader()) return;
       try {
