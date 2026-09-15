@@ -15,6 +15,13 @@
       <artifactId>scheduler-persistence</artifactId>
       <version>${project.version}</version>
     </dependency>
+    <!-- test-only:活性回归测试需驱动 server Reconciler 验证对账回收语义。server 不依赖 worker,无循环。 -->
+    <dependency>
+      <groupId>dev.scheduler</groupId>
+      <artifactId>scheduler-server</artifactId>
+      <version>${project.version}</version>
+      <scope>test</scope>
+    </dependency>
     <dependency>
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-jdbc</artifactId>

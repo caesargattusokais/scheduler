@@ -20,7 +20,11 @@ import dev.scheduler.persistence.retry.FailureResolver;
 import dev.scheduler.persistence.retry.RetryPolicy;
 import java.time.Clock;
 import java.util.List;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
+import org.springframework.beans.factory.DisposableBean;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.ApplicationRunner;
 import org.springframework.context.annotation.Bean;
@@ -99,10 +103,11 @@ public class WorkerConfig {
     return new WorkLoop(worker);
   }
 
-  /** 心跳环。 */
+  /** 心跳环:专用守护线程解耦执行环,长运行 handler 阻塞 WorkLoop 时心跳仍推进(见 HeartbeatLoop 注释)。 */
   @Bean
-  HeartbeatLoop heartbeatLoop(WorkerRegistrar registrar) {
-    return new HeartbeatLoop(registrar);
+  HeartbeatLoop heartbeatLoop(WorkerRegistrar registrar,
+                              @Value("${scheduler.heartbeat.interval-ms:10000}") long intervalMs) {
+    return new HeartbeatLoop(registrar, intervalMs);
   }
 
   public static final class WorkLoop {
@@ -118,16 +123,35 @@ public class WorkerConfig {
     }
   }
 
-  public static final class HeartbeatLoop {
+  /** 心跳环。与认领/执行环(WorkLoop,共享 Spring 默认单调度线程)解耦:运行在自持的单线程守护调度器上。
+   *  否则长运行 handler 同步阻塞 WorkLoop.tick 时,同线程的心跳也无法触发,owner last_seen 冻结,会被 server
+   *  活性优先回收(findExpiredRunning)误判为死 worker,夺走健康 worker 的在途分片。此解耦是 renewer(租约)
+   *  之外的活性保障——长运行期间心跳仍推进,owner 活性不被误判。 */
+  public static final class HeartbeatLoop implements DisposableBean {
     private final WorkerRegistrar registrar;
-    HeartbeatLoop(WorkerRegistrar registrar) { this.registrar = registrar; }
-    @Scheduled(fixedDelayString = "${scheduler.heartbeat.interval-ms:10000}")
-    public void tick() {
+    /** 专用守护线程:长运行 handler 阻塞执行环时心跳照常触发。daemon 不阻塞 JVM 退出。 */
+    private final ScheduledExecutorService scheduler =
+        Executors.newSingleThreadScheduledExecutor(r -> {
+          Thread t = new Thread(r, "worker-heartbeat");
+          t.setDaemon(true);
+          return t;
+        });
+
+    HeartbeatLoop(WorkerRegistrar registrar, long intervalMs) {
+      this.registrar = registrar;
+      scheduler.scheduleWithFixedDelay(this::tick, intervalMs, intervalMs, TimeUnit.MILLISECONDS);
+    }
+
+    private void tick() {
       try {
         registrar.heartbeat();
       } catch (Throwable t) {
         log.warn("worker heartbeat loop tick failed; continuing next tick", t);
       }
+    }
+
+    @Override public void destroy() {
+      scheduler.shutdownNow();
     }
   }
 }

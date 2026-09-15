@@ -10,12 +10,15 @@ import dev.scheduler.core.Shard;
 import dev.scheduler.core.Task;
 import dev.scheduler.persistence.JdbcShardRepository;
 import dev.scheduler.persistence.JdbcTaskRepository;
+import dev.scheduler.persistence.JdbcWorkerRepository;
 import dev.scheduler.persistence.ShardRepository;
 import dev.scheduler.persistence.TaskRepository;
+import dev.scheduler.server.reconcile.Reconciler;
 import dev.scheduler.worker.handler.ExecutionHandler;
 import dev.scheduler.worker.handler.HandlerContext;
 import dev.scheduler.worker.handler.HandlerRegistry;
 import dev.scheduler.worker.handler.MapHandlerRegistry;
+import dev.scheduler.worker.registration.WorkerRegistrar;
 import dev.scheduler.persistence.retry.FailureResolver;
 import dev.scheduler.persistence.retry.RetryPolicy;
 import java.time.Clock;
@@ -25,6 +28,9 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.CancellationException;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -449,5 +455,97 @@ class ExecutorWorkerTest extends AbstractExecutorWorkerTest {
     assertEquals(4, claimed, "每个 shard 归属恰一个 worker,无重复认领 (disjoint + covering)");
     assertEquals(2, recA.calls.size(), "worker-a 跑了 2 片");
     assertEquals(2, recB.calls.size(), "worker-b 跑了 2 片");
+  }
+
+  /**
+   * §活性回归:长运行 handler(阻塞超过 stale+reconcile 窗口)期间,只要 owner 的独立心跳仍在推进(last_seen
+   * 新鲜),server Reconciler 的活性优先回收就绝不能误夺该健康 worker 的在途分片;handler 正常返回后落 SUCCESS,
+   * 不 FAILED / 不重试。这正是 worker 心跳环从 Spring 默认单调度线程解耦到自持守护线程(WorkerConfig.HeartbeatLoop)
+   * 所保障的回归。修复前心跳与 WorkLoop 同线程,handler 阻塞冻结 last_seen,本测试会 RED。
+   */
+  @Test void longRunningHandler_blockedBeyondReconcile_withFreshHeartbeat_isNotReclaimed() throws Exception {
+    final long taskId = createTask("block", 1, 1);
+    final long parentId = seedParentAndShards(taskId, 1);
+    final long shardId = shard(parentId, 0).id();
+
+    var entered = new CountDownLatch(1);
+    var release = new CountDownLatch(1);
+    var blockHandler = new ExecutionHandler() {
+      @Override public String ref() { return "block"; }
+      @Override public void handle(HandlerContext ctx) {
+        entered.countDown();
+        try { release.await(15, TimeUnit.SECONDS); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+      }
+    };
+    var registry = new MapHandlerRegistry(List.of(() -> blockHandler));
+    ExecutorWorker w = worker(registry, "worker-a");
+
+    // 线程 1:驱动 workOne()(认领 DUE 分片 → 运行长阻塞 handler)。
+    Thread runner = new Thread(() -> w.workOne(), "test-longrunner");
+    runner.start();
+    assertTrue(entered.await(5, TimeUnit.SECONDS), "handler 应已进入(分片已认领 RUNNING)");
+    Shard underRun = shards.findShard(shardId).orElseThrow();
+    assertEquals(ExecutionStatus.RUNNING, underRun.status(), "claim 后为 RUNNING");
+    assertEquals("worker-a", underRun.workerId(), "归 worker-a 所有");
+
+    // 租约拨到 DB 真实未来(worker claim 用固定时钟 CLOCK,早于 DB now(),故显式置未来租约),从而只留活性判别。
+    jdbc.update("UPDATE execution_shard SET lease_until = now() + interval '300 seconds' WHERE id = ?", shardId);
+
+    // 线程 2:模拟生产 HeartbeatLoop 的自持守护线程,在 handler 阻塞期间持续推进 owner 活性(last_seen=真实 now)。
+    WorkerRegistrar registrar =
+        new WorkerRegistrar(new JdbcWorkerRepository(jdbc), registry, "worker-a", Clock.systemUTC());
+    AtomicBoolean stop = new AtomicBoolean(false);
+    Thread heartbeat = new Thread(() -> {
+      while (!stop.get()) {
+        registrar.heartbeat();
+        try { Thread.sleep(100); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+      }
+    }, "test-heartbeat");
+    heartbeat.start();
+
+    try {
+      // 主线程(线程 3):在 handler 仍阻塞、owner 心跳新鲜时跑 server Reconciler,stale 窗口极小(1s)。
+      Reconciler rc = new Reconciler(tasks, shards,
+          new FailureResolver(shards, new RetryPolicy(), CLOCK), "reconciler", 1);
+      int n = rc.scanOnce();
+
+      assertEquals(0, n, "心跳新鲜的健康长运行分片不得被活性优先回收");
+      assertEquals(ExecutionStatus.RUNNING, shards.findShard(shardId).orElseThrow().status(),
+          "仍 RUNNING,未被夺/未回写 FAILED");
+      assertEquals(0L, shardOutcomeCount(shardId, "FAILED"), "无 FAILED outcome");
+      assertEquals(0L, shardOutcomeCount(shardId, "DUE"), "无重试 DUE outcome");
+    } finally {
+      stop.set(true);
+      heartbeat.join(5000);
+      release.countDown(); // 放行 handler
+    }
+
+    runner.join(10000);
+    assertFalse(runner.isAlive(), "workOne 应已正常返回");
+    assertEquals(ExecutionStatus.SUCCESS, shards.findShard(shardId).orElseThrow().status(),
+        "长 handler 正常返回 → SUCCESS,未被活性误夺/重试");
+    assertEquals(1L, shardOutcomeCount(shardId, "SUCCESS"), "恰好落一条 SUCCESS");
+  }
+
+  /** §活性正控:owner 心跳已停止(last_seen 陈旧)即使租约仍有效,活性优先回收也要立即接管(零永久 RUNNING)。 */
+  @Test void deadWorker_heartbeatStale_reclaimedBeforeLeaseExpiry() throws Exception {
+    long taskId = createTask("block", 1, 1);
+    long parentId = seedParentAndShards(taskId, 1);
+    long shardId = shard(parentId, 0).id();
+    String owner = "w-gone";
+    // 真实 claim 语义:worker_id=owner、RUNNING、租约仍有效(+60s),但心跳已失联 > stale=1。
+    jdbc.update("UPDATE execution_shard SET status='RUNNING', worker_id=?,"
+        + " lease_until=now()+interval '300 seconds', attempt=1 WHERE id=?", owner, shardId);
+    jdbc.update("INSERT INTO worker (id, refs, last_seen, status)"
+        + " VALUES (?, '', now() - interval '2 minutes', 'ALIVE')", owner);
+
+    Reconciler rc = new Reconciler(tasks, shards,
+        new FailureResolver(shards, new RetryPolicy(), CLOCK), "reconciler", 1);
+    int n = rc.scanOnce();
+
+    assertEquals(1, n, "心跳失联 owner → 租约未到期前即被活性优先回收");
+    Shard s = shards.findShard(shardId).orElseThrow();
+    assertEquals(ExecutionStatus.FAILED, s.status(), "活性优先回收 → FAILED");
+    assertEquals(1L, shardOutcomeCount(shardId, "FAILED"), "回收落 FAILED outcome");
   }
 }
