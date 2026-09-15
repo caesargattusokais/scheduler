@@ -52,11 +52,14 @@ public interface ShardRepository {
    *  已终态(如写回 SUCCESS)或被接管(worker_id 变更)则 0 行 → 静默返回 false。无 outcome 行。 */
   boolean renewLease(long shardId, String ownerWorkerId, Instant leaseUntil);
 
-  /** 对账器扫描到的孤儿 RUNNING shard:租约已过期仍 RUNNING。只投影对账所需的 id 与 attempt。 */
+  /** 对账器扫描到的孤儿 RUNNING shard:租约已过期仍 RUNNING,或 owner worker 心跳失联(stale)。只投影对账所需的 id 与 attempt。 */
   record ExpiredShard(long id, int attempt) {}
 
-  /** 某任务下租约已过期(lease_until<=now())且仍 RUNNING 的孤儿 shard;由 Reconciler 逐任务回收。 */
-  List<ExpiredShard> findExpiredRunning(long taskId);
+  /** 某任务下需回收的孤儿 RUNNING shard,由 Reconciler 逐任务回收。判定双信号:
+   *  ① 租约已过期(lease_until<=now());② owner worker 心跳失联(worker.last_seen 距今 > staleAfterSeconds 秒或
+   *  status 非 'ALIVE',仅当 worker_id 非空时判定——worker_id 为空的 RUNNING 异常行走租约兜底)。
+   *  worker 判活口径与 server active 指标一致。 */
+  List<ExpiredShard> findExpiredRunning(long taskId, int staleAfterSeconds);
 
   /** 显式状态迁移(非持有者专属):对账回收/控制台取消用。非法迁移抛 IllegalStateException;CAS 0 行=行已被他方改走
    *  → 静默返回 false,不落误导性 outcome。 */

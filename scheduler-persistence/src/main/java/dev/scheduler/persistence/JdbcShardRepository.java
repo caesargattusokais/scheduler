@@ -217,11 +217,18 @@ public class JdbcShardRepository implements ShardRepository {
         java.sql.Timestamp.from(leaseUntil), shardId, ownerWorkerId) == 1;
   }
 
-  @Override public List<ExpiredShard> findExpiredRunning(long taskId) {
+  @Override public List<ExpiredShard> findExpiredRunning(long taskId, int staleAfterSeconds) {
     return jdbc.query(
         "SELECT s.id, s.attempt FROM execution_shard s JOIN execution e ON e.id = s.execution_id"
-            + " WHERE e.task_id=? AND s.status='RUNNING' AND s.lease_until <= now()",
-        (rs, i) -> new ExpiredShard(rs.getLong("id"), rs.getInt("attempt")), taskId);
+            + " WHERE e.task_id=? AND s.status='RUNNING'"
+            + " AND ( s.lease_until <= now()"
+            + "     OR ( s.worker_id IS NOT NULL AND NOT EXISTS ("
+            + "           SELECT 1 FROM worker w"
+            + "            WHERE w.id = s.worker_id"
+            + "              AND w.last_seen >= now() - make_interval(secs => ?)"
+            + "              AND w.status = 'ALIVE' ) ) )",
+        (rs, i) -> new ExpiredShard(rs.getLong("id"), rs.getInt("attempt")),
+        taskId, (double) staleAfterSeconds);
   }
 
   @Override public boolean markStatus(long shardId, ExecutionStatus to, String workerId, String detail) {

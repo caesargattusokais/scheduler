@@ -695,4 +695,58 @@ class JdbcShardRepositoryTest extends AbstractPostgresTest {
     assertFalse(shardRepo.requeueShard(shard0), "非 FAILED → CAS 0 行 → false");
     assertEquals(ExecutionStatus.RUNNING, shardRepo.findShard(shard0).get().status());
   }
+
+  // ---- v2 可靠性纵深 §1:findExpiredRunning 双信号 ----
+
+  private void seedWorker(String id, int lastSeenSecondsAgo) {
+    jdbc.update("INSERT INTO worker (id, refs, last_seen, status) VALUES (?, '',"
+        + " now() - make_interval(secs => ?), 'ALIVE')", id, (double) lastSeenSecondsAgo);
+  }
+
+  /** 活性优先:owner worker 心跳失联(last_seen 距今>30s)但租约未过期 → 认定孤儿。 */
+  @Test void findExpiredRunning_ownerHeartbeatStale_isReturned() {
+    long taskId = newTask(1, 8);
+    long parentId = seedParentAndShards(taskId, 1);
+    long sid = shard(parentId, 0).id();
+    claimShard(sid, taskId, "w-stale", 8);   // RUNNING, worker_id='w-stale'
+    seedWorker("w-stale", 120);              // last_seen 120s 前 > stale(30)
+
+    boolean hit = shardRepo.findExpiredRunning(taskId, 30).stream().anyMatch(e -> e.id() == sid);
+    assertTrue(hit, "owner 心跳失联 → 该行列入孤儿(活性优先)");
+  }
+
+  /** 活性负例:owner 心跳新鲜(距今<30s)且租约未过期 → 不回收。 */
+  @Test void findExpiredRunning_ownerHeartbeatFresh_isSkipped() {
+    long taskId = newTask(1, 8);
+    long parentId = seedParentAndShards(taskId, 1);
+    long sid = shard(parentId, 0).id();
+    claimShard(sid, taskId, "w-fresh", 8);   // RUNNING, worker_id='w-fresh'
+    seedWorker("w-fresh", 5);                // last_seen 5s 前 < stale(30)
+
+    assertTrue(shardRepo.findExpiredRunning(taskId, 30).isEmpty(), "owner 心跳新鲜 → 不回收");
+  }
+
+  /** 兜底路径保留:租约已过期即使 owner 心跳新鲜 → 仍回收(lease 兜底)。 */
+  @Test void findExpiredRunning_leaseExpiredButOwnerFresh_stillReturned() {
+    long taskId = newTask(1, 8);
+    long parentId = seedParentAndShards(taskId, 1);
+    long sid = shard(parentId, 0).id();
+    claimShard(sid, taskId, "w-keep", 8);    // RUNNING, worker_id='w-keep'
+    seedWorker("w-keep", 5);
+    jdbc.update("UPDATE execution_shard SET lease_until = now() - interval '1 hour' WHERE id=?", sid);
+
+    boolean hit = shardRepo.findExpiredRunning(taskId, 30).stream().anyMatch(e -> e.id() == sid);
+    assertTrue(hit, "租约过期即使 owner 新鲜 → lease 兜底仍回收");
+  }
+
+  /** 兜底:worker_id IS NULL 的 RUNNING(异常数据/测试播种)只走租约;租约新鲜 → 不回收。 */
+  @Test void findExpiredRunning_withoutOwnerId_onlyLeaseSignalApplies() {
+    long taskId = newTask(1, 8);
+    long parentId = seedParentAndShards(taskId, 1);
+    long sid = shard(parentId, 0).id();
+    jdbc.update("UPDATE execution_shard SET status='RUNNING', worker_id=NULL,"
+        + " lease_until=now()+interval '60 seconds' WHERE id=?", sid);
+
+    assertTrue(shardRepo.findExpiredRunning(taskId, 30).isEmpty(), "worker_id 空 + 租约新鲜 → 不回收");
+  }
 }
