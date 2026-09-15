@@ -494,6 +494,9 @@ class ExecutorWorkerTest extends AbstractExecutorWorkerTest {
     // 线程 2:模拟生产 HeartbeatLoop 的自持守护线程,在 handler 阻塞期间持续推进 owner 活性(last_seen=真实 now)。
     WorkerRegistrar registrar =
         new WorkerRegistrar(new JdbcWorkerRepository(jdbc), registry, "worker-a", Clock.systemUTC());
+    // 先同步落一次心跳担保 worker 行 + 新鲜 last_seen 在 scanOnce 前已提交,消除首心跳与 `reconciler.stale=1`
+    // 判活查询的写读竞争(否则扫描可能跑赢首心跳、误判失联而偶发失败,见 SDD ledger)。
+    registrar.heartbeat();
     AtomicBoolean stop = new AtomicBoolean(false);
     Thread heartbeat = new Thread(() -> {
       while (!stop.get()) {
