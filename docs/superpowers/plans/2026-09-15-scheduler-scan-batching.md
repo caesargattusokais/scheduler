@@ -104,7 +104,10 @@ Expected: FAIL — `TaskRepository`/`DagRepository` 无 `findCronEnabledPage`/`f
 
 `JdbcTaskRepositoryTest` 中旧 `findCronEnabled()` 的两处断言(第 19、21 行)改用 `findCronEnabledPage(0L, 10)`(含义不变:enabled 计数),否则旧法被删后编译失败。若 test 里有直接调用旧 DAG finder 也一并改页内法。
 
-移除三个新法子无方引用的旧法:`findCronEnabled`、`findCronEnabledDags`、`findActiveRuns`(接口 + 实现)。
+> **Ruling(pre-flight):** 本任务**只新增三个 page finder,不删除旧法**。删除 `findCronEnabled`、
+> `findCronEnabledDags`、`findActiveRuns` 及对应的持久层测试引用更新,移入 Task 2(见下)。原因:这三个旧法在
+> `DagEngine`/`TriggerEngine`(server 模块)仍需调用到 Task 2 切换为止;T1 若删旧法会让 server 模块在某 task
+> 间提交处无法编译。分拆后每个提交各自可编译。
 
 - [ ] **Step 4: 运行验证通过**
 
@@ -126,11 +129,13 @@ git commit -m "feat(persistence): 游标分批 finder — findCronEnabled/findAc
 - Modify: `scheduler-server/src/main/java/dev/scheduler/server/trigger/TriggerEngine.java:35,40`
 - Modify: `scheduler-server/src/main/java/dev/scheduler/server/dag/DagEngine.java:43,63,80`
 - Modify: `scheduler-server/src/main/java/dev/scheduler/server/config/Beans.java:90-99`
+- Remove-orphaned (persistence): `TaskRepository`/`JdbcTaskRepository`/`DagRepository`/`JdbcDagRepository` 的旧 3 法 + `JdbcTaskRepositoryTest:19,21` 改用 page 法
 - Test: `scheduler-server/src/test/java/dev/scheduler/server/trigger/TriggerEngineTest.java`、`scheduler-server/src/test/java/dev/scheduler/server/dag/DagEngineTest.java`
 
 **Interfaces:**
-- Consumes: 三个 `...Page(afterId, limit)` finder(Task 1)。`Limit.of()/Integer` 无跨任务新类型。
+- Consumes: 三个 `...Page(afterId, limit)` finder(Task 1)。
 - Produces: 构造函数新增末参 `int scanBatchSize`(6 参)。Engine 私有游标字段 + 页推进逻辑。
+- **本任务(作为唯一使用方)删除 Task 1 之外的三个旧 finder,并同步更新持久层测试引用**(见 Step 3 收尾;pre-flight ruling)。
 
 - [ ] **Step 1: 写失败的引擎分批测试**
 
@@ -245,6 +250,11 @@ Expected: FAIL — `TriggerEngine`/`DagEngine` 无 6 参构造;既有 5 参构�
 ```
 
 既有测试的 5 参构造全部补 `, 200`(TriggerEngineTest 第 53/72/89/111/131 行;DagEngineTest 第 97 行 helper),使其语义不变。
+
+**收尾(pre-flight ruling):删除被切换后孤立的三个旧 finder**,并更新唯一持久层测试引用,使分支无死方法、每提交可编译:
+
+- `TaskRepository.findCronEnabled` + `JdbcTaskRepository` 实现:删除;`JdbcTaskRepositoryTest:19,21` 的 `repo.findCronEnabled(...)` 改为 `repo.findCronEnabledPage(0L, 10)(...)`(断言含义不变)。
+- `DagRepository.findCronEnabledDags`/`findActiveRuns` + `JdbcDagRepository` 实现:删除(无其它调用方)。
 
 - [ ] **Step 4: 运行验证通过**
 
