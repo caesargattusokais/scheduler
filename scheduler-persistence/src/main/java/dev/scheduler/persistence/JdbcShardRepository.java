@@ -428,11 +428,13 @@ public class JdbcShardRepository implements ShardRepository {
   }
 
   @Override public boolean requeueShard(long shardId) {
-    // FAILED → DUE 并重置 attempt/next_retry_at/dead_letter。CAS on status='FAILED':0 行=竞态/非 FAILED → false。
+    // FAILED → DUE 并重置 attempt/next_retry_at/dead_letter/cancel_requested(MED-2:不清 cancel 标记会让
+    //  先前被协作取消标记、后以真实错误失败的片重排后立即又被判取消)。CAS on status='FAILED':0 行=竞态/非 FAILED → false。
     final boolean[] ok = {false};
     tx.executeWithoutResult(s -> {
       if (jdbc.update(
-          "UPDATE execution_shard SET status='DUE', attempt=0, next_retry_at=NULL, dead_letter=false, queued_at=now()"
+          "UPDATE execution_shard SET status='DUE', attempt=0, next_retry_at=NULL, dead_letter=false,"
+              + " cancel_requested=false, queued_at=now()"
               + " WHERE id=? AND status='FAILED'", shardId) == 1) {
         jdbc.update("INSERT INTO execution_shard_outcome (shard_id, status, detail) VALUES (?,?,?)",
             shardId, "DUE", "requeue");

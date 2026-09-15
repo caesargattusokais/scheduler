@@ -672,6 +672,20 @@ class JdbcShardRepositoryTest extends AbstractPostgresTest {
     assertEquals(1, requeue, "落 DUE('requeue') outcome");
   }
 
+  /** MED-2 回归:先前被协作取消标记(cancel_requested=true)、后以真实错误失败(FAILED)的片,
+   *   requeue 必须清掉 cancel_requested,否则重排后立即又被判协作取消,死锁在 DUE↔CANCEL 循环。 */
+  @Test void requeueClearsCancelRequested() {
+    long taskId = newTask(1, 8);
+    long parentId = seedParentAndShards(taskId, 1);
+    long shard0 = shard(parentId, 0).id();
+    claimShard(shard0, taskId, "w1", 8); // RUNNING, attempt -> 1
+    jdbc.update("UPDATE execution_shard SET status='FAILED', cancel_requested=true WHERE id=?", shard0);
+
+    assertTrue(cancelRequested(shard0), "前置:片已被协作取消标记");
+    assertTrue(shardRepo.requeueShard(shard0), "FAILED → requeue 成功");
+    assertFalse(cancelRequested(shard0), "requeue 应清 cancel_requested 标记");
+  }
+
   @Test void requeueShardOnNonFailed_false() {
     long taskId = newTask(1, 8);
     long parentId = seedParentAndShards(taskId, 1);
