@@ -19,6 +19,7 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.server.ResponseStatusException;
+import org.springframework.scheduling.support.CronExpression;
 
 /** 任务控制面(spec §5.1):创建/列表/详情/暂停-恢复/手动触发。 */
 @RestController
@@ -56,7 +57,7 @@ public class TaskController {
     }
     requireAvailableHandlerRef(req.handlerRef());
     checkDefinition(req.name(), req.handlerRef(), req.cron(), req.shardCount(),
-        req.timeoutSeconds(), req.maxRetries(), req.backoffMs());
+        req.timeoutSeconds(), req.maxRetries(), req.backoffMs(), req.maxActiveConcurrent());
     Task created = tasks.create(new Task(
         null, req.name(), req.kind() == null ? "cron" : req.kind(), req.handlerRef(), req.cron(),
         req.shardCount() == null ? 1 : req.shardCount(),
@@ -82,7 +83,7 @@ public class TaskController {
     }
     requireAvailableHandlerRef(req.handlerRef());
     checkDefinition(req.name(), req.handlerRef(), req.cron(), req.shardCount(),
-        req.timeoutSeconds(), req.maxRetries(), req.backoffMs());
+        req.timeoutSeconds(), req.maxRetries(), req.backoffMs(), req.maxActiveConcurrent());
     Task updated = new Task(id, req.name(), req.kind() == null ? existing.kind() : req.kind(),
         req.handlerRef(), req.cron(),
         req.shardCount() == null ? existing.shardCount() : req.shardCount(),
@@ -177,17 +178,24 @@ public class TaskController {
     }
   }
 
-  /** 定义域数值合法性:负值即 400;cron 必须 6/7 字段。 */
+  /** 定义域数值合法性:负值即 400;cron 必须 6/7 字段且可被 Spring 解析(字段值非法提前 400,防坏 cron 入库
+   *  运行时级联拖垮触发扫描)。maxActiveConcurrent 为并发配额,必须 >= 1(0/负会让 claim 闸门恒 false → 任务
+   *  永久卡 DUE)。 */
   static void checkDefinition(String name, String handlerRef, String cron,
-      Integer shardCount, Integer timeoutSeconds, Integer maxRetries, Long backoffMs) {
+      Integer shardCount, Integer timeoutSeconds, Integer maxRetries, Long backoffMs,
+      Integer maxActiveConcurrent) {
     if (timeoutSeconds != null && timeoutSeconds < 0) throw new IllegalArgumentException("timeoutSeconds must be >= 0");
     if (backoffMs != null && backoffMs < 0) throw new IllegalArgumentException("backoffMs must be >= 0");
     if (maxRetries != null && maxRetries < 0) throw new IllegalArgumentException("maxRetries must be >= 0");
     if (shardCount != null && shardCount < 1) throw new IllegalArgumentException("shardCount must be >= 1");
+    if (maxActiveConcurrent != null && maxActiveConcurrent < 1) {
+      throw new IllegalArgumentException("maxActiveConcurrent must be >= 1");
+    }
     validateCron(cron);
   }
 
-  /** 本项目 cron 一律 6 字段(或 7 字段带年);5 字段会被 Spring 6 解析器直接抛异常处决在前面。 */
+  /** 本项目 cron 一律 6 字段(或 7 字段带年);5 字段会被 Spring 6 解析器直接抛异常处决在前面。
+   *  字段数合法后仍须 C 解析预检——cron 字段值(如秒 >= 60)非法时,解析要在触发扫描线程才炸并拖累整批,这里提前拦。 */
   static void validateCron(String cron) {
     int fields = cron.trim().split("\\s+").length;
     if (fields != 6 && fields != 7) {
@@ -195,6 +203,7 @@ public class TaskController {
           "cron must be a 6-field (sec min hour dom mon dow) or 7-field (+year) expression, got "
               + fields + " fields: " + cron);
     }
+    CronExpression.parse(cron); // cron 字段值非法 → 提前 400(而非运行时触发线程级联抛)
   }
 
   private static ResponseStatusException notFound(String what) {

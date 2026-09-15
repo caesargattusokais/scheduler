@@ -261,6 +261,30 @@ class ApiIntegrationTest {
         .andExpect(status().isBadRequest()); // 镜像 maxRetries/timeout 等校验拒绝路径
   }
 
+  /** 边界:maxActiveConcurrent 为 claim 并发配额,须 >= 1——0/负会让 claim 的 active.c < maxConcurrent 恒 false,
+   *  该任务所有 shard 永久卡 DUE 且不被回收(对账器只管 RUNNING),故禁建。 */
+  @Test
+  void createTask_maxActiveConcurrentZero_returnsBadRequest() throws Exception {
+    String body = "{\"name\":\"zero-quota-task\",\"kind\":\"cron\",\"handlerRef\":\"demo\","
+        + "\"cron\":\"" + CRON + "\",\"shardCount\":1,\"maxActiveConcurrent\":0}";
+    mvc.perform(post("/api/v1/tasks").contentType(MediaType.APPLICATION_JSON).content(body))
+        .andExpect(status().isBadRequest());
+    String neg = "{\"name\":\"neg-quota-task\",\"kind\":\"cron\",\"handlerRef\":\"demo\","
+        + "\"cron\":\"" + CRON + "\",\"shardCount\":1,\"maxActiveConcurrent\":-3}";
+    mvc.perform(post("/api/v1/tasks").contentType(MediaType.APPLICATION_JSON).content(neg))
+        .andExpect(status().isBadRequest());
+  }
+
+  /** 边界:cron 字段值非法(秒 >= 60,字段数仍是 6)不得建任务——否则坏 cron 落库,触发扫描线程
+   *  解析时级联拖累本 tick 其它任务触发。 */
+  @Test
+  void createTask_badCronFieldValue_returnsBadRequest() throws Exception {
+    String body = "{\"name\":\"bad-cron-task\",\"kind\":\"cron\",\"handlerRef\":\"demo\","
+        + "\"cron\":\"60 * * * * *\",\"shardCount\":1}";
+    mvc.perform(post("/api/v1/tasks").contentType(MediaType.APPLICATION_JSON).content(body))
+        .andExpect(status().isBadRequest());
+  }
+
   @Test
   void putEditsTask() throws Exception {
     long id = postTask("put-edit"); // 复用本类既有建 task 辅助

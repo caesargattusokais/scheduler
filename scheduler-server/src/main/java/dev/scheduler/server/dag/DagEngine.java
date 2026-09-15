@@ -24,6 +24,8 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.scheduling.support.CronExpression;
 
 /** 工作流调度引擎(spec §2/§3):单 scan 两阶段——(1) 触发(leader 门控,cron tick → 幂等建 dag_run +
@@ -31,6 +33,7 @@ import org.springframework.scheduling.support.CronExpression;
  *  shards 只读派生节点终态、全节点终态后终结 dag_run,镜像 Reconciler 的父汇聚但作用对象是 dag 表)。
  *  DagEngine 是 dag 运行表唯一写者;worker/Reconciler 对 DAG 无感知,M4 不改执行运行时。 */
 public class DagEngine {
+  private static final Logger log = LoggerFactory.getLogger(DagEngine.class);
   private final DagRepository dags;
   private final TaskRepository tasks;
   private final ShardRepository shards;
@@ -58,10 +61,16 @@ public class DagEngine {
     ZoneId zone = clock.getZone();
     ZonedDateTime now = clock.instant().atZone(zone);
     for (Dag d : dags.findCronEnabledDags()) {
-      var cron = CronExpression.parse(d.cron());
-      ZonedDateTime fired = cron.next(now.minusSeconds(61));
-      if (fired != null && !fired.isAfter(now)) {
-        dags.createScheduledRun(d.id(), fired.toInstant());
+      try {
+        var cron = CronExpression.parse(d.cron());
+        ZonedDateTime fired = cron.next(now.minusSeconds(61));
+        if (fired != null && !fired.isAfter(now)) {
+          dags.createScheduledRun(d.id(), fired.toInstant());
+        }
+      } catch (RuntimeException badCron) {
+        // 单条坏 cron(历史存量)只跳过该 DAG,不拖垮本 tick 其余 DAG 触发/传播。新坏 cron 已在建/改时被预检拦下。
+        log.warn("skipping cron trigger for dag {} due to bad cron '{}': {}",
+            d.id(), d.cron(), badCron.toString());
       }
     }
   }
