@@ -173,6 +173,10 @@ public class JdbcShardRepository implements ShardRepository {
     java.sql.Timestamp lease = java.sql.Timestamp.from(leaseUntil);
     final boolean[] ok = {false};
     tx.executeWithoutResult(s -> {
+      // MED-1:任务行级锁作「每任务串行化锚点」——同一任务的不同 execution/shard 并发 claim 在此互斥。
+      // 被阻塞者对端提交后重读 active 已含新 RUNNING 行,故 active.c < maxConcurrent 读到的是含已提交
+      // 认领的计数 → 硬配额(不再并发突发超配)。worker 是唯一把 DUE→RUNNING 的路径,故该锁覆盖全部增量。
+      jdbc.query("SELECT id FROM app_task WHERE id=? FOR UPDATE", (rs, i) -> rs.getLong(1), taskId);
       if (jdbc.update(update, taskId, workerId, lease, shardId, taskId, maxConcurrent) == 1) {
         jdbc.update("INSERT INTO execution_shard_outcome (shard_id, status, detail) VALUES (?,?,?)",
             shardId, "RUNNING", "claim");

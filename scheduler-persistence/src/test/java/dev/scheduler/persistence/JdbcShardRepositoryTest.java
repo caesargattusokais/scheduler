@@ -7,6 +7,9 @@ import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -264,6 +267,36 @@ class JdbcShardRepositoryTest extends AbstractPostgresTest {
     // 配额已饱和(countActive==1):第二 shard 无法在 maxConcurrent=1 下被领取
     assertFalse(claimShard(shard1, taskId, "w2", 1));
     assertEquals(ExecutionStatus.DUE, shardRepo.findShard(shard1).get().status());
+  }
+
+  /** MED-1 硬配额:同一任务的两个不同 shard 在 maxConcurrent=1 下并发认领,行级锁串行化后恰有一个成功。
+   *  并发突发不再超配(读后写竞态由 app_task 行锁消除);该断言是硬不变量,锁缺失时可能同时成功,锁在则必恰一。 */
+  @Test void concurrentClaims_respectHardQuota() throws Exception {
+    long taskId = newTask(2, 1); // maxConcurrent=1,两个 DUE shard
+    long parentId = seedParentAndShards(taskId, 2);
+    long shard0 = shard(parentId, 0).id();
+    long shard1 = shard(parentId, 1).id();
+
+    int threads = 2;
+    var pool = Executors.newFixedThreadPool(threads);
+    var start = new CountDownLatch(1);
+    AtomicInteger succeeded = new AtomicInteger();
+    try {
+      Runnable claim0 = () -> { awaitO(start); if (claimShard(shard0, taskId, "w1", 1)) succeeded.incrementAndGet(); };
+      Runnable claim1 = () -> { awaitO(start); if (claimShard(shard1, taskId, "w2", 1)) succeeded.incrementAndGet(); };
+      pool.submit(claim0);
+      pool.submit(claim1);
+      start.countDown(); // 同时放行,制造并发认领窗口
+      Thread.sleep(1500);
+    } finally {
+      pool.shutdown();
+    }
+    assertEquals(1, succeeded.get(), "maxConcurrent=1 下并发认领两个 shard,行级锁应保证恰有一个成功");
+    assertEquals(1, shardRepo.countActive(taskId), "超配额 shard 不得进入 RUNNING");
+  }
+
+  private static void awaitO(CountDownLatch l) {
+    try { l.await(); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
   }
 
   /** 全局口径:跨全部任务数 RUNNING 且租约有效的 shard(指标卡;不受任务创建时机影响)。 */
