@@ -107,6 +107,20 @@ class JdbcDagRepositoryTest extends AbstractPostgresTest {
     assertEquals(0, dagRepo.findAllDags().size(), "atomic rollback — no dag persists");
   }
 
+  /** 游标续扫:两条 PENDING run 逐页取,第二页不重复第一页、扫尽后空页回卷。 */
+  @Test void findActiveRunsPage_resumesPastCursor_exhaustsToEmpty() {
+    long dagId = newDag();
+    dagRepo.createScheduledRun(dagId, Instant.ofEpochMilli(1L));
+    dagRepo.createScheduledRun(dagId, Instant.ofEpochMilli(2L));
+    var all = dagRepo.findActiveRunsPage(0L, 1);
+    assertEquals(1, all.size());
+    var page2 = dagRepo.findActiveRunsPage(all.get(0).id(), 1);
+    assertEquals(1, page2.size());
+    assertFalse(page2.get(0).id() == all.get(0).id(), "第二页不重复第一页");
+    var tail = dagRepo.findActiveRunsPage(page2.get(0).id(), 10);
+    assertTrue(tail.isEmpty(), "扫尽");
+  }
+
   @Test void createScheduledRun_isIdempotentByKey() {
     long dagId = newDag();
     Instant trig = Instant.ofEpochMilli(123456789L);

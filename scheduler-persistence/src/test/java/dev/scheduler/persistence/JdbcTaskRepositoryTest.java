@@ -21,6 +21,22 @@ class JdbcTaskRepositoryTest extends AbstractPostgresTest {
     assertTrue(repo.findCronEnabled().isEmpty());
   }
 
+  @Test void findCronEnabledPage_resumesPastCursor_withoutSkipping() {
+    var repo = new JdbcTaskRepository(jdbc);
+    repo.create(new Task(null, "t1", "cron", "demo", "*/5 * * * *",
+        1, 300, 0, 1000, null, 8, true, false));
+    repo.create(new Task(null, "t2", "cron", "demo", "*/5 * * * *",
+        1, 300, 0, 1000, null, 8, true, false));
+    var all = repo.findCronEnabledPage(0L, 1);
+    assertEquals(1, all.size());
+    assertEquals(repo.findAll().get(0).id(), all.get(0).id());
+    var page2 = repo.findCronEnabledPage(all.get(0).id(), 1);
+    assertEquals(1, page2.size());
+    assertFalse(page2.get(0).id() == all.get(0).id()); // 第二页不重复第一页
+    var tail = repo.findCronEnabledPage(page2.get(0).id(), 10);
+    assertTrue(tail.isEmpty()); // 扫尽
+  }
+
   @Test void update() {
     var repo = new JdbcTaskRepository(jdbc);
     var c = repo.create(new Task(null, "t1", "cron", "demo", "0 */5 * * * *",

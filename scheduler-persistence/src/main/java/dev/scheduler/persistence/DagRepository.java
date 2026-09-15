@@ -31,6 +31,8 @@ public interface DagRepository {
   long countDags(String name);
   /** enabled 且非 paused 且 cron 非空(镜像 TaskRepository.findCronEnabled)。 */
   List<Dag> findCronEnabledDags();
+  /** 游标分批:返回 id>afterId 的 enabled cron DAG,至多 limit 行;afterId=0 从头。 */
+  List<Dag> findCronEnabledDagsPage(long afterId, int limit);
   List<DagNode> findNodes(long dagId);
   List<DagEdge> findEdges(long dagId);
   void setPaused(long dagId, boolean paused);
@@ -50,6 +52,8 @@ public interface DagRepository {
   long countRuns(Long dagId, String status);
   /** 未终态 run(stored status='PENDING'),由 DagEngine 每周期推进。 */
   List<DagRun> findActiveRuns();
+  /** 游标分批:返回 id>afterId 的 PENDING 活跃 run,至多 limit 行;afterId=0 从头。 */
+  List<DagRun> findActiveRunsPage(long afterId, int limit);
   /** 某 run 的全部节点,ORDER BY sort_order, id。 */
   List<DagRunNode> findNodesOfRun(long runId);
   /** 某 run 的非终态节点(status IN (PENDING, RUNNING)),取消级联用。 */

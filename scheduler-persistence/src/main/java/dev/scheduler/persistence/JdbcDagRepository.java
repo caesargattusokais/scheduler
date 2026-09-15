@@ -151,6 +151,11 @@ public class JdbcDagRepository implements DagRepository {
     return jdbc.query(
         "SELECT * FROM app_dag WHERE enabled AND NOT paused AND cron IS NOT NULL ORDER BY id", DAG_MAP);
   }
+  @Override public List<Dag> findCronEnabledDagsPage(long afterId, int limit) {
+    return jdbc.query(
+        "SELECT * FROM app_dag WHERE enabled AND NOT paused AND cron IS NOT NULL AND id > ?"
+            + " ORDER BY id LIMIT ?", DAG_MAP, afterId, limit);
+  }
   @Override public List<DagNode> findNodes(long dagId) {
     return jdbc.query("SELECT * FROM app_dag_node WHERE dag_id=? ORDER BY sort_order, id", NODE_MAP, dagId);
   }
@@ -221,6 +226,11 @@ public class JdbcDagRepository implements DagRepository {
   }
   @Override public List<DagRun> findActiveRuns() {
     return jdbc.query("SELECT * FROM dag_run WHERE status='PENDING' ORDER BY id", RUN_MAP);
+  }
+  @Override public List<DagRun> findActiveRunsPage(long afterId, int limit) {
+    return jdbc.query(
+        "SELECT * FROM dag_run WHERE status='PENDING' AND id > ? ORDER BY id LIMIT ?",
+        RUN_MAP, afterId, limit);
   }
   @Override public List<DagRunNode> findNodesOfRun(long runId) {
     return jdbc.query(

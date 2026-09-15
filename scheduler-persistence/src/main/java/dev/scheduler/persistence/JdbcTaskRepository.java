@@ -46,6 +46,11 @@ public class JdbcTaskRepository implements TaskRepository {
   @Override public List<Task> findCronEnabled() {
     return jdbc.query("SELECT * FROM app_task WHERE enabled AND NOT paused AND cron IS NOT NULL", MAP);
   }
+  @Override public List<Task> findCronEnabledPage(long afterId, int limit) {
+    return jdbc.query(
+        "SELECT * FROM app_task WHERE enabled AND NOT paused AND cron IS NOT NULL AND id > ?"
+            + " ORDER BY id LIMIT ?", MAP, afterId, limit);
+  }
   @Override public List<Task> findAll() { return jdbc.query("SELECT * FROM app_task ORDER BY id", MAP); }
 
   /** WHERE 片段(name ILIKE / paused 过滤),与 {@link #whereArgs} 配套。 */
