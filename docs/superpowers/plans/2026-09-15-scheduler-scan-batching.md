@@ -275,4 +275,4 @@ git commit -m "feat(server): 触发/DAG 扫描改游标分批 — 单 tick 不�
 - **Spec coverage:** §4 三个循环(TriggerEngine 任务、DagEngine DAG 触发、DagEngine 传播)全覆盖;游标 + 分批 + 崩中可续(幂等重扫)全落地。§1-3(reliability 主干)已合入,不受影响。
 - **Placeholder scan:** 无 TBD/TODO;每步含可运行代码与确切文件:行。测试断言明确(非空断言)。
 - **Type consistency:** 三 finder 签名 `(long afterId, int limit)` 引擎侧调用一致;`lastTaskId`/`lastDagId`/`lastRunId` 与各 finder 的 id 类型(long)一致;构造末参 `scanBatchSize` 两引擎一致(beans 传 200、测试传 1/200)。
-- **已知取舍(记 ledger,非缺陷):** 批上限 200 × 5s 周期 → 全量 pass 时延 = ceil(N/200)×5s;超大任务集(数千+)下尾部任务的分钟窗触发可能被延迟跨窗。这是「单 tick 有界」与「及时触发」的固有权衡,§4 定位低优先短活、接受该权衡;幂等键保证不重复、不永久丢失。
+- **已知取舍(记 ledger,非缺陷):** 批上限 200 × 5s 周期 → 全量 pass 时延 = ceil(N/200)×5s。回卷保证**每个任务每 pass 必然重扫到 → 不重、不漏扫、无永久丢失**;但 N≳2400 时个别 cron 即时 tick 的 61s 窗口可能在任务离页期间闭合 → 该即时 tick 被**丢弃而非仅延迟**(下个 cron 周期自愈)。这是「单 tick 有界」与「及时触发」的固有权衡,§4 定位低优先短活、接受该权衡;幂等键保证重复触发不产生重复父执行。
