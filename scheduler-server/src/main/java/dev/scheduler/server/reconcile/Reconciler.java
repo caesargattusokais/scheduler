@@ -22,13 +22,15 @@ public class Reconciler {
   private final ShardRepository shards;
   private final FailureResolver failureResolver;
   private final String workerId;
+  private final int staleAfterSeconds;
 
   public Reconciler(TaskRepository tasks, ShardRepository shards,
-                    FailureResolver failureResolver, String workerId) {
+                    FailureResolver failureResolver, String workerId, int staleAfterSeconds) {
     this.tasks = tasks;
     this.shards = shards;
     this.failureResolver = failureResolver;
     this.workerId = workerId;
+    this.staleAfterSeconds = staleAfterSeconds;
   }
 
   /**
@@ -38,11 +40,12 @@ public class Reconciler {
   public int scanOnce() {
     int reclaimed = 0;
     for (Task task : tasks.findAll()) {
-      for (ExpiredShard run : shards.findExpiredRunning(task.id())) {
+      for (ExpiredShard run : shards.findExpiredRunning(task.id(), staleAfterSeconds)) {
         try {
-          if (shards.markStatus(run.id(), ExecutionStatus.FAILED, workerId, "lease expired")) {
-            // 孤儿 RUNNING 已 claim(status=attempt+1 过),故本行 attempt 即本次运行号,原样传入(不加 1)。
-            failureResolver.handle(task, run.id(), run.attempt(), "lease expired");
+          if (shards.markStatus(run.id(), ExecutionStatus.FAILED, workerId,
+                  "owner unresponsive or lease expired")) {
+            failureResolver.handle(task, run.id(), run.attempt(),
+                "owner unresponsive or lease expired");
             reclaimed++;
           }
         } catch (IllegalStateException alreadyMovedOn) {

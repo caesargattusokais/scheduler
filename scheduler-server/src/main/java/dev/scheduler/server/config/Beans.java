@@ -194,8 +194,9 @@ public class Beans {
   /** 对账器:单例,复用共享 FailureResolver(同一重试判定,worker 与 reconciler 无漂移)。M3:作用对象为 shard。 */
   @Bean
   Reconciler reconciler(TaskRepository tasks, ShardRepository shards,
-                        FailureResolver failureResolver) {
-    return new Reconciler(tasks, shards, failureResolver, "reconciler");
+                        FailureResolver failureResolver,
+                        @Value("${scheduler.worker.stale-after-seconds:30}") int staleAfterSeconds) {
+    return new Reconciler(tasks, shards, failureResolver, "reconciler", staleAfterSeconds);
   }
 
   @Bean

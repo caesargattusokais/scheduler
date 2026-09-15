@@ -94,7 +94,7 @@ class ReconcilerTest {
 
   private Reconciler reconciler() {
     return new Reconciler(tasks, shards,
-        new FailureResolver(shards, new RetryPolicy(), CLOCK), "reconciler");
+        new FailureResolver(shards, new RetryPolicy(), CLOCK), "reconciler", 30);
   }
 
   /** 孤儿 shard 回收:租约过期的 RUNNING 被认领方(reconciler)落 FAILED,不可重试 → DLQ。 */
@@ -262,6 +262,42 @@ class ReconcilerTest {
     assertEquals(0L, parentOutcomeCount(parentId, "CANCELED"));
     Execution parent = shards.findParent(parentId).orElseThrow();
     assertEquals(ExecutionStatus.DUE, parent.status(), "仍有 RUNNING+DUE 兄弟 → 父保持 DUE");
+  }
+
+  /** §1 活性优先接管:owner 心跳失联且租约未过期 → 在租约到期前被立即回收(零永久 RUNNING)。 */
+  @Test void orphanWithHeartbeatStaleOwner_reclaimedBeforeLeaseExpiry() {
+    long taskId = createTask(1, 0, 1000, null); // maxRetries=0 → FAILED 即 DLQ
+    long parentId = seedParentWithShards(taskId, 1);
+    long sid = shard(parentId, 0).id();
+    String owner = "w-gone";
+    // 真实 claim 语义:worker_id=owner、RUNNING、租约仍有效(+60s)。
+    jdbc.update("UPDATE execution_shard SET status='RUNNING', worker_id=?,"
+        + " lease_until=now()+interval '60 seconds', attempt=1 WHERE id=?", owner, sid);
+    jdbc.update("INSERT INTO worker (id, refs, last_seen, status)"
+        + " VALUES (?, '', now() - interval '2 minutes', 'ALIVE')", owner); // 心跳失联 > stale30
+
+    assertEquals(1, reconciler().scanOnce(), "心跳失联 owner → 租约到期前被活性优先回收");
+    Shard s = shards.findShard(sid).orElseThrow();
+    assertEquals(ExecutionStatus.FAILED, s.status(), "活性优先回收 → FAILED");
+    assertEquals(1L, shardOutcomeCount(sid, "FAILED"), "回收落 FAILED outcome(归因)");
+    assertEquals(Boolean.TRUE, jdbc.queryForObject(
+        "SELECT dead_letter FROM execution_shard WHERE id=?", Boolean.class, sid),
+        "不可重试 → DLQ 分支");
+  }
+
+  /** §1 负例:owner 心跳新鲜 + 租约有效 → 不被活性优先误收。 */
+  @Test void shardWithHeartbeatAliveOwner_isLeftUntouched() {
+    long taskId = createTask(1, 0, 1000, null);
+    long parentId = seedParentWithShards(taskId, 1);
+    long sid = shard(parentId, 0).id();
+    String owner = "w-alive";
+    jdbc.update("UPDATE execution_shard SET status='RUNNING', worker_id=?,"
+        + " lease_until=now()+interval '60 seconds', attempt=1 WHERE id=?", owner, sid);
+    jdbc.update("INSERT INTO worker (id, refs, last_seen, status)"
+        + " VALUES (?, '', now() - interval '5 seconds', 'ALIVE')", owner);
+
+    assertEquals(0, reconciler().scanOnce(), "owner 心跳新鲜 → 不回收");
+    assertEquals(ExecutionStatus.RUNNING, shards.findShard(sid).orElseThrow().status());
   }
 }
 
