@@ -46,12 +46,13 @@ WHERE e.task_id=?
   AND s.status='RUNNING'
   AND (
     s.lease_until <= now()                       -- 兜底:租约自然过期
-    OR NOT EXISTS (                              -- 主路径:owner 心跳停滞
-       SELECT 1 FROM worker w
-       WHERE w.id = s.worker_id
-         AND w.last_seen >= now() - interval '<stale-seconds> seconds'
-         AND w.status = 'ALIVE'
-    )
+    OR ( s.worker_id IS NOT NULL                 -- 主路径:owner 心跳停滞(仅当有归属时判定;
+         AND NOT EXISTS (                        --  worker_id 为 null 的 RUNNING 异常行走 lease 兜底,不被活性分支误收)
+          SELECT 1 FROM worker w
+          WHERE w.id = s.worker_id
+            AND w.last_seen >= now() - interval '<stale-seconds> seconds'
+            AND w.status = 'ALIVE'
+       ))
   )
 ```
 
@@ -133,4 +134,4 @@ WHERE e.task_id=?
 - 占位符扫描:无 TBD/TODO;所有 SQL、列名、配置键、默认值均已核准(worker 表 `id`/`status`/`last_seen`,shard `worker_id`/`attempt`)。
 - 内部一致性:§1 查询口径与 server「active ≤30s」口径对齐;防双跑复用既有归属守卫,不新增机制。
 - 范围:聚焦宕机履约 + 分批,排除满分担/PG-HA/治理。单实现计划可控。
-- 歧义:归因 detail 统一定为 `owner unresponsive or lease expired`(已 ruling,避免双因拆分复杂度);初始 claim +60s 保留(已 ruling)。
+- 歧义:归因 detail 统一定为 `owner unresponsive or lease expired`(已 ruling,避免双因拆分复杂度);初始 claim +60s 保留(已 ruling);活性分支仅当 `worker_id IS NOT NULL` 时生效——`worker_id IS NULL` 的 RUNNING 为异常数据(claim 必写 owner),走 lease 兜底、不被活性分支误收,且保护测试中未 claim 的播种 RUNNING 行(已 ruling)。
