@@ -285,6 +285,29 @@ class ApiIntegrationTest {
         .andExpect(status().isBadRequest());
   }
 
+  /** 重试策略化(§1):建任务可设 retry_mode/cap/budget,CREATE 响应复读;非法值 400。 */
+  @Test
+  void createTask_persistsRetryStrategyFields() throws Exception {
+    String body = "{\"name\":\"strat-task\",\"kind\":\"cron\",\"handlerRef\":\"demo\","
+        + "\"cron\":\"" + CRON + "\",\"shardCount\":1,"
+        + "\"timeoutSeconds\":0,\"retryMode\":\"linear\",\"retryCapMs\":60000,\"retryBudgetMs\":300000}";
+    MvcResult r = mvc.perform(post("/api/v1/tasks").contentType(MediaType.APPLICATION_JSON).content(body))
+        .andExpect(status().isCreated()).andReturn();
+    String got = r.getResponse().getContentAsString();
+    assertTrue(got.contains("\"retryMode\":\"linear\""));
+    assertTrue(got.contains("\"retryCapMs\":60000"));
+    assertTrue(got.contains("\"retryBudgetMs\":300000"));
+
+    String badMode = "{\"name\":\"bad-mode\",\"kind\":\"cron\",\"handlerRef\":\"demo\","
+        + "\"cron\":\"" + CRON + "\",\"shardCount\":1,\"retryMode\":\"quadratic\"}";
+    mvc.perform(post("/api/v1/tasks").contentType(MediaType.APPLICATION_JSON).content(badMode))
+        .andExpect(status().isBadRequest());
+    String negCap = "{\"name\":\"neg-cap\",\"kind\":\"cron\",\"handlerRef\":\"demo\","
+        + "\"cron\":\"" + CRON + "\",\"shardCount\":1,\"retryCapMs\":-5}";
+    mvc.perform(post("/api/v1/tasks").contentType(MediaType.APPLICATION_JSON).content(negCap))
+        .andExpect(status().isBadRequest());
+  }
+
   @Test
   void putEditsTask() throws Exception {
     long id = postTask("put-edit"); // 复用本类既有建 task 辅助

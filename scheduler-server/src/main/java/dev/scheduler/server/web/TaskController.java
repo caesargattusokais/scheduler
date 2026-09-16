@@ -38,11 +38,13 @@ public class TaskController {
 
   public record CreateTaskRequest(String name, String kind, String handlerRef, String cron,
       Integer shardCount, Integer timeoutSeconds, Integer maxRetries, Long backoffMs,
-      String retryableFailurePattern, Integer maxActiveConcurrent) {}
+      String retryableFailurePattern, Integer maxActiveConcurrent,
+      String retryMode, Long retryCapMs, Long retryBudgetMs) {}
 
   public record UpdateTaskRequest(String name, String kind, String handlerRef, String cron,
       Integer shardCount, Integer timeoutSeconds, Integer maxRetries, Long backoffMs,
-      String retryableFailurePattern, Integer maxActiveConcurrent, Boolean paused) {}
+      String retryableFailurePattern, Integer maxActiveConcurrent, Boolean paused,
+      String retryMode, Long retryCapMs, Long retryBudgetMs) {}
 
   @PostMapping
   public ResponseEntity<Task> create(@RequestBody CreateTaskRequest req) {
@@ -57,7 +59,8 @@ public class TaskController {
     }
     requireAvailableHandlerRef(req.handlerRef());
     checkDefinition(req.name(), req.handlerRef(), req.cron(), req.shardCount(),
-        req.timeoutSeconds(), req.maxRetries(), req.backoffMs(), req.maxActiveConcurrent());
+        req.timeoutSeconds(), req.maxRetries(), req.backoffMs(), req.maxActiveConcurrent(),
+        req.retryMode(), req.retryCapMs(), req.retryBudgetMs());
     Task created = tasks.create(new Task(
         null, req.name(), req.kind() == null ? "cron" : req.kind(), req.handlerRef(), req.cron(),
         req.shardCount() == null ? 1 : req.shardCount(),
@@ -65,7 +68,7 @@ public class TaskController {
         req.maxRetries() == null ? 0 : req.maxRetries(),
         req.backoffMs() == null ? 1000L : req.backoffMs(),
         req.retryableFailurePattern(), req.maxActiveConcurrent() == null ? 8 : req.maxActiveConcurrent(),
-        true, false));
+        true, false, req.retryMode(), req.retryCapMs(), req.retryBudgetMs()));
     return ResponseEntity.status(HttpStatus.CREATED).body(created);
   }
 
@@ -83,7 +86,8 @@ public class TaskController {
     }
     requireAvailableHandlerRef(req.handlerRef());
     checkDefinition(req.name(), req.handlerRef(), req.cron(), req.shardCount(),
-        req.timeoutSeconds(), req.maxRetries(), req.backoffMs(), req.maxActiveConcurrent());
+        req.timeoutSeconds(), req.maxRetries(), req.backoffMs(), req.maxActiveConcurrent(),
+        req.retryMode(), req.retryCapMs(), req.retryBudgetMs());
     Task updated = new Task(id, req.name(), req.kind() == null ? existing.kind() : req.kind(),
         req.handlerRef(), req.cron(),
         req.shardCount() == null ? existing.shardCount() : req.shardCount(),
@@ -93,7 +97,10 @@ public class TaskController {
         req.retryableFailurePattern() == null ? existing.retryableFailurePattern() : req.retryableFailurePattern(),
         req.maxActiveConcurrent() == null ? existing.maxActiveConcurrent() : req.maxActiveConcurrent(),
         existing.enabled(),
-        req.paused() == null ? existing.paused() : req.paused());
+        req.paused() == null ? existing.paused() : req.paused(),
+        req.retryMode() == null ? existing.retryMode() : req.retryMode(),
+        req.retryCapMs() == null ? existing.retryCapMs() : req.retryCapMs(),
+        req.retryBudgetMs() == null ? existing.retryBudgetMs() : req.retryBudgetMs());
     if (!tasks.update(id, updated)) {
       throw notFound("task " + id);
     }
@@ -183,7 +190,13 @@ public class TaskController {
    *  永久卡 DUE)。 */
   static void checkDefinition(String name, String handlerRef, String cron,
       Integer shardCount, Integer timeoutSeconds, Integer maxRetries, Long backoffMs,
-      Integer maxActiveConcurrent) {
+      Integer maxActiveConcurrent, String retryMode, Long retryCapMs, Long retryBudgetMs) {
+    if (retryMode != null && !retryMode.isBlank()
+        && !(retryMode.equals("fixed") || retryMode.equals("linear") || retryMode.equals("exponential"))) {
+      throw new IllegalArgumentException("retryMode must be one of fixed|linear|exponential");
+    }
+    if (retryCapMs != null && retryCapMs < 0) throw new IllegalArgumentException("retryCapMs must be >= 0");
+    if (retryBudgetMs != null && retryBudgetMs < 0) throw new IllegalArgumentException("retryBudgetMs must be >= 0");
     if (timeoutSeconds != null && timeoutSeconds < 0) throw new IllegalArgumentException("timeoutSeconds must be >= 0");
     if (backoffMs != null && backoffMs < 0) throw new IllegalArgumentException("backoffMs must be >= 0");
     if (maxRetries != null && maxRetries < 0) throw new IllegalArgumentException("maxRetries must be >= 0");
