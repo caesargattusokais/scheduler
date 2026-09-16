@@ -1,13 +1,13 @@
 # Scheduler v2 执行运行时深化 · 子项目 1:重试策略化 + 执行超时设计
 
 > **Goal:** 把执行失败的「重试」从单一固定指数退避升级为**可配置策略**(fixed/linear/exponential + 退避封顶可调 +
-> 整轮重试总时限 W),并引入**单分片运行时限(max_runtime)**:超过即分布式判定超时、走统一失败路径(重试/死信/取消兄弟)。
+> 整轮重试总时限 W),并**强制执行启用中止的超时列 `timeout_seconds`**(单分片运行时限:>0 时超过即分布式判定超时、走统一失败路径(重试/死信/取消兄弟);0=不超时)。
 > 零永久 RUNNING 继续成立;worker 并发模型与上次心跳隔离修复不动。
 >
 > **Architecture:** 重试决策仍在纯类 `RetryPolicy`(无时钟、更按 Task 携带的 mode/cap);**新增退避模式与封顶**都在决策内;
 > **整轮重试时限 W** 是"按次数重试"之外的第二个终止条件,需要跨调用持久状态 → 用分片新列 `retry_budget_until`(首次进重试时置
 > `now()+W`),每次失败先判 `budget <= DB now()` 耗尽则转死信。**执行超时**采用**分布式判定**:server Reconciler(同一 15s 对账循环)
-> 对设了 `max_runtime` 的任务额外查 `RUNNING AND now() - started_at > max_runtime`,沿既有 markStatus(FAILED) + `FailureResolver.handle`
+> 对设了 `timeout_seconds>0` 的任务额外查 `RUNNING AND now() - started_at > timeout_seconds`,沿既有 markStatus(FAILED) + `FailureResolver.handle`
 > 回收——worker 迟到写回被 owner 归属守卫拒,不改 worker 线程。超时/预算判窗统一用 DB `now()`(与 reliability 活性判据一致)。
 >
 > **Tech Stack:** Java 17、Spring Boot、PostgreSQL 16(DB now 权威时钟)、Testcontainers 集成测试。无新增依赖。
@@ -27,12 +27,13 @@
 
 | 列 | 类型 | 默认 | 语义 |
 |---|---|---|---|
-| `retry_mode` | VARCHAR(16) | `'exponential'` | 退避模式 `fixed` \| `linear` \| `exponential` |
-| `retry_cap_ms` | BIGINT NULL | NULL(=全局 1h 兜底) | 退避封顶,任务级覆盖 |
-| `retry_budget_ms` | BIGINT NULL | NULL(无限,按次数重试) | 整轮重试总时限 W |
-| `max_runtime_ms` | BIGINT NULL | NULL(无限,不超时) | 单分片运行时限 |
+| `retry_mode` | VARCHAR(16) | `'exponential'` | 退避模式 `fixed` \| `linear` \| `exponential`(新增) |
+| `retry_cap_ms` | BIGINT NULL | NULL(=全局 1h 兜底) | 退避封顶,任务级覆盖(新增) |
+| `retry_budget_ms` | BIGINT NULL | NULL(无限,按次数重试) | 整轮重试总时限 W(新增) |
+| `timeout_seconds` | INT NOT NULL | 既有列(现状 300、校验 `>=0`) | **复用既有列,新语义**:0=不超时,>0=分布式运行时限。列不新增,补强制执行 |
 
-- `core.Task` record:加 `retryMode`(String)、`retryCapMs`/`retryBudgetMs`/`maxRuntimeMs`(均 `Long`,JSON `null`=未设)。
+- `core.Task` record:加 `retryMode`(String)、`retryCapMs`/`retryBudgetMs`(均 `Long`,JSON `null`=未设)。`timeoutSeconds` 为既有字段,不改类型。
+- > **Ruling(复用而非新增):** 仓库已存在 `timeout_seconds` 列并通过 Task record + TaskController DTO 暴露(默认 300、校验 `>=0`),但从未在执行路径被强制执行(现状「携带但闲置」)。若再增 `max_runtime_ms` 会制造两个超时列、违反「不重复配置」。故执行超时**复用 `timeout_seconds`**,把语义定为 `0=不超时、>0=强制执行`;V9 不新增该列,DTO 已有字段不变。
 - `TaskRepository`/`JdbcTaskRepository` MAP 与 insert/update 同步。**REST 任务 DTO**(TaskController create/update + 读)加这 4 字段,后端可设。
 - **React 表单不加**(非目标;列为后续小步——否则治理/运维面扩大,超出本子项目运行时纵深)。
 
@@ -58,7 +59,7 @@
 - 语义:W = 「自首次失败起,整个重试努力不得超过 W」;到期即止,转死信(并 `cancelSiblings` fail-fast,与死信分支既有行为一致)。
 - 未设 W 的任务:预算判窗恒 false,行为=现状(仅按次数)。
 
-## §3 分布式执行超时(max_runtime)
+## §3 分布式执行超时(复用 `timeout_seconds` 强制执行)
 
 ### 3.1 裁定:认领重置 `started_at=now()`(每轮运行起点)
 
@@ -66,7 +67,7 @@
 
 ### 3.2 server 侧超时分支(复用回收机制,不动 worker 线程)
 
-在 `Reconciler.scanOnce` 逐任务循环中,**对 `task.maxRuntimeMs()!=null` 的任务**额外跑:
+在 `Reconciler.scanOnce` 逐任务循环中,**对 `task.timeoutSeconds() > 0` 的任务**额外跑:
 
 ```sql
 SELECT s.id, s.attempt FROM execution_shard s JOIN execution e ON e.id = s.execution_id
@@ -76,7 +77,7 @@ WHERE e.task_id=?
   AND now() - s.started_at > make_interval(secs => ?)
 ```
 
-`made_interval` 参数 = `maxRuntimeMs/1000.0`(double)。含 `worker_id IS NOT NULL` 守卫(未认领的 DUE/异常 RUNNING 行不参与超时判定,只有真正在跑的分片)——与 reliability 的 worker_id-null 裁决同姿态。返回 `ExpiredShard(id, attempt)`(复用该 record)。
+`make_interval` 参数 = `task.timeoutSeconds()`(int,直接秒)。含 `worker_id IS NOT NULL` 守卫(未认领的 DUE/异常 RUNNING 行不参与超时判定,只有真正在跑的分片)——与 reliability 的 worker_id-null 裁决同姿态。返回 `ExpiredShard(id, attempt)`(复用该 record)。
 
 - **回收动作复用现有回收路径**:`markStatus(run.id(), FAILED, workerId, "runtime timeout")` 命中 → `failureResolver.handle(task, id, attempt, "runtime timeout")`(→ scheduleRetry 或 死信+fail-fast)。detail 统一 `"runtime timeout"`。
 - worker 迟到写回由 owner 归属守卫拒(worker_id 已被对账方改写)→ 结果丢弃 = 硬超时语义(太晚)。
@@ -94,7 +95,7 @@ WHERE e.task_id=?
 | 配置 | 位置 | 类型 |
 |---|---|---|
 | Task `retry_mode` / `retry_cap_ms` / `retry_budget_ms` | task 行(V9)+ DTO | 新增 |
-| Task `max_runtime_ms` | task 行(V9)+ DTO | 新增 |
+| Task `timeout_seconds` 强制执行 | 复用既有列(无 schema 改) | 行为修正:0=不超时、>0=强制执行 |
 | shard `retry_budget_until` | shard 行(V9) | 新增 |
 | claim 重置 `started_at=now()` | JdbcShardRepository.claim | 行为修正 |
 
@@ -102,7 +103,7 @@ WHERE e.task_id=?
 
 1. **RetryPolicy(纯单元)**:三模式退避值、任务级 cap、无 cap 兜底 1h、linear/exponential 溢出守卫;`delayMs(Task, attempt)` 新签名各分支。
 2. **持久层**:`retryBudgetExhausted` 预算未设/未到/已耗尽;claim 重置 started_at(首次认领 → now;重试重新认领 → 更新的 now,非旧值)。
-3. **ReconcilerTest**:设了 `max_runtime` 的 RUNNING shard(started_at 拨旧)→ 被铁 FAILED + outcome(runtime timeout);对照组没设 max_runtime 不被铁;worker 活但超时也被铁(CHECK 心跳仍新鲜的场景);未认领(worker_id null)的异常 RUNNING 行不被超时分支误收。
+3. **ReconcilerTest**:设了 `timeoutSeconds>0` 的 RUNNING shard(started_at 拨旧)→ 被铁 FAILED + outcome(runtime timeout);对照组 `timeoutSeconds=0` 不被铁;worker 活但超时也被铁(CHECK 心跳仍新鲜的场景);未认领(worker_id null)的异常 RUNNING 行不被超时分支误收。
 4. **FailureResolverTest**:W 耗尽(预算到点)即便 maxRetries 有余也转死信;未设 W 按次数重试(现状回归)。
 5. **配置回归**:老任务默认值下行为不变(exponential + 1h + 仅次数),既有测试应全绿。
 
@@ -115,7 +116,7 @@ WHERE e.task_id=?
 
 ## Spec 自审
 
-- 占位符:无 TBD/TODO;SQL/列名/签名已核准(`retry_mode`/`retry_cap_ms`/`retry_budget_ms`/`max_runtime_ms`/`retry_budget_until`;`delayMs(Task,int)`/`retryBudgetExhausted`/`findOverRuntime`→ 复用 `ExpiredShard`)。
+- 占位符:无 TBD/TODO;SQL/列名/签名已核准(`retry_mode`/`retry_cap_ms`/`retry_budget_ms`/`retry_budget_until`;复用 `timeout_seconds`;`delayMs(Task,int)`/`retryBudgetExhausted`/`findOverRuntime`→ 复用 `ExpiredShard`)。
 - 内部一致:超时与预算均 DB now;重试决策仍无时钟(时钟侧上移 FailureResolver/scheduleRetry);防双跑复用归属守卫,不新增机制。
 - 作用域:聚焦重试策略化 + 执行超时,单一实现计划可控;旧默认全兼容、既有测试应全绿。
-- 歧义已裁决:started_at 每轮重置;超时/预算 detail 统一文案(`runtime timeout`);W 自首次失败起算;max_runtime 判超时仅当 worker_id 非空。
+- 歧义已裁决:started_at 每轮重置;超时/预算 detail 统一文案(`runtime timeout`);W 自首次失败起算;超时判限仅当 `timeout_seconds>0` 且 worker_id 非空。
