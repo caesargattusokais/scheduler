@@ -33,8 +33,9 @@ public interface ShardRepository {
    *  按 shard id 升序取首条。 */
   Optional<Shard> findCandidate(long taskId);
 
-  /** 认领单个 DUE shard → RUNNING,并递增 attempt、记 started_at(首次)。受 task 级 maxConcurrent(CAS on active RUNNING count)
-   *  闸门:配额已满或已非 DUE(竞态)时返回 false,不落误导性 outcome。成功时同事务落 RUNNING('claim') outcome。 */
+  /** 认领单个 DUE shard → RUNNING,并递增 attempt、started_at 无条件重置为 now()(每次认领=本轮运行起点,超时从本轮起算)。
+   *  受 task 级 maxConcurrent(CAS on active RUNNING count)闸门:配额已满或已非 DUE(竞态)时返回 false,不落误导性
+   *  outcome。成功时同事务落 RUNNING('claim') outcome。 */
   boolean claim(long shardId, long taskId, String workerId, Instant leaseUntil, int maxConcurrent);
 
   /** 某任务下仍持有有效租约(RUNNING 且 lease_until>now())的 shard 数,用于并发配额。 */
@@ -71,8 +72,13 @@ public interface ShardRepository {
    * 重新认领)→ 返回 false 且不落 outcome,静默丢弃该次回写。 */
   boolean markStatusOwned(long shardId, ExecutionStatus to, String ownerWorkerId, String detail);
 
-  /** 失败分片排回:FAILED → DUE 并写 next_retry_at。CAS on status='FAILED':0 行=竞态/非 FAILED,静默跳过不落 outcome。 */
-  void scheduleRetry(long shardId, Instant retryAt, String detail);
+  /** 失败分片排回:FAILED → DUE 并写 next_retry_at。CAS on status='FAILED':0 行=竞态/非 FAILED,静默跳过不落 outcome。
+   *  retryBudgetMs != null 且该 shard retry_budget_until 尚未置(首次进重试)时,置 retry_budget_until=now()+W;
+   *  已置保持(窗口自首次失败起算,重试间不续)。 */
+  void scheduleRetry(long shardId, Instant retryAt, Long retryBudgetMs, String detail);
+
+  /** 整轮重试预算 W(W 时限的第二个终止条件)是否已耗尽:retry_budget_until 已置且 <= DB now()。未设 W 的对象恒 false。 */
+  boolean retryBudgetExhausted(long shardId);
 
   /** 仅置 dead_letter 标记(不改 status),仅 FAILED 生效;无 outcome 行。 */
   void markDeadLetter(long shardId, String detail);

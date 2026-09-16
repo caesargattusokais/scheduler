@@ -167,7 +167,7 @@ public class JdbcShardRepository implements ShardRepository {
          WHERE e.task_id=? AND s.status='RUNNING' AND s.lease_until > now()
       )
       UPDATE execution_shard s SET status='RUNNING', worker_id=?, lease_until=?,
-             attempt=attempt+1, started_at=COALESCE(started_at, now())
+             attempt=attempt+1, started_at=now()
         FROM active, (SELECT id, task_id FROM execution) e
        WHERE s.id=? AND s.status='DUE' AND e.id=s.execution_id AND e.task_id=? AND active.c < ?""";
     java.sql.Timestamp lease = java.sql.Timestamp.from(leaseUntil);
@@ -278,14 +278,22 @@ public class JdbcShardRepository implements ShardRepository {
     return ok[0];
   }
 
-  @Override public void scheduleRetry(long shardId, Instant retryAt, String detail) {
-    // FAILED -> DUE,期待值时延由调用方(RetryPolicy,注入 clock)预先算好,仓库只写值。
-    // CAS on status='FAILED':0 行=竞态/非 FAILED,静默跳过,不落误导性 outcome。
+  @Override public void scheduleRetry(long shardId, Instant retryAt, Long retryBudgetMs, String detail) {
+    // FAILED -> DUE,期待值时延由调用方(RetryPolicy,注入 clock)预先算好;仓库只写值。
+    // 预算窗:首次进重试(COALESCE 未置)置 now()+W;未设预算(nullptr)保持 NULL(仅按次数)。
     java.sql.Timestamp ts = java.sql.Timestamp.from(retryAt);
+    // make_interval 无名参 msecs,只有 secs(secs double precision):ms/1000.0 转秒;null 预算不触发 THEN 分支。
+    // 显式 ?::double precision 让 PG 在准备期即锁定参数类型 float8,null 值时函数仍可解析(否则 unknown 报错)。
+    Object wSecs = retryBudgetMs == null ? null : retryBudgetMs / 1000.0;
     tx.executeWithoutResult(s -> {
-      int updated = jdbc.update(
-          "UPDATE execution_shard SET status='DUE', next_retry_at=?, queued_at=now() WHERE id=? AND status='FAILED'",
-          ts, shardId);
+      int updated = jdbc.update("""
+          UPDATE execution_shard SET status='DUE', next_retry_at=?, queued_at=now(),
+            retry_budget_until = CASE
+              WHEN (?::bigint) IS NOT NULL AND retry_budget_until IS NULL
+                   THEN now() + make_interval(secs => (?::double precision))
+              ELSE retry_budget_until END
+          WHERE id=? AND status='FAILED'""",
+          ts, retryBudgetMs, wSecs, shardId);
       if (updated == 0) {
         log.debug("scheduleRetry lost CAS race: shard {} no longer FAILED; "
             + "suppressing outcome", shardId);
@@ -294,6 +302,14 @@ public class JdbcShardRepository implements ShardRepository {
       jdbc.update("INSERT INTO execution_shard_outcome (shard_id, status, detail) VALUES (?,?,?)",
           shardId, "DUE", detail);
     });
+  }
+
+  @Override public boolean retryBudgetExhausted(long shardId) {
+    Boolean v = jdbc.queryForObject(
+        "SELECT retry_budget_until IS NOT NULL AND retry_budget_until <= now()"
+            + " FROM execution_shard WHERE id=?",
+        Boolean.class, shardId);
+    return Boolean.TRUE.equals(v);
   }
 
   @Override public void markDeadLetter(long shardId, String detail) {

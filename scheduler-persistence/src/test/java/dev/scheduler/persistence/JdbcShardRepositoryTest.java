@@ -28,6 +28,13 @@ class JdbcShardRepositoryTest extends AbstractPostgresTest {
     return t.id();
   }
 
+  /** 取带整轮预算 W 的任务。 */
+  private long newTaskBudget(int shardCount, int maxActiveConcurrent, Long budgetMs) {
+    Task t = taskRepo.create(new Task(null, "t" + System.nanoTime(), "cron", "demo", "*/5 * * * *",
+        shardCount, 300, 0, 1000, null, maxActiveConcurrent, true, false, null, null, budgetMs));
+    return t.id();
+  }
+
   private long seedParentAndShards(long taskId, int shardCount) {
     return shardRepo.createParentWithShards(taskId, "p:"+System.nanoTime(), shardCount).id();
   }
@@ -408,7 +415,7 @@ class JdbcShardRepositoryTest extends AbstractPostgresTest {
     long shard0 = failedShard(taskId, 1);
     Instant retryAt = Instant.now().plusSeconds(10);
 
-    shardRepo.scheduleRetry(shard0, retryAt, "boom");
+    shardRepo.scheduleRetry(shard0, retryAt, null, "boom");
 
     Shard s = shardRepo.findShard(shard0).get();
     assertEquals(ExecutionStatus.DUE, s.status());
@@ -432,7 +439,7 @@ class JdbcShardRepositoryTest extends AbstractPostgresTest {
     // 制造"很久前入队"假象:若不重置 queued_at,重试后队龄会虚高到 ~120s
     jdbc.update("UPDATE execution_shard SET queued_at=now() - interval '120 seconds' WHERE id=?", shard0);
 
-    shardRepo.scheduleRetry(shard0, Instant.now().plusSeconds(10), "boom");
+    shardRepo.scheduleRetry(shard0, Instant.now().plusSeconds(10), null, "boom");
 
     assertEquals(ExecutionStatus.DUE, shardRepo.findShard(shard0).get().status());
     assertEquals(0L, shardRepo.maxDueQueueAgeSeconds(), "重试重置 queued_at,队龄应回 0,而非沿用 120s 前的入队时间");
@@ -444,10 +451,69 @@ class JdbcShardRepositoryTest extends AbstractPostgresTest {
     long shard0 = shard(parentId, 0).id();
     claimShard(shard0, taskId, "w1", 8); // -> RUNNING, not FAILED
 
-    shardRepo.scheduleRetry(shard0, Instant.now().plusSeconds(10), "boom");
+    shardRepo.scheduleRetry(shard0, Instant.now().plusSeconds(10), null, "boom");
 
     assertEquals(ExecutionStatus.RUNNING, shardRepo.findShard(shard0).get().status());
     assertEquals(1, outcomes(shard0), "CAS 0 rows: no extra outcome");
+  }
+
+  // ---- Task 4:整轮重试预算 W + claim 每轮重置 started_at ----
+
+  @Test void scheduleRetry_setsRetryBudgetWindowOnce_doesNotExtendOnRetries() {
+    long taskId = newTaskBudget(1, 8, 300_000L);
+    long shard0 = failedShard(taskId, 1);
+    shardRepo.scheduleRetry(shard0, Instant.now().plusSeconds(10), 300_000L, "boom");
+    java.sql.Timestamp first = jdbc.queryForObject(
+        "SELECT retry_budget_until FROM execution_shard WHERE id=?", java.sql.Timestamp.class, shard0);
+    assertNotNull(first, "首次进重试置 retry_budget_until=now()+W");
+
+    // 再失败一次(CAS 无关,直接落地 FAILED),改更大预算重试:窗口不得续后,COALESCE 保持首置。
+    jdbc.update("UPDATE execution_shard SET status='FAILED' WHERE id=?", shard0);
+    shardRepo.scheduleRetry(shard0, Instant.now().plusSeconds(10), 600_000L, "boom2");
+    java.sql.Timestamp second = jdbc.queryForObject(
+        "SELECT retry_budget_until FROM execution_shard WHERE id=?", java.sql.Timestamp.class, shard0);
+    assertEquals(first, second, "预算窗口自首次失败起算,重试间不续");
+  }
+
+  @Test void scheduleRetry_noBudget_leavesWindowNull() {
+    long taskId = newTask(1, 8); // 无预算
+    long shard0 = failedShard(taskId, 1);
+    shardRepo.scheduleRetry(shard0, Instant.now().plusSeconds(10), null, "boom");
+    assertNull(jdbc.queryForObject(
+        "SELECT retry_budget_until FROM execution_shard WHERE id=?", java.sql.Timestamp.class, shard0),
+        "未设 W → 不置预算窗(行为=现状按次数)");
+  }
+
+  @Test void retryBudgetExhausted_reflectsDeadlineAgainstDbNow() {
+    long taskId = newTaskBudget(1, 8, 300_000L);
+    long shard0 = failedShard(taskId, 1);
+    shardRepo.scheduleRetry(shard0, Instant.now().plusSeconds(10), 300_000L, "boom");
+    assertFalse(shardRepo.retryBudgetExhausted(shard0), "窗口未到 → 未耗尽");
+
+    jdbc.update("UPDATE execution_shard SET retry_budget_until=now() - interval '1 second' WHERE id=?", shard0);
+    assertTrue(shardRepo.retryBudgetExhausted(shard0), "预算到点(DB now)> → 耗尽");
+  }
+
+  @Test void retryBudgetExhausted_noBudget_isFalse() {
+    long taskId = newTask(1, 8);
+    long shard0 = failedShard(taskId, 1);
+    assertFalse(shardRepo.retryBudgetExhausted(shard0), "未设 W → 恒 false(=现状仅按次数)");
+  }
+
+  @Test void claim_resetsStartedAt_eachClaim() {
+    long taskId = newTask(1, 8);
+    long shard0 = shard(seedParentAndShards(taskId, 1), 0).id();
+    claimShard(shard0, taskId, "w1", 8);
+    // 回 FAILED 再重试认领:started_at 须重置为认领时刻,而非沿用首次认领时间(超时从本轮起算)。
+    jdbc.update("UPDATE execution_shard SET started_at=now() - interval '10 minutes' WHERE id=?", shard0);
+    jdbc.update("UPDATE execution_shard SET status='FAILED' WHERE id=?", shard0);
+    jdbc.update("UPDATE execution_shard SET status='DUE', next_retry_at=NULL WHERE id=?", shard0);
+    claimShard(shard0, taskId, "w1", 8);
+    java.sql.Timestamp started = jdbc.queryForObject(
+        "SELECT started_at FROM execution_shard WHERE id=?", java.sql.Timestamp.class, shard0);
+    assertNotNull(started);
+    assertTrue(started.toInstant().isAfter(Instant.now().minusSeconds(5)),
+        "重试重新认领 → started_at 重置为 now(),非 10 分钟前的旧值");
   }
 
   @Test void markDeadLetterSetFlagOnFailed() {

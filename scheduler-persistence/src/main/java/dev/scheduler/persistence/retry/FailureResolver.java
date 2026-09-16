@@ -30,14 +30,22 @@ public class FailureResolver {
    *  @param detail  失败原因描述,兼作重试/死信 outcome 的 reason
    */
   public void handle(Task task, long shardId, int attempt, String detail) {
+    if (shards.retryBudgetExhausted(shardId)) {
+      // 整轮重试预算 W 已耗尽 → 即使 maxRetries 有余也直接死信(第二终止条件)。
+      deadLetter(shardId, detail);
+      return;
+    }
     if (retryPolicy.shouldRetry(task, attempt, detail)) {
       shards.scheduleRetry(shardId,
-          clock.instant().plusMillis(retryPolicy.delayMs(task, attempt)), detail);
+          clock.instant().plusMillis(retryPolicy.delayMs(task, attempt)), task.retryBudgetMs(), detail);
     } else {
-      shards.markDeadLetter(shardId, "dlq:" + detail);
-      // FAIL_FAST(§5):分片进入 DLQ 即意味着该批已失败,协作取消同父仍在 RUNNING/DUE 的兄弟,
-      // 避免整批空耗。仅处于 DLQ 分支时触发(仍可重试的分片不取消兄弟)。
-      shards.cancelSiblings(shardId, "fail_fast");
+      deadLetter(shardId, detail);
     }
+  }
+
+  /** 死信 + FAIL_FAST:分片进入 DLQ 即这批已失败,协作取消同父仍在 RUNNING/DUE 的兄弟,避免整批空耗。 */
+  private void deadLetter(long shardId, String detail) {
+    shards.markDeadLetter(shardId, "dlq:" + detail);
+    shards.cancelSiblings(shardId, "fail_fast");
   }
 }
