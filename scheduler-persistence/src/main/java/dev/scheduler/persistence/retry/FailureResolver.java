@@ -32,7 +32,7 @@ public class FailureResolver {
   public void handle(Task task, long shardId, int attempt, String detail) {
     if (retryPolicy.shouldRetry(task, attempt, detail)) {
       shards.scheduleRetry(shardId,
-          clock.instant().plusMillis(retryPolicy.delayMs(task.backoffMs(), attempt)), detail);
+          clock.instant().plusMillis(retryPolicy.delayMs(task, attempt)), detail);
     } else {
       shards.markDeadLetter(shardId, "dlq:" + detail);
       // FAIL_FAST(§5):分片进入 DLQ 即意味着该批已失败,协作取消同父仍在 RUNNING/DUE 的兄弟,

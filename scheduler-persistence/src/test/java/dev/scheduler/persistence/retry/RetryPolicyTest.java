@@ -66,28 +66,38 @@ class RetryPolicyTest {
     assertFalse(policy.shouldRetry(t, 1, null));
   }
 
+  private Task task(long backoffMs) { return task(backoffMs, null, null); }
+  private Task task(long backoffMs, String mode, Long cap) {
+    return new Task(1L, "t", "kind", "handler", null, 1, 60, 3, backoffMs, null, 8, true, false,
+        mode, cap, null);
+  }
+
   // ---- delayMs ----
 
-  @Test
-  void delayMs_attempt1() {
-    assertEquals(200L, policy.delayMs(200L, 1));
+  @Test void exponentialMode_isExistingDefaultBackoff() {
+    assertEquals(200L, policy.delayMs(task(200L), 1));
+    assertEquals(400L, policy.delayMs(task(200L), 2));
+    assertEquals(800L, policy.delayMs(task(200L), 3));
+    assertEquals(3600_000L, policy.delayMs(task(1L << 40, "exponential", null), 40), "溢出守卫 → 全局 1h");
+    assertEquals(3600_000L, policy.delayMs(task(1L << 30, "exponential", null), 40), "超上限 → 封顶 1h");
   }
 
-  @Test
-  void delayMs_attempt2() {
-    assertEquals(400L, policy.delayMs(200L, 2));
+  @Test void fixedMode_constantBackoffCapped() {
+    assertEquals(200L, policy.delayMs(task(200L, "fixed", null), 1));
+    assertEquals(200L, policy.delayMs(task(200L, "fixed", null), 6), "fixed 不随 attempt 增长");
+    assertEquals(1000L, policy.delayMs(task(2000L, "fixed", 1000L), 100), "任务级 cap 覆盖 fixed");
   }
 
-  @Test
-  void delayMs_attempt3() {
-    assertEquals(800L, policy.delayMs(200L, 3));
+  @Test void linearMode_growsWithAttemptCapped() {
+    assertEquals(200L, policy.delayMs(task(200L, "linear", null), 1));
+    assertEquals(400L, policy.delayMs(task(200L, "linear", null), 2));
+    assertEquals(800L, policy.delayMs(task(200L, "linear", null), 4));
+    assertEquals(3600_000L, policy.delayMs(task(1L << 50, "linear", null), 40), "linear 乘法溢出守卫 → 全局 1h");
   }
 
-  @Test
-  void delayMs_cappedAtOneHour() {
-    // backoff 2^40 ms,attempt=40 → 移位溢出 long,应封顶 1 小时。
-    assertEquals(3600_000L, policy.delayMs(1L << 40, 40));
-    // backoff 2^30 ms → 2^69 超出 long,仍封顶。
-    assertEquals(3600_000L, policy.delayMs(1L << 30, 40));
+  @Test void perTaskCap_overridesGlobalDefault() {
+    assertEquals(4000L, policy.delayMs(task(2000L, "exponential", 6000L), 2), "2^1*2000=4000 未超 cap");
+    assertEquals(6000L, policy.delayMs(task(2000L, "exponential", 6000L), 3), "3 次 8000 超 cap 6000 → 取 cap");
+    assertEquals(3600_000L, policy.delayMs(task(1L << 30, "exponential", null), 40), "任务未设 cap → 兜底全局 1h");
   }
 }

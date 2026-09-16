@@ -30,20 +30,32 @@ public class RetryPolicy {
   }
 
   /**
-   * 指数退避等待时长:backoffMs * 2^(attempt-1),封顶 1 小时。
-   * 移位溢出 long 或超过上限时返回封顶值。
+   * 按任务配置的退避模式计算下次重试前等待时长(封顶 = 任务级 retryCapMs,未设则全局 1h)。
+   * fixed: backoff;linear: backoff*attempt;exponential: backoff*2^(attempt-1)(缺省,含 mode 为 null/未知)。
+   * 乘法溢出守卫:首次即到顶或必超封顶 → 直接返回 cap,防移位溢出 long。
    */
-  public long delayMs(long backoffMs, int attempt) {
-    if (attempt <= 1) {
-        return Math.min(backoffMs, CAP);
+  public long delayMs(Task task, int attempt) {
+    long cap = task.retryCapMs() != null ? task.retryCapMs() : CAP;
+    long backoff = task.backoffMs();
+    if ("fixed".equals(task.retryMode())) {
+      return Math.min(backoff, cap);
     }
-    long result = backoffMs;
+    if ("linear".equals(task.retryMode())) {
+      if (backoff >= cap) return cap;                    // 首次即到顶
+      if (attempt > 1 && backoff > cap / attempt) return cap; // 乘法必超封顶 → 取顶,防溢出
+      return Math.min(backoff * attempt, cap);
+    }
+    // exponential(缺省)
+    if (attempt <= 1) {
+      return Math.min(backoff, cap);
+    }
+    long result = backoff;
     for (int i = 1; i < attempt; i++) {
-      if (result > CAP / 2) {
-          return CAP;
+      if (result > cap / 2) {
+        return cap;
       }
       result <<= 1;
     }
-    return Math.min(result, CAP);
+    return Math.min(result, cap);
   }
 }
