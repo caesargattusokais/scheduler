@@ -92,4 +92,30 @@ class JdbcTaskRepositoryTest extends AbstractPostgresTest {
     assertFalse(repo.delete(c.id()), "被 DAG 节点引用的任务不得被删");
     assertTrue(repo.findById(c.id()).isPresent());
   }
+
+  @Test void createAndUpdate_persistRetryStrategyFields() {
+    var repo = new JdbcTaskRepository(jdbc);
+    var created = repo.create(new Task(null, "t1", "cron", "demo", "*/5 * * * *",
+        1, 60, 3, 500, null, 8, true, false, "linear", 60_000L, 300_000L));
+    Task fromDb = repo.findById(created.id()).orElseThrow();
+    assertEquals("linear", fromDb.retryMode());
+    assertEquals(60_000L, fromDb.retryCapMs());
+    assertEquals(300_000L, fromDb.retryBudgetMs());
+
+    Task updated = new Task(created.id(), "t2", "cron", "demo", "0 */5 * * * *",
+        2, 120, 5, 1000, null, 8, true, false, "fixed", null, null);
+    assertTrue(repo.update(updated.id(), updated));
+    Task after = repo.findById(updated.id()).orElseThrow();
+    assertEquals("fixed", after.retryMode());
+    assertNull(after.retryCapMs(), "update 置 null → 落库 NULL 而非 0");
+    assertNull(after.retryBudgetMs());
+  }
+
+  @Test void convenienceConstructor_createsWithExponentialMode() {
+    var repo = new JdbcTaskRepository(jdbc);
+    var created = repo.create(new Task(null, "t1", "cron", "demo", "*/5 * * * *",
+        1, 60, 0, 1000, null, 8, true, false));
+    assertEquals("exponential", repo.findById(created.id()).orElseThrow().retryMode(),
+        "13 参便捷构造 retryMode=null → INSERT COALESCE 落 'exponential'");
+  }
 }
