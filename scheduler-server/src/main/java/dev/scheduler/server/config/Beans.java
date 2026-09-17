@@ -1,7 +1,10 @@
 package dev.scheduler.server.config;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import dev.scheduler.persistence.AuditRepository;
 import dev.scheduler.persistence.DagRepository;
 import dev.scheduler.persistence.ExecutionRepository;
+import dev.scheduler.persistence.JdbcAuditRepository;
 import dev.scheduler.persistence.JdbcDagRepository;
 import dev.scheduler.persistence.JdbcExecutionRepository;
 import dev.scheduler.persistence.JdbcShardRepository;
@@ -14,6 +17,7 @@ import dev.scheduler.server.dag.DagEngine;
 import dev.scheduler.server.leader.AdvisoryLockLeaderElection;
 import dev.scheduler.server.leader.LeaderElection;
 import dev.scheduler.server.reconcile.Reconciler;
+import dev.scheduler.server.service.AuditRecorder;
 import dev.scheduler.server.web.AvailableHandlerRefs;
 import dev.scheduler.persistence.retry.FailureResolver;
 import dev.scheduler.persistence.retry.RetryPolicy;
@@ -50,6 +54,16 @@ public class Beans {
   @Bean
   TaskRepository taskRepository(JdbcTemplate jdbc) {
     return new JdbcTaskRepository(jdbc);
+  }
+
+  @Bean
+  AuditRepository auditRepository(JdbcTemplate jdbc) {
+    return new JdbcAuditRepository(jdbc);
+  }
+
+  @Bean
+  AuditRecorder auditRecorder(AuditRepository audits, ObjectMapper json) {
+    return new AuditRecorder(audits, json);
   }
 
   @Bean

@@ -151,7 +151,7 @@ class ApiIntegrationTest {
   @BeforeEach
   void resetDb() {
     jdbc.execute("TRUNCATE app_dag CASCADE; TRUNCATE execution, execution_outcome, execution_shard,"
-        + " execution_shard_outcome, app_task, worker RESTART IDENTITY CASCADE");
+        + " execution_shard_outcome, app_task, app_audit, worker RESTART IDENTITY CASCADE");
     CLOCK.now = BASE;
     // M6.3:server 上下文无进程内 handler——测试建任务须先注册一个存活 worker 提供 handlerRef(demo);
     //  该 worker 在未拨动 CLOCK.now 的用例中恒存活(见 handlersEndpoint 用例拨钟后须重播种)。
@@ -515,6 +515,63 @@ class ApiIntegrationTest {
         .andExpect(jsonPath("$.total").value(3))
         .andExpect(jsonPath("$.limit").value(100))
         .andExpect(jsonPath("$.offset").value(0));
+  }
+
+  /** 审计读 API:GET /api/v1/audits 过滤 + 分页信封,occurred_at DESC。写端见 taskWriteActions_areAudited 等用例;此处直种子读端。 */
+  @Test
+  void auditReadApi_filtersAndPagination() throws Exception {
+    long t1 = postTask("audit-seed-a"); // 取真实 task id 作 targetId
+    long t2 = postTask("audit-seed-b");
+    jdbc.update("INSERT INTO app_audit (operator, action, target_type, target_id, meta, source)"
+            + " VALUES ('alice','task.create','task',?,'{\"name\":\"audit-seed-a\"}','cli')", t1);
+    jdbc.update("INSERT INTO app_audit (operator, action, target_type, target_id, meta)"
+            + " VALUES ('alice','task.update','task',?, null)", t1);
+    jdbc.update("INSERT INTO app_audit (operator, action, target_type, target_id, meta)"
+            + " VALUES ('bob','task.create','task',?, '{}')", t2);
+
+    // 全量信封
+    mvc.perform(get("/api/v1/audits"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.total").value(3))
+        .andExpect(jsonPath("$['items']", hasSize(3)))
+        .andExpect(jsonPath("$.limit").value(100))
+        .andExpect(jsonPath("$.offset").value(0));
+    // operator 子串
+    mvc.perform(get("/api/v1/audits").param("operator", "ali"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.total").value(2));
+    // action 等值
+    mvc.perform(get("/api/v1/audits").param("action", "task.update"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.total").value(1));
+    // targetId 等值
+    mvc.perform(get("/api/v1/audits").param("targetId", String.valueOf(t1)))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.total").value(2));
+    // 分页:limit=1 offset=2 → 剩 1 条,total 恒 3
+    mvc.perform(get("/api/v1/audits").param("limit", "1").param("offset", "2"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$['items']", hasSize(1)))
+        .andExpect(jsonPath("$.total").value(3));
+  }
+
+  /** 审计读 API:occurred_at 时间窗过滤(from/to)。窗口用 ±1h 规避 JVM/容器时钟偏斜(见 ExecutorWorkerTest 教训)。 */
+  @Test
+  void auditReadApi_timeWindow() throws Exception {
+    jdbc.update("INSERT INTO app_audit (operator, action, target_type, target_id, occurred_at)"
+        + " VALUES ('old','t','task',1, now() - interval '2 days')");
+    jdbc.update("INSERT INTO app_audit (operator, action, target_type, target_id, occurred_at)"
+        + " VALUES ('new','t','task',2, now())");
+    // from=1h 前 → 只含 'new'(now 行)
+    mvc.perform(get("/api/v1/audits").param("from", Instant.now().minusSeconds(3600).toString()))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.total").value(1))
+        .andExpect(jsonPath("$['items'][0].operator").value("new"));
+    // to=1h 前 → 只含 'old'(2 天前行)
+    mvc.perform(get("/api/v1/audits").param("to", Instant.now().minusSeconds(3600).toString()))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.total").value(1))
+        .andExpect(jsonPath("$['items'][0].operator").value("old"));
   }
 
   @Test void listDags_nameFilter() throws Exception {
