@@ -23,6 +23,7 @@ import dev.scheduler.persistence.retry.FailureResolver;
 import dev.scheduler.persistence.retry.RetryPolicy;
 import java.time.Clock;
 import java.time.Instant;
+import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
@@ -491,9 +492,18 @@ class ExecutorWorkerTest extends AbstractExecutorWorkerTest {
     // 租约拨到 DB 真实未来(worker claim 用固定时钟 CLOCK,早于 DB now(),故显式置未来租约),从而只留活性判别。
     jdbc.update("UPDATE execution_shard SET lease_until = now() + interval '300 seconds' WHERE id = ?", shardId);
 
-    // 线程 2:模拟生产 HeartbeatLoop 的自持守护线程,在 handler 阻塞期间持续推进 owner 活性(last_seen=真实 now)。
+    // 线程 2:模拟生产 HeartbeatLoop 的自持守护线程,在 handler 阻塞期间持续推进 owner 活性。
+    // 活性判活以 DB now() 为权威(last_seen >= now() - stale),而测试 JVM 墙钟可能与容器时钟偏斜(实测 ~16s),
+    // 故心跳时钟直接读 DB now() 与判活同源,消除时钟偏斜导致的既有 flaky(见 Task 6 回归验证)。
+    Clock dbNow = new Clock() {
+      @Override public Instant instant() {
+        return jdbc.queryForObject("SELECT now()", java.sql.Timestamp.class).toInstant();
+      }
+      @Override public ZoneId getZone() { return ZoneOffset.UTC; }
+      @Override public Clock withZone(ZoneId zone) { return this; }
+    };
     WorkerRegistrar registrar =
-        new WorkerRegistrar(new JdbcWorkerRepository(jdbc), registry, "worker-a", Clock.systemUTC());
+        new WorkerRegistrar(new JdbcWorkerRepository(jdbc), registry, "worker-a", dbNow);
     // 先同步落一次心跳担保 worker 行 + 新鲜 last_seen 在 scanOnce 前已提交,消除首心跳与 `reconciler.stale=1`
     // 判活查询的写读竞争(否则扫描可能跑赢首心跳、误判失联而偶发失败,见 SDD ledger)。
     registrar.heartbeat();
