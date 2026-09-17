@@ -620,6 +620,9 @@ class ApiIntegrationTest {
 
     // 该 id 已被 trigger(有 execution)→ delete 409(不记 action);换个未触发的任务验 delete
     mvc.perform(delete("/api/v1/tasks/" + id)).andExpect(status().isConflict());
+    // 409-conflict delete 记录为空:动作实际未发生
+    mvc.perform(get("/api/v1/audits").param("action", "task.delete").param("targetId", String.valueOf(id)))
+        .andExpect(status().isOk()).andExpect(jsonPath("$.total").value(0));
     long delId = objectMapper.readTree(mvc.perform(post("/api/v1/tasks").header("X-Operator", "bob")
             .contentType(MediaType.APPLICATION_JSON)
             .content("{\"name\":\"audit-del\",\"kind\":\"cron\",\"handlerRef\":\"demo\","
@@ -661,7 +664,14 @@ class ApiIntegrationTest {
         .andExpect(status().isOk());
     mvc.perform(get("/api/v1/audits").param("action", "execution.cancel").param("targetId", String.valueOf(cancelTarget)))
         .andExpect(status().isOk())
-        .andExpect(jsonPath("$['items'][0].operator").value("carol"));
+        .andExpect(jsonPath("$['items'][0].operator").value("carol"))
+        .andExpect(jsonPath("$.total").value(1));
+
+    // 幂等重取消已 CANCELED → 200 短路,不产生新审计(动作实际未发生):total 仍 1
+    mvc.perform(post("/api/v1/executions/" + cancelTarget + "/cancel").header("X-Operator", "carol"))
+        .andExpect(status().isOk());
+    mvc.perform(get("/api/v1/audits").param("action", "execution.cancel").param("targetId", String.valueOf(cancelTarget)))
+        .andExpect(status().isOk()).andExpect(jsonPath("$.total").value(1));
   }
 
   /** 审计写端:DagController create/pause/resume/trigger + dag_run.cancel + dag_node.rerun(meta 含 nodeId)。 */
@@ -692,6 +702,12 @@ class ApiIntegrationTest {
         .andExpect(status().isOk());
     mvc.perform(get("/api/v1/audits").param("action", "dag_run.cancel").param("targetId", String.valueOf(runId)))
         .andExpect(status().isOk()).andExpect(jsonPath("$['items'][0].operator").value("dave"));
+
+    // 幂等重取消已 CANCELED run → 200 短路,不产生新审计:total 仍 1
+    mvc.perform(post("/api/v1/dags/runs/" + runId + "/cancel").header("X-Operator", "dave"))
+        .andExpect(status().isOk());
+    mvc.perform(get("/api/v1/audits").param("action", "dag_run.cancel").param("targetId", String.valueOf(runId)))
+        .andExpect(status().isOk()).andExpect(jsonPath("$.total").value(1));
 
     // dag_node.rerun:终态节点可重跑(rerunNode 仅要求节点 isTerminal();A 已 CANCELED)→ targetId=runId, meta 含 nodeId
     long aId = dagNodeId(runId, "A");
