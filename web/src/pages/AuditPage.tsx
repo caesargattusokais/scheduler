@@ -42,13 +42,14 @@ export default function AuditPage() {
 
   const load = useCallback(async () => {
     try {
+      const nid = Number(targetId);
       const page = await listAudits({
         operator: operator === '' ? undefined : operator,
         action: action === '' ? undefined : action,
         targetType: targetType === '' ? undefined : targetType,
-        targetId: targetId === '' ? undefined : Number(targetId),
-        from: from === '' ? undefined : from,
-        to: to === '' ? undefined : to,
+        targetId: targetId === '' || Number.isNaN(nid) ? undefined : nid,
+        from: from === '' ? undefined : new Date(from).toISOString(),
+        to:   to   === '' ? undefined : new Date(to).toISOString(),
         limit: PAGE_SIZE,
         offset,
       });
