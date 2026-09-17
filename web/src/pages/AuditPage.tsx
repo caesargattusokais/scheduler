@@ -34,6 +34,7 @@ export default function AuditPage() {
   const [operator, setOperator] = useState('');
   const [action, setAction] = useState('');
   const [targetType, setTargetType] = useState('');
+  const [targetId, setTargetId] = useState('');
   const [from, setFrom] = useState('');
   const [to, setTo] = useState('');
   const [offset, setOffset] = useState(0);
@@ -45,6 +46,7 @@ export default function AuditPage() {
         operator: operator === '' ? undefined : operator,
         action: action === '' ? undefined : action,
         targetType: targetType === '' ? undefined : targetType,
+        targetId: targetId === '' ? undefined : Number(targetId),
         from: from === '' ? undefined : from,
         to: to === '' ? undefined : to,
         limit: PAGE_SIZE,
@@ -54,7 +56,7 @@ export default function AuditPage() {
       setTotal(page.total);
       setErr(null);
     } catch (e) { setErr(String(e)); }
-  }, [operator, action, targetType, from, to, offset]);
+  }, [operator, action, targetType, targetId, from, to, offset]);
 
   useEffect(() => { load(); }, [load]);
   useInterval(load, 5000);
@@ -92,6 +94,11 @@ export default function AuditPage() {
             <option value="">全部</option>
             {TARGET_TYPES.map((t2) => <option key={t2} value={t2}>{t2}</option>)}
           </select>
+        </label>
+        <label className="field">
+          <span className="label">目标 ID</span>
+          <input className="input" inputMode="numeric" placeholder="资源主键" value={targetId}
+            onChange={(e) => { setTargetId(e.target.value); setOffset(0); }} />
         </label>
         <label className="field">
           <span className="label">开始</span>
