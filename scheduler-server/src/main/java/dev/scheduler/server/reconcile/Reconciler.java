@@ -52,6 +52,22 @@ public class Reconciler {
           // 快照后该行已被 owner 抢先完成(或已非法迁移)→ 已迁移,跳过这一行,不中止整批回收。
         }
       }
+      // §3 分布式执行超时:timeoutSeconds>0 的任务,已认领且运行超限的 RUNNING 分片走同一条失败路径
+      // (重试/死信/FAIL_FAST)。worker 迟到写回由 owner 归属守卫拒(worker_id 已被改写)→ 硬超时语义。
+      // 与租约/活性回收互不干扰、同汇入 fail 路径;同 trigger 片二次查或已 FAILED 时由 canTransition 抛
+      // IllegalStateException 被上方 catch 结构吞掉(这里独立 catch,与活性分支同口径)。
+      if (task.timeoutSeconds() > 0) {
+        for (ExpiredShard run : shards.findOverRuntime(task.id(), task.timeoutSeconds())) {
+          try {
+            if (shards.markStatus(run.id(), ExecutionStatus.FAILED, workerId, "runtime timeout")) {
+              failureResolver.handle(task, run.id(), run.attempt(), "runtime timeout");
+              reclaimed++;
+            }
+          } catch (IllegalStateException alreadyMovedOn) {
+            // 快照后已终态/已迁移 → 跳过,不中止整批。
+          }
+        }
+      }
     }
     aggregateParents();
     return reclaimed;

@@ -231,6 +231,16 @@ public class JdbcShardRepository implements ShardRepository {
         taskId, (double) staleAfterSeconds);
   }
 
+  @Override public List<ExpiredShard> findOverRuntime(long taskId, int timeoutSeconds) {
+    return jdbc.query(
+        "SELECT s.id, s.attempt FROM execution_shard s JOIN execution e ON e.id = s.execution_id"
+            + " WHERE e.task_id=? AND s.status='RUNNING'"
+            + " AND s.worker_id IS NOT NULL"            // 已认领才算运行(未认领异常行不参与超时)
+            + " AND now() - s.started_at > make_interval(secs => ?)",
+        (rs, i) -> new ExpiredShard(rs.getLong("id"), rs.getInt("attempt")),
+        taskId, (double) timeoutSeconds);
+  }
+
   @Override public boolean markStatus(long shardId, ExecutionStatus to, String workerId, String detail) {
     Shard cur = findShard(shardId).orElseThrow(() -> new IllegalStateException("no shard " + shardId));
     if (!ExecutionTransitions.canTransition(cur.status(), to)) {

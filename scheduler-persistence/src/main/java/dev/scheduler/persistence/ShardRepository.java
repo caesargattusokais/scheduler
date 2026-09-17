@@ -62,6 +62,10 @@ public interface ShardRepository {
    *  worker 判活口径与 server active 指标一致。 */
   List<ExpiredShard> findExpiredRunning(long taskId, int staleAfterSeconds);
 
+  /** 超时的 RUNNING shard(生命周期网关):仅当分片已认领(worker_id 非空)且 started_at 距今超过 timeoutSeconds。
+   *  返回对账所需的 id 与 attempt。 */
+  List<ExpiredShard> findOverRuntime(long taskId, int timeoutSeconds);
+
   /** 显式状态迁移(非持有者专属):对账回收/控制台取消用。非法迁移抛 IllegalStateException;CAS 0 行=行已被他方改走
    *  → 静默返回 false,不落误导性 outcome。 */
   boolean markStatus(long shardId, ExecutionStatus to, String workerId, String detail);

@@ -815,4 +815,28 @@ class JdbcShardRepositoryTest extends AbstractPostgresTest {
 
     assertTrue(shardRepo.findExpiredRunning(taskId, 30).isEmpty(), "worker_id 空 + 租约新鲜 → 不回收");
   }
+
+  // ---- Task 5:分布式执行超时 findOverRuntime ----
+
+  @Test void findOverRuntime_returnsOnlyClaimedLongRunningShards() {
+    long taskId = newTask(4, 8);
+    long parentId = seedParentAndShards(taskId, 3);
+    long overId = shard(parentId, 0).id();
+    long freshId = shard(parentId, 1).id();
+    long unclaimedId = shard(parentId, 2).id();
+    // 超时:已认领(started_at 拨旧 10 分钟)
+    jdbc.update("UPDATE execution_shard SET status='RUNNING', worker_id='w1',"
+        + " started_at=now() - interval '10 minutes' WHERE id=?", overId);
+    // 未超时:已认领但 started_at 新鲜
+    jdbc.update("UPDATE execution_shard SET status='RUNNING', worker_id='w1',"
+        + " started_at=now() WHERE id=?", freshId);
+    // 未认领(worker_id null)的异常 RUNNING 行不参与超时
+    jdbc.update("UPDATE execution_shard SET status='RUNNING', worker_id=NULL,"
+        + " started_at=now() - interval '10 minutes' WHERE id=?", unclaimedId);
+
+    var expired = shardRepo.findOverRuntime(taskId, 60);
+
+    assertEquals(1, expired.size(), "仅已认领且超时的分片进入超时判定");
+    assertEquals(overId, expired.get(0).id());
+  }
 }

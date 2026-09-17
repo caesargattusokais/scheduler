@@ -59,6 +59,12 @@ class ReconcilerTest {
         shardCount, 300, maxRetries, backoffMs, pattern, 5, true, false)).id();
   }
 
+  /** §3 timeoutSeconds>0 的任务。 */
+  private long createTaskTimed(int timeoutSeconds) {
+    return tasks.create(new Task(null, "t", "cron", "demo", "0 */5 * * * *",
+        1, timeoutSeconds, 0, 1000, null, 5, true, false)).id();
+  }
+
   /** 建父 execution + N 个 DUE shard(单事务),返回父 id。 */
   private long seedParentWithShards(long taskId, int shardCount) {
     return shards.createParentWithShards(taskId, "p:" + System.nanoTime(), shardCount).id();
@@ -246,6 +252,71 @@ class ReconcilerTest {
     assertEquals(ExecutionStatus.CANCELED, shards.findParent(parentId).orElseThrow().status(),
         "无 FAILED 但有 CANCELED → 父 CANCELED");
     assertEquals(1L, parentOutcomeCount(parentId, "CANCELED"));
+  }
+
+  /** §3 分布式超时:设了 timeoutSeconds>0,RUNNING 且 started_at 超限 → 被铁 FAILED + runtime timeout。 */
+  @Test void shardOverRuntime_isReclaimedAsFailed() {
+    long taskId = createTaskTimed(3);
+    long parentId = seedParentWithShards(taskId, 1);
+    long sid = shard(parentId, 0).id();
+    jdbc.update("UPDATE execution_shard SET status='RUNNING', worker_id='w',"
+        + " lease_until=now()+interval '60 seconds', attempt=1,"
+        + " started_at=now() - interval '10 minutes' WHERE id=?", sid);
+    jdbc.update("INSERT INTO worker (id, refs, last_seen, status)"
+        + " VALUES ('w', '', now() - interval '5 seconds', 'ALIVE')"); // 心跳新鲜:排除活性分支,单测超时分支
+
+    assertEquals(1, reconciler().scanOnce(), "超时 → 回收");
+    assertEquals(ExecutionStatus.FAILED, shards.findShard(sid).orElseThrow().status());
+    assertEquals(1L, shardOutcomeCount(sid, "FAILED"));
+    Long rt = jdbc.queryForObject(
+        "SELECT count(*) FROM execution_shard_outcome WHERE shard_id=? AND status='FAILED' AND detail='runtime timeout'",
+        Long.class, sid);
+    assertEquals(1L, rt, "failure detail = runtime timeout");
+  }
+
+  /** §3 对照:timeoutSeconds=0(不超时)即便 started_at 极旧也不被铁。 */
+  @Test void timeoutZero_shardNeverTimedOut() {
+    long taskId = createTaskTimed(0);
+    long parentId = seedParentWithShards(taskId, 1);
+    long sid = shard(parentId, 0).id();
+    jdbc.update("UPDATE execution_shard SET status='RUNNING', worker_id='wz',"
+        + " lease_until=now()+interval '60 seconds', attempt=1,"
+        + " started_at=now() - interval '10 minutes' WHERE id=?", sid);
+    jdbc.update("INSERT INTO worker (id, refs, last_seen, status)"
+        + " VALUES ('wz', '', now() - interval '5 seconds', 'ALIVE')"); // 心跳新鲜:排除活性分支,单测超时=0
+
+    assertEquals(0, reconciler().scanOnce());
+    assertEquals(ExecutionStatus.RUNNING, shards.findShard(sid).orElseThrow().status());
+    assertEquals(0L, shardOutcomeCount(sid, "FAILED"));
+  }
+
+  /** §3:未认领(worker_id NULL)的异常 RUNNING 行不参与超时判定。 */
+  @Test void unclaimedRunningShard_notTimedOut() {
+    long taskId = createTaskTimed(3);
+    long parentId = seedParentWithShards(taskId, 1);
+    long sid = shard(parentId, 0).id();
+    jdbc.update("UPDATE execution_shard SET status='RUNNING', worker_id=NULL,"
+        + " lease_until=now()+interval '60 seconds',"
+        + " started_at=now() - interval '10 minutes' WHERE id=?", sid);
+
+    assertEquals(0, reconciler().scanOnce());
+    assertEquals(ExecutionStatus.RUNNING, shards.findShard(sid).orElseThrow().status());
+  }
+
+  /** §3:worker 心跳仍新鲜但已超时 → 仍被铁(超时与活性两分支互不干扰,都汇入统一 fail 路径)。 */
+  @Test void liveButOverRuntime_shardStillTimedOut() {
+    long taskId = createTaskTimed(3);
+    long parentId = seedParentWithShards(taskId, 1);
+    long sid = shard(parentId, 0).id();
+    String owner = "w-live";
+    jdbc.update("UPDATE execution_shard SET status='RUNNING', worker_id=?,"
+        + " lease_until=now()+interval '60 seconds', attempt=1,"
+        + " started_at=now() - interval '10 minutes' WHERE id=?", owner, sid);
+    jdbc.update("INSERT INTO worker (id, refs, last_seen, status)"
+        + " VALUES (?, '', now() - interval '5 seconds', 'ALIVE')", owner);
+
+    assertEquals(1, reconciler().scanOnce(), "活 worker 但超时 → 仍铁 FAILED");
+    assertEquals(ExecutionStatus.FAILED, shards.findShard(sid).orElseThrow().status());
   }
 
   /** 父仍需等待未终态兄弟:1 SUCCESS + 1 RUNNING + 1 DUE → 父不动不下场。 */
