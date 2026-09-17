@@ -520,8 +520,9 @@ class ApiIntegrationTest {
   /** 审计读 API:GET /api/v1/audits 过滤 + 分页信封,occurred_at DESC。写端见 taskWriteActions_areAudited 等用例;此处直种子读端。 */
   @Test
   void auditReadApi_filtersAndPagination() throws Exception {
-    long t1 = postTask("audit-seed-a"); // 取真实 task id 作 targetId
-    long t2 = postTask("audit-seed-b");
+    // 用裸 jdbc 落任务(而非 postTask)取真实 id 作 targetId —— postTask 走写端现会记 task.create 审计,干扰本用例的绝对值计数。
+    long t1 = seedTaskRow("audit-seed-a");
+    long t2 = seedTaskRow("audit-seed-b");
     jdbc.update("INSERT INTO app_audit (operator, action, target_type, target_id, meta, source)"
             + " VALUES ('alice','task.create','task',?,'{\"name\":\"audit-seed-a\"}','cli')", t1);
     jdbc.update("INSERT INTO app_audit (operator, action, target_type, target_id, meta)"
@@ -572,6 +573,136 @@ class ApiIntegrationTest {
         .andExpect(status().isOk())
         .andExpect(jsonPath("$.total").value(1))
         .andExpect(jsonPath("$['items'][0].operator").value("old"));
+  }
+
+  // ---------- 审计写端:三控制器 15 个写端点接 X-Operator + AuditRecorder ----------
+
+  /** 审计写端:TaskController create/update/pause/resume/trigger/delete;X-Operator 缺省记 anonymous;meta 为后态。 */
+  @Test
+  void taskWriteActions_areAudited() throws Exception {
+    // create with X-Operator → operator 为该头,meta 含后态 name
+    long id = objectMapper.readTree(mvc.perform(post("/api/v1/tasks").header("X-Operator", "alice")
+            .contentType(MediaType.APPLICATION_JSON)
+            .content("{\"name\":\"audited-task\",\"kind\":\"cron\",\"handlerRef\":\"demo\","
+                + "\"cron\":\"" + CRON + "\",\"shardCount\":1}"))
+        .andExpect(status().isCreated()).andReturn().getResponse().getContentAsString()).get("id").asLong();
+    mvc.perform(get("/api/v1/audits").param("operator", "alice").param("action", "task.create")
+            .param("targetId", String.valueOf(id)))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.total").value(1))
+        .andExpect(jsonPath("$['items'][0].targetType").value("task"))
+        .andExpect(jsonPath("$['items'][0].meta").value(org.hamcrest.Matchers.containsString("audited-task")));
+
+    // update → task.update,targetId=id,meta 为后态(改名后)
+    mvc.perform(put("/api/v1/tasks/" + id).header("X-Operator", "alice")
+            .contentType(MediaType.APPLICATION_JSON)
+            .content("{\"name\":\"renamed-audit\",\"kind\":\"cron\",\"handlerRef\":\"demo\","
+                + "\"cron\":\"0 */6 * * * *\",\"shardCount\":1}"))
+        .andExpect(status().isOk());
+    mvc.perform(get("/api/v1/audits").param("action", "task.update").param("targetId", String.valueOf(id)))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.total").value(1))
+        .andExpect(jsonPath("$['items'][0].meta").value(org.hamcrest.Matchers.containsString("renamed-audit")));
+
+    // 无 X-Operator 头 → operator 兜底 'anonymous'
+    mvc.perform(post("/api/v1/tasks/" + id + "/pause")).andExpect(status().isOk());
+    mvc.perform(post("/api/v1/tasks/" + id + "/resume")).andExpect(status().isOk());
+    mvc.perform(get("/api/v1/audits").param("action", "task.pause"))
+        .andExpect(status().isOk()).andExpect(jsonPath("$['items'][0].operator").value("anonymous"));
+    mvc.perform(get("/api/v1/audits").param("action", "task.resume"))
+        .andExpect(status().isOk()).andExpect(jsonPath("$['items'][0].operator").value("anonymous"));
+
+    // trigger → task.trigger(目标 = 任务 id)
+    mvc.perform(post("/api/v1/tasks/" + id + "/trigger").header("X-Operator", "alice"))
+        .andExpect(status().isCreated());
+    mvc.perform(get("/api/v1/audits").param("action", "task.trigger").param("targetId", String.valueOf(id)))
+        .andExpect(status().isOk()).andExpect(jsonPath("$.total").value(1));
+
+    // 该 id 已被 trigger(有 execution)→ delete 409(不记 action);换个未触发的任务验 delete
+    mvc.perform(delete("/api/v1/tasks/" + id)).andExpect(status().isConflict());
+    long delId = objectMapper.readTree(mvc.perform(post("/api/v1/tasks").header("X-Operator", "bob")
+            .contentType(MediaType.APPLICATION_JSON)
+            .content("{\"name\":\"audit-del\",\"kind\":\"cron\",\"handlerRef\":\"demo\","
+                + "\"cron\":\"" + CRON + "\",\"shardCount\":1}"))
+        .andExpect(status().isCreated()).andReturn().getResponse().getContentAsString()).get("id").asLong();
+    mvc.perform(delete("/api/v1/tasks/" + delId).header("X-Operator", "bob")).andExpect(status().isNoContent());
+    mvc.perform(get("/api/v1/audits").param("action", "task.delete").param("targetId", String.valueOf(delId)))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$['items'][0].operator").value("bob"));
+  }
+
+  /** 审计写端:ExecutionController rerun/cancel + shard.requeue(目标均为操作者主动动作)。 */
+  @Test
+  void executionWriteActions_areAudited() throws Exception {
+    long id = postTask("audit-exec");
+
+    // rerun(确定性终结源轮后):execution.rerun,target = 新轮 id
+    long execId = triggerParent(id);
+    for (Long sid : jdbc.queryForList("SELECT id FROM execution_shard WHERE execution_id=?", Long.class, execId))
+      jdbc.update("UPDATE execution_shard SET status='SUCCESS', finished_at=now() WHERE id=?", sid);
+    jdbc.update("UPDATE execution SET status='SUCCESS', finished_at=now() WHERE id=? AND status='DUE'", execId);
+    long newId = objectMapper.readTree(mvc.perform(post("/api/v1/executions/" + execId + "/rerun")
+            .header("X-Operator", "carol")).andExpect(status().isCreated()).andReturn()
+        .getResponse().getContentAsString()).get("id").asLong();
+    mvc.perform(get("/api/v1/audits").param("action", "execution.rerun").param("targetId", String.valueOf(newId)))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$['items'][0].operator").value("carol"));
+
+    // requeue FAILED+dead_letter shard → shard.requeue
+    Shard dlq = seedDeadLetter(id);
+    mvc.perform(post("/api/v1/executions/shards/" + dlq.id() + "/requeue").header("X-Operator", "carol"))
+        .andExpect(status().isOk());
+    mvc.perform(get("/api/v1/audits").param("action", "shard.requeue").param("targetId", String.valueOf(dlq.id())))
+        .andExpect(status().isOk()).andExpect(jsonPath("$.total").value(1));
+
+    // cancel(无 RUNNING shard → 直取消)→ execution.cancel
+    long cancelTarget = triggerParent(id);
+    mvc.perform(post("/api/v1/executions/" + cancelTarget + "/cancel").header("X-Operator", "carol"))
+        .andExpect(status().isOk());
+    mvc.perform(get("/api/v1/audits").param("action", "execution.cancel").param("targetId", String.valueOf(cancelTarget)))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$['items'][0].operator").value("carol"));
+  }
+
+  /** 审计写端:DagController create/pause/resume/trigger + dag_run.cancel + dag_node.rerun(meta 含 nodeId)。 */
+  @Test
+  void dagWriteActions_areAudited() throws Exception {
+    long t = postTask("audit-dag-task");
+    long dagId = postDag("audit-dag", new long[]{t}, new String[]{"A"}, new String[][]{});
+    // postDag 无 X-Operator → anonymous
+    mvc.perform(get("/api/v1/audits").param("action", "dag.create").param("targetId", String.valueOf(dagId)))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$['items'][0].operator").value("anonymous"))
+        .andExpect(jsonPath("$['items'][0].meta").value(org.hamcrest.Matchers.containsString("audit-dag")));
+
+    // pause / resume
+    mvc.perform(post("/api/v1/dags/" + dagId + "/pause")).andExpect(status().isOk());
+    mvc.perform(get("/api/v1/audits").param("action", "dag.pause")).andExpect(status().isOk()).andExpect(jsonPath("$.total").value(1));
+    mvc.perform(post("/api/v1/dags/" + dagId + "/resume")).andExpect(status().isOk());
+    mvc.perform(get("/api/v1/audits").param("action", "dag.resume")).andExpect(status().isOk()).andExpect(jsonPath("$.total").value(1));
+
+    // trigger → dag.trigger
+    long runId = triggerDag(dagId);
+    mvc.perform(get("/api/v1/audits").param("action", "dag.trigger").param("targetId", String.valueOf(dagId)))
+        .andExpect(status().isOk()).andExpect(jsonPath("$.total").value(1));
+
+    // dag_run.cancel(scanOnce 后 A RUNNING → cancel 全节点级联终态)→ 记录一次
+    dagEngine.scanOnce();
+    mvc.perform(post("/api/v1/dags/runs/" + runId + "/cancel").header("X-Operator", "dave"))
+        .andExpect(status().isOk());
+    mvc.perform(get("/api/v1/audits").param("action", "dag_run.cancel").param("targetId", String.valueOf(runId)))
+        .andExpect(status().isOk()).andExpect(jsonPath("$['items'][0].operator").value("dave"));
+
+    // dag_node.rerun:终态节点可重跑(rerunNode 仅要求节点 isTerminal();A 已 CANCELED)→ targetId=runId, meta 含 nodeId
+    long aId = dagNodeId(runId, "A");
+    mvc.perform(post("/api/v1/dags/runs/" + runId + "/nodes/" + aId + "/rerun").header("X-Operator", "dave"))
+        .andExpect(status().isOk());
+    mvc.perform(get("/api/v1/audits").param("action", "dag_node.rerun").param("targetId", String.valueOf(runId)))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$['items'][0].operator").value("dave"))
+        // Ruling(见 task-3-report):写端序列化 ObjectMapper 在 meta JSON 冒号后补空格({"nodeId": 1}),故用容空格正则而非 containsString("nodeId":1)。
+        .andExpect(jsonPath("$['items'][0].meta").value(
+            org.hamcrest.Matchers.matchesPattern(".*\"nodeId\":\\s*" + aId + ".*")));
   }
 
   @Test void listDags_nameFilter() throws Exception {
@@ -1151,6 +1282,13 @@ class ApiIntegrationTest {
 
   private long postTask(String name) throws Exception {
     return postTaskWithRetry(name, "demo", 0, 1000, null);
+  }
+
+  /** 裸 jdbc 落一条任务行并返回 id(不经写端点,不产生 task.create 审计)——供审计读 API 用例布置 targetId 而不干扰计数。 */
+  private long seedTaskRow(String name) {
+    jdbc.update("INSERT INTO app_task (name, kind, handler_ref, cron, shard_count, enabled, paused)"
+        + " VALUES (?, 'cron', 'demo', ?, 1, false, false)", name, CRON);
+    return jdbc.queryForObject("SELECT id FROM app_task WHERE name=?", Long.class, name);
   }
 
   /** 建任务(带重试参数,shard_count 默认 1):maxRetries/backoffMs/retryableFailurePattern;pattern 传 null 归一为空串(恒可重试)。 */
