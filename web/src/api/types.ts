@@ -117,3 +117,15 @@ export interface RunDetail { run: DagRun; status: string; nodes: NodeDetail[]; }
 export interface ParsedMetric { name: string; tags: Record<string, string>; value: number; }
 /** 统一列表分页包裹(镜像后端 Page<T>):items 为当前页, total 为过滤后全量计数。 */
 export interface Page<T> { items: T[]; total: number; offset: number; limit: number; }
+
+// 审计(meta 为后端原样透出的 JSON 文本,展示时 JSON.parse)
+export interface AuditEntry {
+  id: number;
+  occurredAt: string;
+  operator: string;
+  action: string;
+  targetType: string;
+  targetId: number;
+  meta: string | null;
+  source: string | null;
+}

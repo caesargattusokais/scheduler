@@ -1,4 +1,5 @@
 import type {
+  AuditEntry,
   CreateTaskRequest,
   CreateDagRequest,
   Dag,
@@ -147,3 +148,17 @@ export const fetchMetrics = async (): Promise<ParsedMetric[]> => {
   if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
   return parsePrometheus(await res.text());
 };
+
+// ---- 审计(只读) ----
+export interface ListAuditsParams {
+  operator?: string;
+  action?: string;
+  targetType?: string;
+  targetId?: number;
+  from?: string; // ISO-8601 with offset
+  to?: string;
+  limit?: number;
+  offset?: number;
+}
+export const listAudits = (p: ListAuditsParams = {}): Promise<Page<AuditEntry>> =>
+  req<Page<AuditEntry>>(`/api/v1/audits${qstr(p)}`);
