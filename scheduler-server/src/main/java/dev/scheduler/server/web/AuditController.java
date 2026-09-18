@@ -26,14 +26,16 @@ public class AuditController {
       @RequestParam(required = false) Long targetId,
       @RequestParam(required = false) String from,
       @RequestParam(required = false) String to,
+      @RequestParam(required = false) Boolean hasDiff,
+      @RequestParam(required = false) String diffField,
       @RequestParam(required = false) Integer limit,
       @RequestParam(required = false) Integer offset) {
     Paging p = Paging.of(limit, offset);
     Instant fromT = parseInstant(from);
     Instant toT = parseInstant(to);
     return new Page<>(audits.findPage(operator, action, targetType, targetId, fromT, toT,
-            p.limit(), p.offset()),
-        audits.count(operator, action, targetType, targetId, fromT, toT),
+            hasDiff, diffField, p.limit(), p.offset()),
+        audits.count(operator, action, targetType, targetId, fromT, toT, hasDiff, diffField),
         p.offset(), p.limit());
   }
 

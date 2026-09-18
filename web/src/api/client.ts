@@ -157,6 +157,8 @@ export interface ListAuditsParams {
   targetId?: number;
   from?: string; // ISO-8601 with offset
   to?: string;
+  hasDiff?: boolean; // true → 仅真正改过字段的行(diff 非空对象)
+  diffField?: string; // 顶层 JSONB 键:改过该字段的行(如 "cron")
   limit?: number;
   offset?: number;
 }

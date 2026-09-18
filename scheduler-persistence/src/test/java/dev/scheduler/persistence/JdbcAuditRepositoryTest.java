@@ -53,34 +53,34 @@ class JdbcAuditRepositoryTest extends AbstractPostgresTest {
     audits.record("bob",   "task.create", TargetType.TASK, 2L, null, null);
     audits.record("alice", "dag.create",  TargetType.DAG,  9L, null, null); // id 最大 → 倒序首位
 
-    assertEquals(4, audits.count(null, null, null, null, null, null));
-    assertEquals(4, audits.findPage(null, null, null, null, null, null, 100, 0).size());
+    assertEquals(4, audits.count(null, null, null, null, null, null, null, null));
+    assertEquals(4, audits.findPage(null, null, null, null, null, null, null, null, 100, 0).size());
 
     // operator 子串(ILIKE)
-    assertEquals(3, audits.count("ali", null, null, null, null, null));
+    assertEquals(3, audits.count("ali", null, null, null, null, null, null, null));
     // action 等值
-    assertEquals(2, audits.count(null, "task.create", null, null, null, null));
+    assertEquals(2, audits.count(null, "task.create", null, null, null, null, null, null));
     // targetType 等值
-    assertEquals(1, audits.count(null, null, "dag", null, null, null));
+    assertEquals(1, audits.count(null, null, "dag", null, null, null, null, null));
     // targetId 等值
-    assertEquals(1, audits.count(null, null, null, 9L, null, null));
+    assertEquals(1, audits.count(null, null, null, 9L, null, null, null, null));
     // 组合精确定位 (task, 1)
-    assertEquals(2, audits.count(null, null, "task", 1L, null, null));
+    assertEquals(2, audits.count(null, null, "task", 1L, null, null, null, null));
     // 时间窗(occurred_at >= from AND <= to)
     assertEquals(4, audits.count(null, null, null, null,
-        Instant.parse("2000-01-01T00:00:00Z"), Instant.parse("2200-01-01T00:00:00Z")));
+        Instant.parse("2000-01-01T00:00:00Z"), Instant.parse("2200-01-01T00:00:00Z"), null, null));
     assertEquals(0, audits.count(null, null, null, null,
-        Instant.parse("2200-01-01T00:00:00Z"), Instant.parse("2300-01-01T00:00:00Z")));
+        Instant.parse("2200-01-01T00:00:00Z"), Instant.parse("2300-01-01T00:00:00Z"), null, null));
 
     // 分页 + 倒序:limit=2 → 最近 2 条(id DESC 平局 → dag.create, 再 bob 的 task.create)
-    List<AuditEntry> p2 = audits.findPage(null, null, null, null, null, null, 2, 0);
+    List<AuditEntry> p2 = audits.findPage(null, null, null, null, null, null, null, null, 2, 0);
     assertEquals(2, p2.size());
     assertEquals("dag.create", p2.get(0).action());
     assertEquals(9L, p2.get(0).targetId());
     assertEquals("task.create", p2.get(1).action());
     assertEquals(2L, p2.get(1).targetId());
     // offset=2 → 剩余 2 条仍按 id DESC:后插者 task.update(id2) 在前,task.create(id1) 在后
-    List<AuditEntry> pOff = audits.findPage(null, null, null, null, null, null, 100, 2);
+    List<AuditEntry> pOff = audits.findPage(null, null, null, null, null, null, null, null, 100, 2);
     assertEquals(2, pOff.size());
     assertEquals("task.update", pOff.get(0).action());
     assertEquals(1L, pOff.get(0).targetId());
@@ -98,7 +98,7 @@ class JdbcAuditRepositoryTest extends AbstractPostgresTest {
         "SELECT count(*) FROM app_audit WHERE id=? AND diff IS NOT NULL", Long.class, jdbc.queryForObject(
             "SELECT id FROM app_audit WHERE action='task.update'", Long.class)));
     // findPage 读回 diff 原样
-    List<AuditEntry> rows = audits.findPage(null, "task.update", null, null, null, null, 10, 0);
+    List<AuditEntry> rows = audits.findPage(null, "task.update", null, null, null, null, null, null, 10, 0);
     assertEquals(1, rows.size());
     AuditEntry e = rows.get(0);
     assertEquals("{\"cron\":[\"0 * * * * ?\",\"0 */5 * * * ?\"],\"retryCapMs\":[null,10000]}".replaceAll("\\s+", ""),
@@ -113,5 +113,32 @@ class JdbcAuditRepositoryTest extends AbstractPostgresTest {
     audits.record("bob", "task.create", TargetType.TASK, 3L, null, null);
     assertEquals(1L, jdbc.queryForObject("SELECT count(*) FROM app_audit WHERE diff IS NULL", Long.class));
     assertEquals(0L, jdbc.queryForObject("SELECT count(*) FROM app_audit WHERE diff IS NOT NULL", Long.class));
+  }
+
+  @Test
+  void findPage_hasDiffFiltersToRowsWithActualChanges_only() {
+    // 三态:非空 diff(有实际变更)、{} (no-op update)、NULL (未启用 diff 的动作)
+    audits.record("alice", "task.update", TargetType.TASK, 1L, "{\"name\":\"a\"}",
+        "{\"cron\":[\"x\",\"y\"]}", null);                       // 非空 → 命中
+    audits.record("alice", "task.update", TargetType.TASK, 2L, "{\"name\":\"b\"}",
+        "{}", null);                                             // {} → 排除
+    audits.record("bob", "task.create", TargetType.TASK, 3L, null, null); // NULL → 排除
+
+    assertEquals(3, audits.count(null, null, null, null, null, null, null, null));
+    // hasDiff=true → 仅真正改了字段的非空 diff 行
+    assertEquals(1, audits.count(null, null, null, null, null, null, Boolean.TRUE, null));
+    assertEquals(1, audits.findPage(null, null, null, null, null, null, Boolean.TRUE, null, 10, 0).size());
+    // hasDiff=null 不过滤
+    assertEquals(3, audits.count(null, null, null, null, null, null, null, null));
+    // diffField 顶层键存在 → 仅含该键的行;{} / NULL / 别字段行排除
+    assertEquals(1, audits.count(null, null, null, null, null, null, null, "cron"));
+    assertEquals("{\"cron\":[\"x\",\"y\"]}".replaceAll("\\s+", ""),
+        audits.findPage(null, null, null, null, null, null, null, "cron", 10, 0).get(0).diff()
+            .replaceAll("\\s+", ""));
+    assertEquals(0, audits.count(null, null, null, null, null, null, null, "shardCount"));
+    // 组合:hasDiff=true 且改过某字段
+    assertEquals(1, audits.count(null, null, null, null, null, null, Boolean.TRUE, "cron"));
+    // 未命中字段 + hasDiff 组合 → 0
+    assertEquals(0, audits.count(null, null, null, null, null, null, Boolean.TRUE, "shardCount"));
   }
 }

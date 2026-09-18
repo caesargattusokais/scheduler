@@ -17,11 +17,14 @@ public interface AuditRepository {
     record(operator, action, targetType, targetId, metaJson, null, source);
   }
 
-  /** 过滤 + 分页,按 occurred_at DESC, id DESC 排序;全部过滤参数可为 null/空(不过滤)。 */
+  /** 过滤 + 分页,按 occurred_at DESC, id DESC 排序;全部过滤参数可为 null/空(不过滤)。
+   *  hasDiff=true 仅纳入有实际变更的行(diff 非 NULL 且非空对象 `{}`);diffField 非空白按
+   *  JSONB 顶层键存在过滤(改过该字段)。 */
   List<AuditEntry> findPage(String operator, String action, String targetType,
-                            Long targetId, Instant from, Instant to, int limit, int offset);
+                            Long targetId, Instant from, Instant to,
+                            Boolean hasDiff, String diffField, int limit, int offset);
 
   /** 与 findPage 相同过滤条件的 count(供 Page.total)。 */
   long count(String operator, String action, String targetType,
-             Long targetId, Instant from, Instant to);
+             Long targetId, Instant from, Instant to, Boolean hasDiff, String diffField);
 }

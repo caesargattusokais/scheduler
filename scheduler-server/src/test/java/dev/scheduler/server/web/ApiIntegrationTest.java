@@ -660,6 +660,56 @@ class ApiIntegrationTest {
         .andExpect(jsonPath("$['items'][0].diff").value("{}"));
   }
 
+  /** 审计读 diff 过滤:hasDiff=true 仅真变更行(排除 {} 与 NULL);diffField=cron 命中改过 cron 的行;组合生效。 */
+  @Test
+  void auditReadApi_diffFilters() throws Exception {
+    // 真变更:create(create→diff NULL)后 PUT 改 cron → task.update 的非空 diff
+    long changed = objectMapper.readTree(mvc.perform(post("/api/v1/tasks").header("X-Operator", "d")
+            .contentType(MediaType.APPLICATION_JSON)
+            .content("{\"name\":\"diff-c-1\",\"kind\":\"cron\",\"handlerRef\":\"demo\","
+                + "\"cron\":\"" + CRON + "\",\"shardCount\":1}"))
+        .andExpect(status().isCreated()).andReturn().getResponse().getContentAsString()).get("id").asLong();
+    mvc.perform(put("/api/v1/tasks/" + changed).header("X-Operator", "d")
+            .contentType(MediaType.APPLICATION_JSON)
+            .content("{\"name\":\"diff-c-1\",\"kind\":\"cron\",\"handlerRef\":\"demo\","
+                + "\"cron\":\"0 */9 * * * *\",\"shardCount\":1}"))
+        .andExpect(status().isOk());
+    // no-op:同值再 PUT → task.update 的 diff 为空对象 {}
+    long same = objectMapper.readTree(mvc.perform(post("/api/v1/tasks").header("X-Operator", "d")
+            .contentType(MediaType.APPLICATION_JSON)
+            .content("{\"name\":\"diff-s-1\",\"kind\":\"cron\",\"handlerRef\":\"demo\","
+                + "\"cron\":\"" + CRON + "\",\"shardCount\":1}"))
+        .andExpect(status().isCreated()).andReturn().getResponse().getContentAsString()).get("id").asLong();
+    mvc.perform(put("/api/v1/tasks/" + same).header("X-Operator", "d")
+            .contentType(MediaType.APPLICATION_JSON)
+            .content("{\"name\":\"diff-s-1\",\"kind\":\"cron\",\"handlerRef\":\"demo\","
+                + "\"cron\":\"" + CRON + "\",\"shardCount\":1}"))
+        .andExpect(status().isOk());
+
+    // hasDiff=true → 仅真变更行(排除 {} 的 no-op update 与 NULL 的 create)
+    mvc.perform(get("/api/v1/audits").param("hasDiff", "true").param("operator", "d"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.total").value(1))
+        .andExpect(jsonPath("$['items'][0].targetId").value(changed))
+        .andExpect(jsonPath("$['items'][0].diff").value(org.hamcrest.Matchers.containsString("cron")));
+
+    // diffField=cron → 同样仅命中改过 cron 的行
+    mvc.perform(get("/api/v1/audits").param("diffField", "cron").param("operator", "d"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.total").value(1))
+        .andExpect(jsonPath("$['items'][0].targetId").value(changed));
+
+    // 组合 hasDiff=true + diffField=cron
+    mvc.perform(get("/api/v1/audits").param("hasDiff", "true").param("diffField", "cron").param("operator", "d"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.total").value(1));
+
+    // 未改过的字段 shardCount → 0 命中(顶层键不在任何 diff 中)
+    mvc.perform(get("/api/v1/audits").param("diffField", "shardCount").param("operator", "d"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.total").value(0));
+  }
+
   /** 审计写端:ExecutionController rerun/cancel + shard.requeue(目标均为操作者主动动作)。 */
   @Test
   void executionWriteActions_areAudited() throws Exception {

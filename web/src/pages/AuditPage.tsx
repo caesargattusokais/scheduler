@@ -50,6 +50,8 @@ export default function AuditPage() {
   const [targetId, setTargetId] = useState('');
   const [from, setFrom] = useState('');
   const [to, setTo] = useState('');
+  const [hasDiff, setHasDiff] = useState(false);
+  const [diffField, setDiffField] = useState('');
   const [offset, setOffset] = useState(0);
   const [err, setErr] = useState<string | null>(null);
 
@@ -63,6 +65,8 @@ export default function AuditPage() {
         targetId: targetId === '' || Number.isNaN(nid) ? undefined : nid,
         from: from === '' ? undefined : new Date(from).toISOString(),
         to:   to   === '' ? undefined : new Date(to).toISOString(),
+        hasDiff: hasDiff || undefined,
+        diffField: diffField === '' ? undefined : diffField,
         limit: PAGE_SIZE,
         offset,
       });
@@ -70,7 +74,7 @@ export default function AuditPage() {
       setTotal(page.total);
       setErr(null);
     } catch (e) { setErr(String(e)); }
-  }, [operator, action, targetType, targetId, from, to, offset]);
+  }, [operator, action, targetType, targetId, from, to, hasDiff, diffField, offset]);
 
   useEffect(() => { load(); }, [load]);
   useInterval(load, 5000);
@@ -123,6 +127,17 @@ export default function AuditPage() {
           <span className="label">结束</span>
           <input className="input" type="datetime-local" value={to}
             onChange={(e) => { setTo(e.target.value); setOffset(0); }} />
+        </label>
+        <label className="field">
+          <span className="label">有变更</span>
+          <input className="input" type="checkbox" style={{ width: 'auto', margin: 'auto 0' }}
+            checked={hasDiff}
+            onChange={(e) => { setHasDiff(e.target.checked); setOffset(0); }} />
+        </label>
+        <label className="field">
+          <span className="label">字段</span>
+          <input className="input" placeholder="改过该字段,如 cron" value={diffField}
+            onChange={(e) => { setDiffField(e.target.value); setOffset(0); }} />
         </label>
       </div>
 
