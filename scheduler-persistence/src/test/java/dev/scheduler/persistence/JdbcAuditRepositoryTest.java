@@ -86,4 +86,32 @@ class JdbcAuditRepositoryTest extends AbstractPostgresTest {
     assertEquals(1L, pOff.get(0).targetId());
     assertEquals("task.create", pOff.get(1).action());
   }
+
+  @Test
+  void record_withDiff_storesDiffColumn_andReadBackViaFindPage() {
+    // 7-arg record 带 meta + diff(JSON 文本;diff 形如 {field:[before,after]})
+    audits.record("alice", "task.update", TargetType.TASK, 5L,
+        "{\"name\":\"after\",\"shardCount\":1}",
+        "{\"cron\":[\"0 * * * * ?\",\"0 */5 * * * ?\"],\"retryCapMs\":[null,10000]}", "cli");
+    // diff 列落库非 NULL 且为 JSON 文本
+    assertEquals(1L, jdbc.queryForObject(
+        "SELECT count(*) FROM app_audit WHERE id=? AND diff IS NOT NULL", Long.class, jdbc.queryForObject(
+            "SELECT id FROM app_audit WHERE action='task.update'", Long.class)));
+    // findPage 读回 diff 原样
+    List<AuditEntry> rows = audits.findPage(null, "task.update", null, null, null, null, 10, 0);
+    assertEquals(1, rows.size());
+    AuditEntry e = rows.get(0);
+    assertEquals("{\"cron\":[\"0 * * * * ?\",\"0 */5 * * * ?\"],\"retryCapMs\":[null,10000]}".replaceAll("\\s+", ""),
+                 e.diff().replaceAll("\\s+", ""));
+    assertEquals("{\"name\":\"after\",\"shardCount\":1}".replaceAll("\\s+", ""), e.meta().replaceAll("\\s+", ""));
+    assertEquals("cli", e.source());
+  }
+
+  @Test
+  void record_withoutDiff_diffColumnIsSqlNull() {
+    // 既有 6-arg 走 default 委托 → diff 落 NULL(未启用 diff 的动作/旧行语义)
+    audits.record("bob", "task.create", TargetType.TASK, 3L, null, null);
+    assertEquals(1L, jdbc.queryForObject("SELECT count(*) FROM app_audit WHERE diff IS NULL", Long.class));
+    assertEquals(0L, jdbc.queryForObject("SELECT count(*) FROM app_audit WHERE diff IS NOT NULL", Long.class));
+  }
 }
