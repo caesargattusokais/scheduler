@@ -128,4 +128,5 @@ export interface AuditEntry {
   targetId: number;
   meta: string | null;
   source: string | null;
+  diff: string | null; // task.update 的 {field:[before,after]} JSON 文本;null = 未启用 diff 的动作
 }
