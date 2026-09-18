@@ -7,20 +7,24 @@ import dev.scheduler.core.DagRun;
 import dev.scheduler.core.DagRunNode;
 import dev.scheduler.core.DagRunNodeStatus;
 import dev.scheduler.core.DagRunStatus;
+import dev.scheduler.core.TargetType;
 import dev.scheduler.persistence.DagRepository;
 import dev.scheduler.persistence.DagRepository.EdgeInput;
 import dev.scheduler.persistence.DagRepository.NodeInput;
 import dev.scheduler.persistence.ShardRepository;
 import dev.scheduler.server.dag.DagEngine;
+import dev.scheduler.server.service.AuditRecorder;
 import dev.scheduler.server.service.DagQueryService;
 import dev.scheduler.server.service.DagQueryService.RunDetail;
 import java.util.List;
+import java.util.Map;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
@@ -35,12 +39,14 @@ public class DagController {
   private final ShardRepository shards;
   private final DagEngine dagEngine;
   private final DagQueryService query;
+  private final AuditRecorder auditor;
 
-  public DagController(DagRepository dags, ShardRepository shards, DagEngine dagEngine) {
+  public DagController(DagRepository dags, ShardRepository shards, DagEngine dagEngine, AuditRecorder auditor) {
     this.dags = dags;
     this.shards = shards;
     this.dagEngine = dagEngine;
     this.query = new DagQueryService(dags, shards);
+    this.auditor = auditor;
   }
 
   public record CreateDagRequest(String name, String description, String cron,
@@ -51,7 +57,9 @@ public class DagController {
 
   /** 建 DAG:name/cron 合法 + task 存在 + 无自环 + DFS 无环 + 键/边唯一(仓库校验,违规 → IllegalArgumentException → 400)。 */
   @PostMapping
-  public ResponseEntity<Dag> create(@RequestBody CreateDagRequest req) {
+  public ResponseEntity<Dag> create(
+      @RequestHeader(value = "X-Operator", required = false) String operator,
+      @RequestBody CreateDagRequest req) {
     if (req == null || req.name() == null || req.name().isBlank()) {
       throw new IllegalArgumentException("name is required");
     }
@@ -67,8 +75,9 @@ public class DagController {
         .toList();
     List<EdgeInput> edges = req.edges() == null ? List.of()
         : req.edges().stream().map(e -> new EdgeInput(e.from(), e.to())).toList();
-    return ResponseEntity.status(HttpStatus.CREATED).body(
-        dags.createDag(req.name(), req.description(), req.cron(), nodes, edges));
+    Dag created = dags.createDag(req.name(), req.description(), req.cron(), nodes, edges);
+    auditor.record(operator, "dag.create", TargetType.DAG, created.id(), Map.of("name", created.name()));
+    return ResponseEntity.status(HttpStatus.CREATED).body(created);
   }
 
   /** DAG 列表:name 子串过滤 + limit/offset 分页,返回 Page<Dag>。 */
@@ -87,14 +96,31 @@ public class DagController {
     return new DagDetail(dag, dags.findNodes(id), dags.findEdges(id));
   }
 
-  @PostMapping("/{id}/pause")  public Dag pause(@PathVariable long id)  { requireDag(id); dags.setPaused(id, true);  return byId(id); }
-  @PostMapping("/{id}/resume") public Dag resume(@PathVariable long id) { requireDag(id); dags.setPaused(id, false); return byId(id); }
+  @PostMapping("/{id}/pause")
+  public Dag pause(@RequestHeader(value = "X-Operator", required = false) String operator, @PathVariable long id) {
+    requireDag(id);
+    dags.setPaused(id, true);
+    auditor.record(operator, "dag.pause", TargetType.DAG, id, Map.of());
+    return byId(id);
+  }
+
+  @PostMapping("/{id}/resume")
+  public Dag resume(@RequestHeader(value = "X-Operator", required = false) String operator, @PathVariable long id) {
+    requireDag(id);
+    dags.setPaused(id, false);
+    auditor.record(operator, "dag.resume", TargetType.DAG, id, Map.of());
+    return byId(id);
+  }
 
   /** 手动触发一次:建 dag_run + 全 PENDING 节点,交由 DagEngine 扫描推进。 */
   @PostMapping("/{id}/trigger")
-  public ResponseEntity<DagRun> trigger(@PathVariable long id) {
+  public ResponseEntity<DagRun> trigger(
+      @RequestHeader(value = "X-Operator", required = false) String operator,
+      @PathVariable long id) {
     requireDag(id);
-    return ResponseEntity.status(HttpStatus.CREATED).body(dags.createManualRun(id));
+    DagRun run = dags.createManualRun(id);
+    auditor.record(operator, "dag.trigger", TargetType.DAG, id, Map.of());
+    return ResponseEntity.status(HttpStatus.CREATED).body(run);
   }
 
   /** run 列表:dagId/status 过滤 + limit/offset 分页,返回 Page<DagRun>。 */
@@ -116,7 +142,9 @@ public class DagController {
   /** 取消级联(dag → node → execution → shard,spec §4):置 run 取消标志;每个非终态节点置 CANCELED +
    *  outcome;已 spawn 节点再由父取消级联到其 shards;全节点 CANCELED → run 立即终态 CANCELED。 */
   @PostMapping("/runs/{runId}/cancel")
-  public ResponseEntity<RunDetail> cancel(@PathVariable long runId) {
+  public ResponseEntity<RunDetail> cancel(
+      @RequestHeader(value = "X-Operator", required = false) String operator,
+      @PathVariable long runId) {
     DagRun run = dags.findRun(runId).orElseThrow(() -> notFound("dag run " + runId));
     if (run.status() == DagRunStatus.CANCELED) {
       return ResponseEntity.ok(query.runDetail(runId).orElseThrow()); // 幂等
@@ -137,16 +165,21 @@ public class DagController {
     // 操作者取消把全部非终态节点一次性置 CANCELED → 全节点已终态,立即固化终态(镜像 M3 cancelParentImmediate),
     // 不同于引擎 §3.3 的"下一 scan 收敛"。finalizeRun CAS-0 幂等,重放安全。
     dags.finalizeRun(runId, DagRunStatus.CANCELED, "cancelled by operator");
+    auditor.record(operator, "dag_run.cancel", TargetType.DAG_RUN, runId, Map.of());
     return ResponseEntity.ok(query.runDetail(runId).orElseThrow());
   }
 
   /** M5.3 §1.4 单节点重跑:仅终态节点可用;404 缺失,非终态 → 409;成功 200 + 节点现态。节点态变更经 DagEngine。 */
   @PostMapping("/runs/{runId}/nodes/{nodeId}/rerun")
-  public ResponseEntity<DagRunNode> rerunNode(@PathVariable long runId, @PathVariable long nodeId) {
+  public ResponseEntity<DagRunNode> rerunNode(
+      @RequestHeader(value = "X-Operator", required = false) String operator,
+      @PathVariable long runId, @PathVariable long nodeId) {
     dags.findRun(runId).orElseThrow(() -> notFound("dag run " + runId));
     DagRunNode node = dags.findNode(nodeId).orElseThrow(() -> notFound("dag run node " + nodeId));
     if (!node.dagRunId().equals(runId)) throw notFound("dag run node " + nodeId);
-    return ResponseEntity.ok(dagEngine.rerunNode(runId, nodeId));
+    DagRunNode restarted = dagEngine.rerunNode(runId, nodeId);
+    auditor.record(operator, "dag_node.rerun", TargetType.DAG_RUN, runId, Map.of("nodeId", nodeId));
+    return ResponseEntity.ok(restarted);
   }
 
   private Dag byId(long id) { return dags.findDag(id).orElseThrow(() -> notFound("dag " + id)); }

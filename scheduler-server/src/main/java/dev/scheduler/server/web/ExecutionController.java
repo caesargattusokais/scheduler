@@ -3,9 +3,11 @@ package dev.scheduler.server.web;
 import dev.scheduler.core.Execution;
 import dev.scheduler.core.ExecutionStatus;
 import dev.scheduler.core.Shard;
+import dev.scheduler.core.TargetType;
 import dev.scheduler.persistence.ExecutionRepository;
 import dev.scheduler.persistence.ShardRepository;
 import dev.scheduler.persistence.TaskRef;
+import dev.scheduler.server.service.AuditRecorder;
 import dev.scheduler.server.service.DlqView;
 import dev.scheduler.server.service.ExecutionDetail;
 import dev.scheduler.server.service.ExecutionQueryService;
@@ -21,6 +23,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
@@ -37,12 +40,14 @@ public class ExecutionController {
   private final ExecutionRepository executions;
   private final ShardRepository shards;
   private final ExecutionQueryService queryService;
+  private final AuditRecorder auditor;
 
   public ExecutionController(ExecutionRepository executions, ShardRepository shards,
-                             JdbcTemplate jdbc) {
+                             JdbcTemplate jdbc, AuditRecorder auditor) {
     this.executions = executions;
     this.shards = shards;
     this.queryService = new ExecutionQueryService(jdbc, executions, shards);
+    this.auditor = auditor;
   }
 
   @GetMapping
@@ -83,7 +88,9 @@ public class ExecutionController {
    * 源轮不存在 → 404;源轮非终态(DUE/RUNNING)→ 409。同一源轮可多次重跑,每次生成独立一轮(键 rerun:&lt;srcId&gt;:&lt;uuid&gt;)。
    */
   @PostMapping("/{id}/rerun")
-  public ResponseEntity<Execution> rerun(@PathVariable long id) {
+  public ResponseEntity<Execution> rerun(
+      @RequestHeader(value = "X-Operator", required = false) String operator,
+      @PathVariable long id) {
     Execution source = executions.findById(id).orElseThrow(() -> notFound("execution " + id));
     if (!RERUNNABLE.contains(source.status())) {
       throw new ResponseStatusException(HttpStatus.CONFLICT,
@@ -92,6 +99,7 @@ public class ExecutionController {
     String key = "rerun:" + source.id() + ":" + UUID.randomUUID();
     Execution created = shards.createParentWithShards(
         source.taskId(), key, source.shardCount(), source.args(), source.id());
+    auditor.record(operator, "execution.rerun", TargetType.EXECUTION, created.id(), Map.of());
     return ResponseEntity.status(HttpStatus.CREATED).body(created);
   }
 
@@ -124,13 +132,16 @@ public class ExecutionController {
    * 分片不存在 → 404;存在但已非 FAILED → 409。
    */
   @PostMapping("/shards/{shardId}/requeue")
-  public ResponseEntity<Shard> requeue(@PathVariable long shardId) {
+  public ResponseEntity<Shard> requeue(
+      @RequestHeader(value = "X-Operator", required = false) String operator,
+      @PathVariable long shardId) {
     Shard s = shards.findShard(shardId).orElseThrow(() -> notFound("shard " + shardId));
     if (s.status() != ExecutionStatus.FAILED) {
       throw new ResponseStatusException(HttpStatus.CONFLICT,
           "shard " + shardId + " is " + s.status() + " and cannot be requeued (only FAILED can)");
     }
     shards.requeueShard(shardId);
+    auditor.record(operator, "shard.requeue", TargetType.SHARD, shardId, Map.of());
     return ResponseEntity.ok(
         shards.findShard(shardId).orElseThrow(() -> notFound("shard " + shardId)));
   }
@@ -147,10 +158,12 @@ public class ExecutionController {
    * </ul>
    */
   @PostMapping("/{id}/cancel")
-  public ResponseEntity<Execution> cancel(@PathVariable long id) {
+  public ResponseEntity<Execution> cancel(
+      @RequestHeader(value = "X-Operator", required = false) String operator,
+      @PathVariable long id) {
     Execution e = executions.findById(id).orElseThrow(() -> notFound("execution " + id));
     if (e.status() == ExecutionStatus.CANCELED) {
-      return ResponseEntity.ok(e); // 幂等:已取消
+      return ResponseEntity.ok(e); // 幂等:已取消,不记
     }
     if (e.status() != ExecutionStatus.DUE) {
       throw new ResponseStatusException(HttpStatus.CONFLICT,
@@ -158,9 +171,11 @@ public class ExecutionController {
     }
     if (shards.hasRunningShard(id)) {
       shards.requestCancelParent(id); // 有 RUNNING 片 → 协作取消
+      auditor.record(operator, "execution.cancel", TargetType.EXECUTION, id, Map.of());
       return ResponseEntity.accepted().body(derived(id));
     }
     shards.cancelParentImmediate(id); // 无 RUNNING 片 → 直取消(父 → CANCELED)
+    auditor.record(operator, "execution.cancel", TargetType.EXECUTION, id, Map.of());
     return ResponseEntity.ok(derived(id));
   }
 

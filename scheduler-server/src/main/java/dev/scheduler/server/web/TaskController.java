@@ -1,11 +1,15 @@
 package dev.scheduler.server.web;
 
 import dev.scheduler.core.Execution;
+import dev.scheduler.core.TargetType;
 import dev.scheduler.core.Task;
 import dev.scheduler.persistence.ShardRepository;
 import dev.scheduler.persistence.TaskRepository;
+import dev.scheduler.server.service.AuditRecorder;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -15,6 +19,7 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
@@ -29,11 +34,14 @@ public class TaskController {
   private final TaskRepository tasks;
   private final ShardRepository shards;
   private final AvailableHandlerRefs availableRefs;
+  private final AuditRecorder auditor;
 
-  public TaskController(TaskRepository tasks, ShardRepository shards, AvailableHandlerRefs availableRefs) {
+  public TaskController(TaskRepository tasks, ShardRepository shards, AvailableHandlerRefs availableRefs,
+                        AuditRecorder auditor) {
     this.tasks = tasks;
     this.shards = shards;
     this.availableRefs = availableRefs;
+    this.auditor = auditor;
   }
 
   public record CreateTaskRequest(String name, String kind, String handlerRef, String cron,
@@ -47,7 +55,9 @@ public class TaskController {
       String retryMode, Long retryCapMs, Long retryBudgetMs) {}
 
   @PostMapping
-  public ResponseEntity<Task> create(@RequestBody CreateTaskRequest req) {
+  public ResponseEntity<Task> create(
+      @RequestHeader(value = "X-Operator", required = false) String operator,
+      @RequestBody CreateTaskRequest req) {
     if (req == null || req.name() == null || req.name().isBlank()) {
       throw new IllegalArgumentException("name is required");
     }
@@ -69,11 +79,13 @@ public class TaskController {
         req.backoffMs() == null ? 1000L : req.backoffMs(),
         req.retryableFailurePattern(), req.maxActiveConcurrent() == null ? 8 : req.maxActiveConcurrent(),
         true, false, req.retryMode(), req.retryCapMs(), req.retryBudgetMs()));
+    auditor.record(operator, "task.create", TargetType.TASK, created.id(), taskMeta(created));
     return ResponseEntity.status(HttpStatus.CREATED).body(created);
   }
 
   @PutMapping("/{id}")
-  public Task update(@PathVariable long id, @RequestBody UpdateTaskRequest req) {
+  public Task update(@RequestHeader(value = "X-Operator", required = false) String operator,
+                     @PathVariable long id, @RequestBody UpdateTaskRequest req) {
     Task existing = requireTask(id);
     if (req == null || req.name() == null || req.name().isBlank()) {
       throw new IllegalArgumentException("name is required");
@@ -104,7 +116,9 @@ public class TaskController {
     if (!tasks.update(id, updated)) {
       throw notFound("task " + id);
     }
-    return tasks.findById(id).orElseThrow(() -> notFound("task " + id));
+    Task saved = tasks.findById(id).orElseThrow(() -> notFound("task " + id));
+    auditor.record(operator, "task.update", TargetType.TASK, saved.id(), taskMeta(saved));
+    return saved;
   }
 
   /** 任务列表:name 子串、paused 过滤 + limit/offset 分页,返回 Page<Task>。 */
@@ -125,16 +139,20 @@ public class TaskController {
   }
 
   @PostMapping("/{id}/pause")
-  public Task pause(@PathVariable long id) {
+  public Task pause(@RequestHeader(value = "X-Operator", required = false) String operator,
+                    @PathVariable long id) {
     requireTask(id);
     tasks.setPaused(id, true);
+    auditor.record(operator, "task.pause", TargetType.TASK, id, Map.of());
     return tasks.findById(id).orElseThrow(() -> notFound("task " + id));
   }
 
   @PostMapping("/{id}/resume")
-  public Task resume(@PathVariable long id) {
+  public Task resume(@RequestHeader(value = "X-Operator", required = false) String operator,
+                     @PathVariable long id) {
     requireTask(id);
     tasks.setPaused(id, false);
+    auditor.record(operator, "task.resume", TargetType.TASK, id, Map.of());
     return tasks.findById(id).orElseThrow(() -> notFound("task " + id));
   }
 
@@ -143,7 +161,8 @@ public class TaskController {
    * 有子记录 → 409 并说明被什么阻塞;任务不存在 → 404;成功 → 204。
    */
   @DeleteMapping("/{id}")
-  public ResponseEntity<Void> delete(@PathVariable long id) {
+  public ResponseEntity<Void> delete(@RequestHeader(value = "X-Operator", required = false) String operator,
+                                     @PathVariable long id) {
     requireTask(id);
     List<String> blockers = new ArrayList<>();
     long ec = tasks.executionCount(id);
@@ -157,13 +176,17 @@ public class TaskController {
     if (!tasks.delete(id)) {
       throw notFound("task " + id); // 竞态兜底:计数后并发插入的子记录
     }
+    auditor.record(operator, "task.delete", TargetType.TASK, id, Map.of());
     return ResponseEntity.noContent().build();
   }
 
   @PostMapping("/{id}/trigger")
-  public ResponseEntity<Execution> trigger(@PathVariable long id) {
-    return ResponseEntity.status(HttpStatus.CREATED)
-        .body(manualRun(id, UUID.randomUUID().toString()));
+  public ResponseEntity<Execution> trigger(
+      @RequestHeader(value = "X-Operator", required = false) String operator,
+      @PathVariable long id) {
+    Execution run = manualRun(id, UUID.randomUUID().toString());
+    auditor.record(operator, "task.trigger", TargetType.TASK, id, Map.of());
+    return ResponseEntity.status(HttpStatus.CREATED).body(run);
   }
 
   /** 手动触发:建父 execution + 其 shard(重跑已 M6.5 移入 /executions/{id}/rerun)。 */
@@ -176,6 +199,24 @@ public class TaskController {
 
   private Task requireTask(long id) {
     return tasks.findById(id).orElseThrow(() -> notFound("task " + id));
+  }
+
+  /** 审计 meta = 操作后已确认的 Task 后态紧凑字段(非 diff)。 */
+  private Map<String, Object> taskMeta(Task t) {
+    Map<String, Object> m = new LinkedHashMap<>();
+    m.put("name", t.name());
+    m.put("handlerRef", t.handlerRef());
+    m.put("cron", t.cron());
+    m.put("shardCount", t.shardCount());
+    m.put("timeoutSeconds", t.timeoutSeconds());
+    m.put("maxRetries", t.maxRetries());
+    m.put("backoffMs", t.backoffMs());
+    m.put("retryMode", t.retryMode());
+    m.put("retryCapMs", t.retryCapMs());
+    m.put("retryBudgetMs", t.retryBudgetMs());
+    m.put("enabled", t.enabled());
+    m.put("paused", t.paused());
+    return m;
   }
 
   /** M6.2:入口即拒绝孤儿 ref——handlerRef 必须为进程内 ∪ 存活 worker 并集中的某 ref(否则建/改 400)。 */

@@ -4,6 +4,7 @@ import ExecutionsPage from './pages/ExecutionsPage';
 import DlqPage from './pages/DlqPage';
 import DagsPage from './pages/DagsPage';
 import MetricsPage from './pages/MetricsPage';
+import AuditPage from './pages/AuditPage';
 
 const NAV = [
   { to: '/tasks', label: '任务', icon: '▤' },
@@ -11,6 +12,7 @@ const NAV = [
   { to: '/dlq', label: 'DLQ', icon: '⚠' },
   { to: '/dags', label: '工作流', icon: '⌗' },
   { to: '/metrics', label: '指标', icon: '▦' },
+  { to: '/audits', label: '审计', icon: '≡' }, // 第 6 入口
 ];
 
 export default function App() {
@@ -39,6 +41,7 @@ export default function App() {
             <Route path="/dlq" element={<DlqPage />} />
             <Route path="/dags" element={<DagsPage />} />
             <Route path="/metrics" element={<MetricsPage />} />
+            <Route path="/audits" element={<AuditPage />} />
           </Routes>
         </main>
       </div>
