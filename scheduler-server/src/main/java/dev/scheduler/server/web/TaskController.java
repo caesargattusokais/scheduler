@@ -10,6 +10,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.UUID;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -117,7 +118,7 @@ public class TaskController {
       throw notFound("task " + id);
     }
     Task saved = tasks.findById(id).orElseThrow(() -> notFound("task " + id));
-    auditor.record(operator, "task.update", TargetType.TASK, saved.id(), taskMeta(saved));
+    auditor.record(operator, "task.update", TargetType.TASK, saved.id(), taskMeta(saved), taskDiff(existing, saved));
     return saved;
   }
 
@@ -205,8 +206,11 @@ public class TaskController {
   private Map<String, Object> taskMeta(Task t) {
     Map<String, Object> m = new LinkedHashMap<>();
     m.put("name", t.name());
+    m.put("kind", t.kind());
     m.put("handlerRef", t.handlerRef());
     m.put("cron", t.cron());
+    m.put("retryableFailurePattern", t.retryableFailurePattern());
+    m.put("maxActiveConcurrent", t.maxActiveConcurrent());
     m.put("shardCount", t.shardCount());
     m.put("timeoutSeconds", t.timeoutSeconds());
     m.put("maxRetries", t.maxRetries());
@@ -217,6 +221,31 @@ public class TaskController {
     m.put("enabled", t.enabled());
     m.put("paused", t.paused());
     return m;
+  }
+
+  /** task.update 的 before/after 字段级 diff:遍历 15 个可变字段,仅收录前后不同者 → {field:[before,after]}。 */
+  private Map<String, Object> taskDiff(Task before, Task after) {
+    Map<String, Object> d = new LinkedHashMap<>();
+    putDiff(d, "name", before.name(), after.name());
+    putDiff(d, "kind", before.kind(), after.kind());
+    putDiff(d, "handlerRef", before.handlerRef(), after.handlerRef());
+    putDiff(d, "cron", before.cron(), after.cron());
+    putDiff(d, "shardCount", before.shardCount(), after.shardCount());
+    putDiff(d, "timeoutSeconds", before.timeoutSeconds(), after.timeoutSeconds());
+    putDiff(d, "maxRetries", before.maxRetries(), after.maxRetries());
+    putDiff(d, "backoffMs", before.backoffMs(), after.backoffMs());
+    putDiff(d, "retryableFailurePattern", before.retryableFailurePattern(), after.retryableFailurePattern());
+    putDiff(d, "maxActiveConcurrent", before.maxActiveConcurrent(), after.maxActiveConcurrent());
+    putDiff(d, "enabled", before.enabled(), after.enabled());
+    putDiff(d, "paused", before.paused(), after.paused());
+    putDiff(d, "retryMode", before.retryMode(), after.retryMode());
+    putDiff(d, "retryCapMs", before.retryCapMs(), after.retryCapMs());
+    putDiff(d, "retryBudgetMs", before.retryBudgetMs(), after.retryBudgetMs());
+    return d;
+  }
+
+  private void putDiff(Map<String, Object> d, String field, Object before, Object after) {
+    if (!Objects.equals(before, after)) d.put(field, List.of(before, after));
   }
 
   /** M6.2:入口即拒绝孤儿 ref——handlerRef 必须为进程内 ∪ 存活 worker 并集中的某 ref(否则建/改 400)。 */
