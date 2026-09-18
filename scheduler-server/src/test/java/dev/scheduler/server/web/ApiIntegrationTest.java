@@ -591,7 +591,8 @@ class ApiIntegrationTest {
         .andExpect(status().isOk())
         .andExpect(jsonPath("$.total").value(1))
         .andExpect(jsonPath("$['items'][0].targetType").value("task"))
-        .andExpect(jsonPath("$['items'][0].meta").value(org.hamcrest.Matchers.containsString("audited-task")));
+        .andExpect(jsonPath("$['items'][0].meta").value(org.hamcrest.Matchers.containsString("audited-task")))
+        .andExpect(jsonPath("$['items'][0].diff").value(org.hamcrest.Matchers.nullValue()));
 
     // update → task.update,targetId=id,meta 为后态(改名后)
     mvc.perform(put("/api/v1/tasks/" + id).header("X-Operator", "alice")
@@ -602,7 +603,12 @@ class ApiIntegrationTest {
     mvc.perform(get("/api/v1/audits").param("action", "task.update").param("targetId", String.valueOf(id)))
         .andExpect(status().isOk())
         .andExpect(jsonPath("$.total").value(1))
-        .andExpect(jsonPath("$['items'][0].meta").value(org.hamcrest.Matchers.containsString("renamed-audit")));
+        .andExpect(jsonPath("$['items'][0].meta").value(org.hamcrest.Matchers.containsString("renamed-audit")))
+        .andExpect(jsonPath("$['items'][0].diff").value(org.hamcrest.Matchers.containsString("renamed-audit")))
+        .andExpect(jsonPath("$['items'][0].diff").value(org.hamcrest.Matchers.matchesPattern(
+            ".*\"name\"\\s*:\\s*\\[\"audited-task\"\\s*,\\s*\"renamed-audit\"\\s*\\].*")))
+        .andExpect(jsonPath("$['items'][0].diff").value(org.hamcrest.Matchers.not(
+            org.hamcrest.Matchers.containsString("shardCount"))));
 
     // 无 X-Operator 头 → operator 兜底 'anonymous'
     mvc.perform(post("/api/v1/tasks/" + id + "/pause")).andExpect(status().isOk());
@@ -632,6 +638,26 @@ class ApiIntegrationTest {
     mvc.perform(get("/api/v1/audits").param("action", "task.delete").param("targetId", String.valueOf(delId)))
         .andExpect(status().isOk())
         .andExpect(jsonPath("$['items'][0].operator").value("bob"));
+  }
+
+  /** 同值 update(不改任何字段)→ task.update,但 before/after 无差异 → diff 为空对象 {},meta 仍全量后态。 */
+  @Test
+  void taskUpdate_identicalFields_diffIsEmptyObject() throws Exception {
+    long id = objectMapper.readTree(mvc.perform(post("/api/v1/tasks").header("X-Operator", "u")
+            .contentType(MediaType.APPLICATION_JSON)
+            .content("{\"name\":\"same-task\",\"kind\":\"cron\",\"handlerRef\":\"demo\","
+                + "\"cron\":\"" + CRON + "\",\"shardCount\":1}"))
+        .andExpect(status().isCreated()).andReturn().getResponse().getContentAsString()).get("id").asLong();
+    // 完全相同的定义再 PUT 一次(不改任何字段)→ task.update,但 diff 应为空对象 {}
+    mvc.perform(put("/api/v1/tasks/" + id).header("X-Operator", "u")
+            .contentType(MediaType.APPLICATION_JSON)
+            .content("{\"name\":\"same-task\",\"kind\":\"cron\",\"handlerRef\":\"demo\","
+                + "\"cron\":\"" + CRON + "\",\"shardCount\":1}"))
+        .andExpect(status().isOk());
+    mvc.perform(get("/api/v1/audits").param("action", "task.update").param("targetId", String.valueOf(id)))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.total").value(1))
+        .andExpect(jsonPath("$['items'][0].diff").value("{}"));
   }
 
   /** 审计写端:ExecutionController rerun/cancel + shard.requeue(目标均为操作者主动动作)。 */

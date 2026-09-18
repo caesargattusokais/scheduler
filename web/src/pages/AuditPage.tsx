@@ -27,6 +27,19 @@ const metaSummary = (m: string | null) => {
     return m;
   }
 };
+/** diff 是 {field:[before,after]} JSON 文本;null / {} → 无变更;渲染 field: 旧 → 新。 */
+const ESC = (v: unknown) => v === null || v === undefined ? '∅' : JSON.stringify(v);
+const diffSummary = (d: string | null) => {
+  if (!d) return '—'; // null → 未启用 diff;{} → 无字段变化
+  try {
+    const o = JSON.parse(d) as Record<string, [unknown, unknown]>;
+    const keys = Object.keys(o);
+    if (keys.length === 0) return '—';
+    return keys.map((k) => `${k}: ${ESC(o[k][0])} → ${ESC(o[k][1])}`).join(' · ');
+  } catch {
+    return d;
+  }
+};
 
 export default function AuditPage() {
   const [rows, setRows] = useState<AuditEntry[]>([]);
@@ -124,6 +137,7 @@ export default function AuditPage() {
                 <th>操作者</th>
                 <th>动作</th>
                 <th>目标</th>
+                <th>变更</th>
                 <th>meta</th>
               </tr>
             </thead>
@@ -134,6 +148,7 @@ export default function AuditPage() {
                   <td className="font-mono text-xs">{r.operator}</td>
                   <td><span className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-xs text-slate-700">{r.action}</span></td>
                   <td className="font-mono text-xs">{r.targetType}:{r.targetId}</td>
+                  <td className="break-words font-mono text-xs text-slate-600">{diffSummary(r.diff)}</td>
                   <td className="break-words font-mono text-xs text-slate-600">{metaSummary(r.meta)}</td>
                 </tr>
               ))}

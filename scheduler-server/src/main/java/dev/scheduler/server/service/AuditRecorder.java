@@ -28,24 +28,29 @@ public class AuditRecorder {
 
   /** source 为 null(保留列,未启用来源追踪)。 */
   public void record(String operator, String action, TargetType target, long targetId, Map<String, Object> meta) {
-    record(operator, action, target, targetId, meta, null);
+    record(operator, action, target, targetId, meta, null, null);
   }
 
+  /** 带 before/after 字段级 diff(task.update 等);meta 为操作后态,diff 为 {field:[before,after]}。 */
   public void record(String operator, String action, TargetType target, long targetId,
-                     Map<String, Object> meta, String source) {
+                     Map<String, Object> meta, Map<String, Object> diff) {
+    record(operator, action, target, targetId, meta, diff, null);
+  }
+
+  private void record(String operator, String action, TargetType target, long targetId,
+                      Map<String, Object> meta, Map<String, Object> diff, String source) {
     String who = (operator == null || operator.isBlank()) ? "anonymous" : operator;
-    String metaJson = null;
-    if (meta != null) {
-      try {
-        metaJson = json.writeValueAsString(meta);
-      } catch (JsonProcessingException e) {
-        log.warn("audit meta serialization failed; recording without meta: {} {} {}", who, action, targetId, e);
-      }
-    }
     try {
-      audits.record(who, action, target, targetId, metaJson, source);
+      audits.record(who, action, target, targetId, serialize(meta), serialize(diff), source);
     } catch (RuntimeException e) {
       log.warn("audit record failed (non-blocking): {} {} target={} id={}", who, action, target.db(), targetId, e);
     }
+  }
+
+  /** meta/diff 序列化;null 或序列化失败 → null(失败只 warn,审计非阻断)。 */
+  private String serialize(Map<String, Object> meta) {
+    if (meta == null) return null;
+    try { return json.writeValueAsString(meta); }
+    catch (JsonProcessingException e) { log.warn("audit meta serialization failed; recording without it", e); return null; }
   }
 }

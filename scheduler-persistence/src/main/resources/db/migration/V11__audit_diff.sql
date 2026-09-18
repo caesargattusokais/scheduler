@@ -1,0 +1,1 @@
+ALTER TABLE app_audit ADD COLUMN diff JSONB NULL;
