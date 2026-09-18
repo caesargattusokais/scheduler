@@ -129,4 +129,5 @@ export interface AuditEntry {
   meta: string | null;
   source: string | null;
   diff: string | null; // task.update 的 {field:[before,after]} JSON 文本;null = 未启用 diff 的动作
+  before: string | null; // 操作前全量 Task 快照(task.* 动作);其余 null
 }
