@@ -31,11 +31,6 @@ public class AuditRecorder {
     record(operator, action, target, targetId, meta, null, null);
   }
 
-  public void record(String operator, String action, TargetType target, long targetId,
-                     Map<String, Object> meta, String source) {
-    record(operator, action, target, targetId, meta, null, source);
-  }
-
   /** 带 before/after 字段级 diff(task.update 等);meta 为操作后态,diff 为 {field:[before,after]}。 */
   public void record(String operator, String action, TargetType target, long targetId,
                      Map<String, Object> meta, Map<String, Object> diff) {
