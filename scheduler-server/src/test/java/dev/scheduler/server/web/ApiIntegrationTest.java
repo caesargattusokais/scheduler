@@ -701,6 +701,103 @@ class ApiIntegrationTest {
         .andExpect(jsonPath("$['items'][0].before").value(org.hamcrest.Matchers.containsString("same-before")));
   }
 
+  // ---------- 审计 before:execution/shard/dag 动作快照(子项目3 扩展) ----------
+
+  /** before 覆盖 execution.cancel / shard.requeue:操作前记录全量(取消前父 DUE、分片复位前 attempt)。 */
+  @Test
+  void executionCancelAndShardRequeue_beforeSnapshot() throws Exception {
+    // execution.cancel:父 DUE 直取消 → before 为取消前父(状态 DUE, attempt 0)
+    long t = postTask("bs-exec");
+    long parentId = triggerParent(t); // DUE 父 + 1 DUE shard
+    mvc.perform(post("/api/v1/executions/" + parentId + "/cancel")).andExpect(status().isOk());
+    mvc.perform(get("/api/v1/audits").param("action", "execution.cancel").param("targetId", String.valueOf(parentId)))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.total").value(1))
+        .andExpect(jsonPath("$['items'][0].before").value(org.hamcrest.Matchers.containsString("DUE")));
+
+    // shard.requeue:FAILED shard 复位前快照留存 attempt=3(已置高)/ FAILED;requeue 后 attempt 复位 0
+    long t2 = postTask("bs-req");
+    Shard dlq = seedDeadLetter(t2);
+    jdbc.update("UPDATE execution_shard SET attempt=3 WHERE id=?", dlq.id());
+    mvc.perform(post("/api/v1/executions/shards/" + dlq.id() + "/requeue"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.attempt").value(0));
+    mvc.perform(get("/api/v1/audits").param("action", "shard.requeue").param("targetId", String.valueOf(dlq.id())))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.total").value(1))
+        .andExpect(jsonPath("$['items'][0].before").value(org.hamcrest.Matchers.containsString("FAILED")))
+        .andExpect(jsonPath("$['items'][0].before").value(org.hamcrest.Matchers.matchesPattern(
+            ".*\"attempt\"\\s*:\\s*3.*")));
+  }
+
+  /** before 覆盖 execution.rerun:before = 被引用的源轮全量(source execution 的 id 进 before)。 */
+  @Test
+  void executionRerun_beforeIsSourceRound() throws Exception {
+    long id = postTask("bs-rerun");
+    long sourceId = triggerParent(id); // DUE 父 + 1 DUE shard
+    for (Long sid : jdbc.queryForList("SELECT id FROM execution_shard WHERE execution_id=?",
+        Long.class, sourceId)) {
+      jdbc.update("UPDATE execution_shard SET status='SUCCESS', finished_at=now() WHERE id=?", sid);
+    }
+    jdbc.update("UPDATE execution SET status='SUCCESS', finished_at=now() WHERE id=? AND status='DUE'", sourceId);
+    long newId = objectMapper.readTree(mvc.perform(post("/api/v1/executions/" + sourceId + "/rerun"))
+        .andExpect(status().isCreated()).andReturn().getResponse().getContentAsString()).path("id").asLong();
+    mvc.perform(get("/api/v1/audits").param("action", "execution.rerun").param("targetId", String.valueOf(newId)))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.total").value(1))
+        // before 是源轮全量:其 id = sourceId(而非 targetId=newId)
+        .andExpect(jsonPath("$['items'][0].before").value(org.hamcrest.Matchers.matchesPattern(
+            ".*\"id\"\\s*:\\s*" + sourceId + ".*")));
+  }
+
+  /** before 覆盖 dag.pause / dag.trigger / dag_run.cancel:操作前 dag/run 全量。 */
+  @Test
+  void dagWriteActions_beforeSnapshot() throws Exception {
+    long t = postTask("bs-dag-task");
+    long dagId = postDag("bs-dag", new long[]{t}, new String[]{"A"}, null);
+    // dag.pause:before 为暂停前 dag(含名称)
+    mvc.perform(post("/api/v1/dags/" + dagId + "/pause")).andExpect(status().isOk());
+    mvc.perform(get("/api/v1/audits").param("action", "dag.pause").param("targetId", String.valueOf(dagId)))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.total").value(1))
+        .andExpect(jsonPath("$['items'][0].before").value(org.hamcrest.Matchers.containsString("bs-dag")));
+    // dag.trigger:before 为触发前 dag 定义
+    long runId = triggerDag(dagId);
+    mvc.perform(get("/api/v1/audits").param("action", "dag.trigger").param("targetId", String.valueOf(dagId)))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.total").value(1))
+        .andExpect(jsonPath("$['items'][0].before").value(org.hamcrest.Matchers.containsString("bs-dag")));
+    // dag_run.cancel:before 为取消前 run(PENDING)
+    mvc.perform(post("/api/v1/dags/runs/" + runId + "/cancel")).andExpect(status().isOk());
+    mvc.perform(get("/api/v1/audits").param("action", "dag_run.cancel").param("targetId", String.valueOf(runId)))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.total").value(1))
+        .andExpect(jsonPath("$['items'][0].before").value(org.hamcrest.Matchers.containsString("PENDING")));
+  }
+
+  /** before 覆盖 dag_node.rerun:before 为被重跑节点重跑前全量(终态 SUCCESS, nodeKey=A)。 */
+  @Test
+  void dagNodeRerun_beforeSnapshot() throws Exception {
+    long t = postTask("bs-node");
+    long dagId = postDag("bs-node-dag", new long[]{t}, new String[]{"A"}, null);
+    pauseDag(dagId);
+    long runId = triggerDag(dagId);
+    dagEngine.scanOnce();              // spawn A → RUNNING
+    completeNodeShards(runId, "A", "SUCCESS");
+    reconciler.scanOnce();             // A 父 SUCCESS
+    dagEngine.scanOnce();              // A 派生 SUCCESS → run 终态
+    long aNodeId = dagNodeId(runId, "A");
+    mvc.perform(post("/api/v1/dags/runs/" + runId + "/nodes/" + aNodeId + "/rerun"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.status").value("RUNNING"));
+    mvc.perform(get("/api/v1/audits").param("action", "dag_node.rerun").param("targetId", String.valueOf(runId)))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.total").value(1))
+        .andExpect(jsonPath("$['items'][0].before").value(org.hamcrest.Matchers.matchesPattern(
+            ".*\"nodeKey\"\\s*:\\s*\"A\".*")))
+        .andExpect(jsonPath("$['items'][0].before").value(org.hamcrest.Matchers.containsString("SUCCESS")));
+  }
+
   /** 审计读 diff 过滤:hasDiff=true 仅真变更行(排除 {} 与 NULL);diffField=cron 命中改过 cron 的行;组合生效。 */
   @Test
   void auditReadApi_diffFilters() throws Exception {

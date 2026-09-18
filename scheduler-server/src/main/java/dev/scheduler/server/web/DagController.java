@@ -16,6 +16,8 @@ import dev.scheduler.server.dag.DagEngine;
 import dev.scheduler.server.service.AuditRecorder;
 import dev.scheduler.server.service.DagQueryService;
 import dev.scheduler.server.service.DagQueryService.RunDetail;
+import java.time.Instant;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import org.springframework.http.HttpStatus;
@@ -98,17 +100,17 @@ public class DagController {
 
   @PostMapping("/{id}/pause")
   public Dag pause(@RequestHeader(value = "X-Operator", required = false) String operator, @PathVariable long id) {
-    requireDag(id);
+    Dag before = requireDag(id);
     dags.setPaused(id, true);
-    auditor.record(operator, "dag.pause", TargetType.DAG, id, Map.of());
+    auditor.record(operator, "dag.pause", TargetType.DAG, id, Map.of(), null, dagBefore(before));
     return byId(id);
   }
 
   @PostMapping("/{id}/resume")
   public Dag resume(@RequestHeader(value = "X-Operator", required = false) String operator, @PathVariable long id) {
-    requireDag(id);
+    Dag before = requireDag(id);
     dags.setPaused(id, false);
-    auditor.record(operator, "dag.resume", TargetType.DAG, id, Map.of());
+    auditor.record(operator, "dag.resume", TargetType.DAG, id, Map.of(), null, dagBefore(before));
     return byId(id);
   }
 
@@ -117,9 +119,9 @@ public class DagController {
   public ResponseEntity<DagRun> trigger(
       @RequestHeader(value = "X-Operator", required = false) String operator,
       @PathVariable long id) {
-    requireDag(id);
+    Dag before = requireDag(id);
     DagRun run = dags.createManualRun(id);
-    auditor.record(operator, "dag.trigger", TargetType.DAG, id, Map.of());
+    auditor.record(operator, "dag.trigger", TargetType.DAG, id, Map.of(), null, dagBefore(before));
     return ResponseEntity.status(HttpStatus.CREATED).body(run);
   }
 
@@ -165,7 +167,7 @@ public class DagController {
     // 操作者取消把全部非终态节点一次性置 CANCELED → 全节点已终态,立即固化终态(镜像 M3 cancelParentImmediate),
     // 不同于引擎 §3.3 的"下一 scan 收敛"。finalizeRun CAS-0 幂等,重放安全。
     dags.finalizeRun(runId, DagRunStatus.CANCELED, "cancelled by operator");
-    auditor.record(operator, "dag_run.cancel", TargetType.DAG_RUN, runId, Map.of());
+    auditor.record(operator, "dag_run.cancel", TargetType.DAG_RUN, runId, Map.of(), null, dagRunBefore(run));
     return ResponseEntity.ok(query.runDetail(runId).orElseThrow());
   }
 
@@ -178,12 +180,60 @@ public class DagController {
     DagRunNode node = dags.findNode(nodeId).orElseThrow(() -> notFound("dag run node " + nodeId));
     if (!node.dagRunId().equals(runId)) throw notFound("dag run node " + nodeId);
     DagRunNode restarted = dagEngine.rerunNode(runId, nodeId);
-    auditor.record(operator, "dag_node.rerun", TargetType.DAG_RUN, runId, Map.of("nodeId", nodeId));
+    auditor.record(operator, "dag_node.rerun", TargetType.DAG_RUN, runId, Map.of("nodeId", nodeId), null, nodeBefore(node));
     return ResponseEntity.ok(restarted);
   }
 
   private Dag byId(long id) { return dags.findDag(id).orElseThrow(() -> notFound("dag " + id)); }
-  private void requireDag(long id) { byId(id); }
+  private Dag requireDag(long id) { return byId(id); }
+
+  /** 审计 before = 操作前全量 DAG 定义(8 组件):供取证溯源;Instant 收敛为 ISO-8601 文本(恒定可序列化)。 */
+  private Map<String, Object> dagBefore(Dag d) {
+    Map<String, Object> b = new LinkedHashMap<>();
+    b.put("id", d.id());
+    b.put("name", d.name());
+    b.put("description", d.description());
+    b.put("cron", d.cron());
+    b.put("enabled", d.enabled());
+    b.put("paused", d.paused());
+    b.put("createdAt", ts(d.createdAt()));
+    b.put("updatedAt", ts(d.updatedAt()));
+    return b;
+  }
+
+  /** 审计 before = 操作前全量 DagRun 定义(8 组件)。 */
+  private Map<String, Object> dagRunBefore(DagRun r) {
+    Map<String, Object> b = new LinkedHashMap<>();
+    b.put("id", r.id());
+    b.put("dagId", r.dagId());
+    b.put("idempotencyKey", r.idempotencyKey());
+    b.put("status", r.status());
+    b.put("triggerReason", r.triggerReason());
+    b.put("cancelRequested", r.cancelRequested());
+    b.put("finishedAt", ts(r.finishedAt()));
+    b.put("createdAt", ts(r.createdAt()));
+    return b;
+  }
+
+  /** 审计 before = 被重跑节点重跑前全量(10 组件)。 */
+  private Map<String, Object> nodeBefore(DagRunNode n) {
+    Map<String, Object> b = new LinkedHashMap<>();
+    b.put("id", n.id());
+    b.put("dagRunId", n.dagRunId());
+    b.put("nodeKey", n.nodeKey());
+    b.put("taskId", n.taskId());
+    b.put("executionId", n.executionId());
+    b.put("status", n.status());
+    b.put("sortOrder", n.sortOrder());
+    b.put("detail", n.detail());
+    b.put("createdAt", ts(n.createdAt()));
+    b.put("finishedAt", ts(n.finishedAt()));
+    return b;
+  }
+
+  /** Instant → ISO-8601 文本(null 保留);审计序列化不完全依赖 ObjectMapper 的 jsr310 注册。 */
+  private static String ts(Instant i) { return i == null ? null : i.toString(); }
+
   private static ResponseStatusException notFound(String what) {
     return new ResponseStatusException(HttpStatus.NOT_FOUND, what);
   }

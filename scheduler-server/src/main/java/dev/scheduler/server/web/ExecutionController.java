@@ -13,6 +13,7 @@ import dev.scheduler.server.service.ExecutionDetail;
 import dev.scheduler.server.service.ExecutionQueryService;
 import java.time.Instant;
 import java.time.format.DateTimeParseException;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -99,7 +100,7 @@ public class ExecutionController {
     String key = "rerun:" + source.id() + ":" + UUID.randomUUID();
     Execution created = shards.createParentWithShards(
         source.taskId(), key, source.shardCount(), source.args(), source.id());
-    auditor.record(operator, "execution.rerun", TargetType.EXECUTION, created.id(), Map.of());
+    auditor.record(operator, "execution.rerun", TargetType.EXECUTION, created.id(), Map.of(), null, executionBefore(source));
     return ResponseEntity.status(HttpStatus.CREATED).body(created);
   }
 
@@ -141,7 +142,7 @@ public class ExecutionController {
           "shard " + shardId + " is " + s.status() + " and cannot be requeued (only FAILED can)");
     }
     shards.requeueShard(shardId);
-    auditor.record(operator, "shard.requeue", TargetType.SHARD, shardId, Map.of());
+    auditor.record(operator, "shard.requeue", TargetType.SHARD, shardId, Map.of(), null, shardBefore(s));
     return ResponseEntity.ok(
         shards.findShard(shardId).orElseThrow(() -> notFound("shard " + shardId)));
   }
@@ -171,13 +172,57 @@ public class ExecutionController {
     }
     if (shards.hasRunningShard(id)) {
       shards.requestCancelParent(id); // 有 RUNNING 片 → 协作取消
-      auditor.record(operator, "execution.cancel", TargetType.EXECUTION, id, Map.of());
+      auditor.record(operator, "execution.cancel", TargetType.EXECUTION, id, Map.of(), null, executionBefore(e));
       return ResponseEntity.accepted().body(derived(id));
     }
     shards.cancelParentImmediate(id); // 无 RUNNING 片 → 直取消(父 → CANCELED)
-    auditor.record(operator, "execution.cancel", TargetType.EXECUTION, id, Map.of());
+    auditor.record(operator, "execution.cancel", TargetType.EXECUTION, id, Map.of(), null, executionBefore(e));
     return ResponseEntity.ok(derived(id));
   }
+
+  /** 审计 before = 操作前全量 Execution 定义(15 组件,含 rerunOf):供取证;Instant 收敛 ISO-8601 文本。 */
+  private Map<String, Object> executionBefore(Execution e) {
+    Map<String, Object> b = new LinkedHashMap<>();
+    b.put("id", e.id());
+    b.put("taskId", e.taskId());
+    b.put("status", e.status());
+    b.put("idempotencyKey", e.idempotencyKey());
+    b.put("args", e.args());
+    b.put("shardIndex", e.shardIndex());
+    b.put("shardCount", e.shardCount());
+    b.put("attempt", e.attempt());
+    b.put("workerId", e.workerId());
+    b.put("leaseUntil", ts(e.leaseUntil()));
+    b.put("nextRetryAt", ts(e.nextRetryAt()));
+    b.put("startedAt", ts(e.startedAt()));
+    b.put("finishedAt", ts(e.finishedAt()));
+    b.put("resultPayload", e.resultPayload());
+    b.put("rerunOf", e.rerunOf());
+    return b;
+  }
+
+  /** 审计 before = 操作前全量 Shard 定义(14 组件,含复位前 attempt/deadLetter):取证复位前状态。 */
+  private Map<String, Object> shardBefore(Shard s) {
+    Map<String, Object> b = new LinkedHashMap<>();
+    b.put("id", s.id());
+    b.put("executionId", s.executionId());
+    b.put("shardIndex", s.shardIndex());
+    b.put("shardData", s.shardData());
+    b.put("status", s.status());
+    b.put("attempt", s.attempt());
+    b.put("workerId", s.workerId());
+    b.put("leaseUntil", ts(s.leaseUntil()));
+    b.put("nextRetryAt", ts(s.nextRetryAt()));
+    b.put("cancelRequested", s.cancelRequested());
+    b.put("deadLetter", s.deadLetter());
+    b.put("startedAt", ts(s.startedAt()));
+    b.put("finishedAt", ts(s.finishedAt()));
+    b.put("resultPayload", s.resultPayload());
+    return b;
+  }
+
+  /** Instant → ISO-8601 文本(null 保留);审计序列化不完全依赖 ObjectMapper 的 jsr310 注册。 */
+  private static String ts(Instant i) { return i == null ? null : i.toString(); }
 
   /** 由当前父行 + 其分片派生控制面展示的父 status(读取只映射,不写库)。 */
   private Execution derived(long id) {
