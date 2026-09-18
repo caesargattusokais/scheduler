@@ -3,9 +3,10 @@ package dev.scheduler.core;
 import java.time.Instant;
 
 /**
- * 一条操作审计记录(append-only 读模型)。meta/diff 为原始 JSON 文本或 null:写端由 server 层
+ * 一条操作审计记录(append-only 读模型)。meta/diff/before 为原始 JSON 文本或 null:写端由 server 层
  * AuditRecorder 用 Jackson 序列化,持久层不依赖 Jackson,读 API 原样透出、前端 JSON.parse 展示。
- * diff 为 before/after 变更的 JSON 文本(形如 {field: [before, after]} 或嵌套 dict)或 null。
+ * diff 为 before/after 变更的 JSON 文本(形如 {field: [before, after]} 或嵌套 dict)或 null;
+ * before 为操作前全量 Task 的 JSON 文本或 null(仅 task.* 动作)。
  */
 public record AuditEntry(
     long id,
@@ -16,4 +17,5 @@ public record AuditEntry(
     long targetId,
     String meta,       // 操作后态 JSON 文本或 null
     String source,     // 请求方标识,通常 null
-    String diff) {}
+    String diff,
+    String before) {}

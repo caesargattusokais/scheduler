@@ -608,7 +608,10 @@ class ApiIntegrationTest {
         .andExpect(jsonPath("$['items'][0].diff").value(org.hamcrest.Matchers.matchesPattern(
             ".*\"name\"\\s*:\\s*\\[\"audited-task\"\\s*,\\s*\"renamed-audit\"\\s*\\].*")))
         .andExpect(jsonPath("$['items'][0].diff").value(org.hamcrest.Matchers.not(
-            org.hamcrest.Matchers.containsString("shardCount"))));
+            org.hamcrest.Matchers.containsString("shardCount"))))
+        .andExpect(jsonPath("$['items'][0].before").value(org.hamcrest.Matchers.containsString("audited-task")))
+        .andExpect(jsonPath("$['items'][0].before").value(org.hamcrest.Matchers.not(
+            org.hamcrest.Matchers.containsString("renamed-audit"))));
 
     // 无 X-Operator 头 → operator 兜底 'anonymous'
     mvc.perform(post("/api/v1/tasks/" + id + "/pause")).andExpect(status().isOk());
@@ -658,6 +661,44 @@ class ApiIntegrationTest {
         .andExpect(status().isOk())
         .andExpect(jsonPath("$.total").value(1))
         .andExpect(jsonPath("$['items'][0].diff").value("{}"));
+  }
+
+  /** 取证:task.delete 物理删除后其完整定义只在 before 留存,可据此还原。 */
+  @Test
+  void taskDelete_beforeSnapshotRetainsDefinition() throws Exception {
+    long delId = objectMapper.readTree(mvc.perform(post("/api/v1/tasks").header("X-Operator", "delsnap")
+            .contentType(MediaType.APPLICATION_JSON)
+            .content("{\"name\":\"snap-del\",\"kind\":\"cron\",\"handlerRef\":\"demo\","
+                + "\"cron\":\"" + CRON + "\",\"shardCount\":2}"))
+        .andExpect(status().isCreated()).andReturn().getResponse().getContentAsString()).get("id").asLong();
+    mvc.perform(delete("/api/v1/tasks/" + delId).header("X-Operator", "delsnap")).andExpect(status().isNoContent());
+    // 任务已物理删除;审计行仍持 before 全量快照
+    mvc.perform(get("/api/v1/audits").param("action", "task.delete").param("targetId", String.valueOf(delId)))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.total").value(1))
+        .andExpect(jsonPath("$['items'][0].before").value(org.hamcrest.Matchers.containsString("snap-del")))
+        .andExpect(jsonPath("$['items'][0].before").value(org.hamcrest.Matchers.matchesPattern(
+            ".*\"shardCount\"\\s*:\\s*2.*")));
+  }
+
+  /** 同值 update 亦有 before(diff={} 但 before 为全量前态)。 */
+  @Test
+  void taskUpdate_identicalFields_hasBeforeThoEmptyDiff() throws Exception {
+    long id = objectMapper.readTree(mvc.perform(post("/api/v1/tasks").header("X-Operator", "u2")
+            .contentType(MediaType.APPLICATION_JSON)
+            .content("{\"name\":\"same-before\",\"kind\":\"cron\",\"handlerRef\":\"demo\","
+                + "\"cron\":\"" + CRON + "\",\"shardCount\":1}"))
+        .andExpect(status().isCreated()).andReturn().getResponse().getContentAsString()).get("id").asLong();
+    mvc.perform(put("/api/v1/tasks/" + id).header("X-Operator", "u2")
+            .contentType(MediaType.APPLICATION_JSON)
+            .content("{\"name\":\"same-before\",\"kind\":\"cron\",\"handlerRef\":\"demo\","
+                + "\"cron\":\"" + CRON + "\",\"shardCount\":1}"))
+        .andExpect(status().isOk());
+    mvc.perform(get("/api/v1/audits").param("action", "task.update").param("targetId", String.valueOf(id)))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.total").value(1))
+        .andExpect(jsonPath("$['items'][0].diff").value("{}"))
+        .andExpect(jsonPath("$['items'][0].before").value(org.hamcrest.Matchers.containsString("same-before")));
   }
 
   /** 审计读 diff 过滤:hasDiff=true 仅真变更行(排除 {} 与 NULL);diffField=cron 命中改过 cron 的行;组合生效。 */

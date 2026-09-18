@@ -153,6 +153,7 @@ export default function AuditPage() {
                 <th>动作</th>
                 <th>目标</th>
                 <th>变更</th>
+                <th>快照</th>
                 <th>meta</th>
               </tr>
             </thead>
@@ -164,6 +165,7 @@ export default function AuditPage() {
                   <td><span className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-xs text-slate-700">{r.action}</span></td>
                   <td className="font-mono text-xs">{r.targetType}:{r.targetId}</td>
                   <td className="break-words font-mono text-xs text-slate-600">{diffSummary(r.diff)}</td>
+                  <td className="break-words font-mono text-xs text-slate-500">{metaSummary(r.before)}</td>
                   <td className="break-words font-mono text-xs text-slate-600">{metaSummary(r.meta)}</td>
                 </tr>
               ))}

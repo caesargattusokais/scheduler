@@ -14,12 +14,12 @@ public class JdbcAuditRepository implements AuditRepository {
 
   @Override
   public void record(String operator, String action, TargetType targetType,
-                     long targetId, String metaJson, String diffJson, String source) {
-    // ?::json 把文本转 JSONB;metaJson/diffJson 为 null 时 NULL::json = NULL。
+                     long targetId, String metaJson, String diffJson, String beforeJson, String source) {
+    // ?::json 把文本转 JSONB;metaJson/diffJson/beforeJson 为 null 时 NULL::json = NULL。
     jdbc.update("""
-        INSERT INTO app_audit (operator, action, target_type, target_id, meta, diff, source)
-        VALUES (?, ?, ?, ?, ?::json, ?::json, ?)""",
-        operator, action, targetType.db(), targetId, metaJson, diffJson, source);
+        INSERT INTO app_audit (operator, action, target_type, target_id, meta, diff, before_meta, source)
+        VALUES (?, ?, ?, ?, ?::json, ?::json, ?::json, ?)""",
+        operator, action, targetType.db(), targetId, metaJson, diffJson, beforeJson, source);
   }
 
   /** WHERE 片段(与 JdbcTaskRepository)配套 {@link #filterArgs}。operator 子串 ILIKE,其余等值。 */
@@ -59,7 +59,7 @@ public class JdbcAuditRepository implements AuditRepository {
                                    Boolean hasDiff, String diffField, int limit, int offset) {
     List<Object> a = filterArgs(operator, action, targetType, targetId, from, to, hasDiff, diffField);
     a.add(limit); a.add(offset);
-    return jdbc.query("SELECT id, occurred_at, operator, action, target_type, target_id, meta, source, diff"
+    return jdbc.query("SELECT id, occurred_at, operator, action, target_type, target_id, meta, source, diff, before_meta"
             + " FROM app_audit WHERE 1=1"
             + where(operator, action, targetType, targetId, from, to, hasDiff, diffField)
             + " ORDER BY occurred_at DESC, id DESC LIMIT ? OFFSET ?",
@@ -67,7 +67,7 @@ public class JdbcAuditRepository implements AuditRepository {
             rs.getLong("id"), rs.getTimestamp("occurred_at").toInstant(),
             rs.getString("operator"), rs.getString("action"), rs.getString("target_type"),
             rs.getLong("target_id"), rs.getString("meta"), rs.getString("source"),
-            rs.getString("diff")),
+            rs.getString("diff"), rs.getString("before_meta")),
         a.toArray());
   }
 

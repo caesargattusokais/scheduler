@@ -118,7 +118,7 @@ public class TaskController {
       throw notFound("task " + id);
     }
     Task saved = tasks.findById(id).orElseThrow(() -> notFound("task " + id));
-    auditor.record(operator, "task.update", TargetType.TASK, saved.id(), taskMeta(saved), taskDiff(existing, saved));
+    auditor.record(operator, "task.update", TargetType.TASK, saved.id(), taskMeta(saved), taskDiff(existing, saved), taskBefore(existing));
     return saved;
   }
 
@@ -142,18 +142,18 @@ public class TaskController {
   @PostMapping("/{id}/pause")
   public Task pause(@RequestHeader(value = "X-Operator", required = false) String operator,
                     @PathVariable long id) {
-    requireTask(id);
+    Task before = requireTask(id);
     tasks.setPaused(id, true);
-    auditor.record(operator, "task.pause", TargetType.TASK, id, Map.of());
+    auditor.record(operator, "task.pause", TargetType.TASK, id, Map.of(), null, taskBefore(before));
     return tasks.findById(id).orElseThrow(() -> notFound("task " + id));
   }
 
   @PostMapping("/{id}/resume")
   public Task resume(@RequestHeader(value = "X-Operator", required = false) String operator,
                      @PathVariable long id) {
-    requireTask(id);
+    Task before = requireTask(id);
     tasks.setPaused(id, false);
-    auditor.record(operator, "task.resume", TargetType.TASK, id, Map.of());
+    auditor.record(operator, "task.resume", TargetType.TASK, id, Map.of(), null, taskBefore(before));
     return tasks.findById(id).orElseThrow(() -> notFound("task " + id));
   }
 
@@ -164,7 +164,7 @@ public class TaskController {
   @DeleteMapping("/{id}")
   public ResponseEntity<Void> delete(@RequestHeader(value = "X-Operator", required = false) String operator,
                                      @PathVariable long id) {
-    requireTask(id);
+    Task before = requireTask(id);
     List<String> blockers = new ArrayList<>();
     long ec = tasks.executionCount(id);
     if (ec > 0) blockers.add(ec + " 条执行记录");
@@ -177,7 +177,7 @@ public class TaskController {
     if (!tasks.delete(id)) {
       throw notFound("task " + id); // 竞态兜底:计数后并发插入的子记录
     }
-    auditor.record(operator, "task.delete", TargetType.TASK, id, Map.of());
+    auditor.record(operator, "task.delete", TargetType.TASK, id, Map.of(), null, taskBefore(before));
     return ResponseEntity.noContent().build();
   }
 
@@ -185,8 +185,9 @@ public class TaskController {
   public ResponseEntity<Execution> trigger(
       @RequestHeader(value = "X-Operator", required = false) String operator,
       @PathVariable long id) {
+    Task before = requireTask(id);
     Execution run = manualRun(id, UUID.randomUUID().toString());
-    auditor.record(operator, "task.trigger", TargetType.TASK, id, Map.of());
+    auditor.record(operator, "task.trigger", TargetType.TASK, id, Map.of(), null, taskBefore(before));
     return ResponseEntity.status(HttpStatus.CREATED).body(run);
   }
 
@@ -221,6 +222,28 @@ public class TaskController {
     m.put("enabled", t.enabled());
     m.put("paused", t.paused());
     return m;
+  }
+
+  /** 审计 before = 操作前全量 Task 定义(16 组件):供取证回溯 / delete 后还原;与 taskMeta 后态紧凑互补。 */
+  private Map<String, Object> taskBefore(Task t) {
+    Map<String, Object> b = new LinkedHashMap<>();
+    b.put("id", t.id());
+    b.put("name", t.name());
+    b.put("kind", t.kind());
+    b.put("handlerRef", t.handlerRef());
+    b.put("cron", t.cron());
+    b.put("shardCount", t.shardCount());
+    b.put("timeoutSeconds", t.timeoutSeconds());
+    b.put("maxRetries", t.maxRetries());
+    b.put("backoffMs", t.backoffMs());
+    b.put("retryableFailurePattern", t.retryableFailurePattern());
+    b.put("maxActiveConcurrent", t.maxActiveConcurrent());
+    b.put("enabled", t.enabled());
+    b.put("paused", t.paused());
+    b.put("retryMode", t.retryMode());
+    b.put("retryCapMs", t.retryCapMs());
+    b.put("retryBudgetMs", t.retryBudgetMs());
+    return b;
   }
 
   /** task.update 的 before/after 字段级 diff:遍历 15 个可变字段,仅收录前后不同者 → {field:[before,after]}。 */

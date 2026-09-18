@@ -88,23 +88,33 @@ class JdbcAuditRepositoryTest extends AbstractPostgresTest {
   }
 
   @Test
-  void record_withDiff_storesDiffColumn_andReadBackViaFindPage() {
-    // 7-arg record 带 meta + diff(JSON 文本;diff 形如 {field:[before,after]})
+  void record_withDiffAndBefore_storesColumns_andReadBackViaFindPage() {
+    // 8-arg record 带 meta + diff + before(均 JSON 文本;diff 形如 {field:[before,after]},before 为全量前态)
     audits.record("alice", "task.update", TargetType.TASK, 5L,
         "{\"name\":\"after\",\"shardCount\":1}",
-        "{\"cron\":[\"0 * * * * ?\",\"0 */5 * * * ?\"],\"retryCapMs\":[null,10000]}", "cli");
-    // diff 列落库非 NULL 且为 JSON 文本
+        "{\"cron\":[\"0 * * * * ?\",\"0 */5 * * * ?\"],\"retryCapMs\":[null,10000]}",
+        "{\"name\":\"before\",\"shardCount\":1,\"paused\":false}", "cli");
     assertEquals(1L, jdbc.queryForObject(
-        "SELECT count(*) FROM app_audit WHERE id=? AND diff IS NOT NULL", Long.class, jdbc.queryForObject(
-            "SELECT id FROM app_audit WHERE action='task.update'", Long.class)));
-    // findPage 读回 diff 原样
+        "SELECT count(*) FROM app_audit WHERE id=? AND diff IS NOT NULL AND before_meta IS NOT NULL",
+        Long.class, jdbc.queryForObject("SELECT id FROM app_audit WHERE action='task.update'", Long.class)));
     List<AuditEntry> rows = audits.findPage(null, "task.update", null, null, null, null, null, null, 10, 0);
     assertEquals(1, rows.size());
     AuditEntry e = rows.get(0);
     assertEquals("{\"cron\":[\"0 * * * * ?\",\"0 */5 * * * ?\"],\"retryCapMs\":[null,10000]}".replaceAll("\\s+", ""),
                  e.diff().replaceAll("\\s+", ""));
+    // jsonb 不保键序(canonical 按 key 长度排序)且::text 在冒号后补空格,无法整串等值;
+    // 先去空白再逐键 contains 校验完整回读(见 brief 陷阱)。
+    String b = e.before().replaceAll("\\s+", "");
+    assertTrue(b.contains("\"name\":\"before\"") && b.contains("\"shardCount\":1")
+        && b.contains("\"paused\":false"));
     assertEquals("{\"name\":\"after\",\"shardCount\":1}".replaceAll("\\s+", ""), e.meta().replaceAll("\\s+", ""));
     assertEquals("cli", e.source());
+  }
+
+  @Test
+  void record_withoutBefore_beforeColumnIsSqlNull() {
+    audits.record("bob", "task.create", TargetType.TASK, 3L, null, null);
+    assertEquals(1L, jdbc.queryForObject("SELECT count(*) FROM app_audit WHERE before_meta IS NULL AND diff IS NULL", Long.class));
   }
 
   @Test
@@ -119,9 +129,9 @@ class JdbcAuditRepositoryTest extends AbstractPostgresTest {
   void findPage_hasDiffFiltersToRowsWithActualChanges_only() {
     // 三态:非空 diff(有实际变更)、{} (no-op update)、NULL (未启用 diff 的动作)
     audits.record("alice", "task.update", TargetType.TASK, 1L, "{\"name\":\"a\"}",
-        "{\"cron\":[\"x\",\"y\"]}", null);                       // 非空 → 命中
+        "{\"cron\":[\"x\",\"y\"]}", null, null);                       // 非空 → 命中
     audits.record("alice", "task.update", TargetType.TASK, 2L, "{\"name\":\"b\"}",
-        "{}", null);                                             // {} → 排除
+        "{}", null, null);                                             // {} → 排除
     audits.record("bob", "task.create", TargetType.TASK, 3L, null, null); // NULL → 排除
 
     assertEquals(3, audits.count(null, null, null, null, null, null, null, null));
