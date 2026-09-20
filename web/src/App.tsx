@@ -41,12 +41,12 @@ export default function App() {
     })();
   }, []);
 
-  if (gatePending) return <div className="content flex min-h-screen items-center justify-center text-sm text-slate-400">校验会话…</div>;
-  // 未登录:渲染登录门。
-  if (!meOp) return <LoginPage />;
-
+  // BrowserRouter 须包裹整棵被登录门保护的树:LoginPage 内部使用 useNavigate,必须在 Router 上下文内。
   return (
     <BrowserRouter>
+      {gatePending ? <div className="content flex min-h-screen items-center justify-center text-sm text-slate-400">校验会话…</div> :
+        // 未登录:渲染登录门。
+        !meOp ? <LoginPage /> :
       <div className="shell">
         <aside className="sidebar">
           <div className="sidebar-brand">
@@ -88,7 +88,7 @@ export default function App() {
             <Route path="/operators" element={<OperatorsPage />} />
           </Routes>
         </main>
-      </div>
+      </div>}
     </BrowserRouter>
   );
 }
