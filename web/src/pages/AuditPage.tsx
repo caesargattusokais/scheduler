@@ -52,29 +52,46 @@ export default function AuditPage() {
   const [to, setTo] = useState('');
   const [hasDiff, setHasDiff] = useState(false);
   const [diffField, setDiffField] = useState('');
+  const [beforeField, setBeforeField] = useState('');
+  const [metaField, setMetaField] = useState('');
   const [offset, setOffset] = useState(0);
   const [err, setErr] = useState<string | null>(null);
 
+  /** 由当前过滤状态派生查询参数(不含分页,供列表与导出共用);字段过滤空置即剔除。 */
+  const filters = useCallback(() => {
+    const nid = Number(targetId);
+    const f: { operator?: string; action?: string; targetType?: string; targetId?: number;
+      from?: string; to?: string; hasDiff?: boolean; diffField?: string; beforeField?: string; metaField?: string } = {};
+    if (operator !== '') f.operator = operator;
+    if (action !== '') f.action = action;
+    if (targetType !== '') f.targetType = targetType;
+    if (targetId !== '' && !Number.isNaN(nid)) f.targetId = nid;
+    if (from !== '') f.from = new Date(from).toISOString();
+    if (to !== '') f.to = new Date(to).toISOString();
+    if (hasDiff) f.hasDiff = true;
+    if (diffField !== '') f.diffField = diffField;
+    if (beforeField !== '') f.beforeField = beforeField;
+    if (metaField !== '') f.metaField = metaField;
+    return f;
+  }, [operator, action, targetType, targetId, from, to, hasDiff, diffField, beforeField, metaField]);
+
   const load = useCallback(async () => {
     try {
-      const nid = Number(targetId);
-      const page = await listAudits({
-        operator: operator === '' ? undefined : operator,
-        action: action === '' ? undefined : action,
-        targetType: targetType === '' ? undefined : targetType,
-        targetId: targetId === '' || Number.isNaN(nid) ? undefined : nid,
-        from: from === '' ? undefined : new Date(from).toISOString(),
-        to:   to   === '' ? undefined : new Date(to).toISOString(),
-        hasDiff: hasDiff || undefined,
-        diffField: diffField === '' ? undefined : diffField,
-        limit: PAGE_SIZE,
-        offset,
-      });
+      const fs = filters();
+      const page = await listAudits({ ...fs, limit: PAGE_SIZE, offset });
       setRows(page.items);
       setTotal(page.total);
       setErr(null);
     } catch (e) { setErr(String(e)); }
-  }, [operator, action, targetType, targetId, from, to, hasDiff, diffField, offset]);
+  }, [filters, offset]);
+
+  /** 导出链接复用当前过滤(append-only 截断上限由后端恒 5 万行);构建查询串。 */
+  const exportHref = useCallback(() => {
+    const q = new URLSearchParams();
+    for (const [k, v] of Object.entries(filters())) q.set(k, String(v));
+    const s = q.toString();
+    return `/api/v1/audits/export${s ? `?${s}` : ''}`;
+  }, [filters]);
 
   useEffect(() => { load(); }, [load]);
   useInterval(load, 5000);
@@ -90,6 +107,11 @@ export default function AuditPage() {
       </div>
 
       {err && <div className="mb-4 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{err}</div>}
+
+        <div className="mb-4 text-right">
+          <a className="btn btn-secondary" download="audits.csv"
+            href={exportHref()}>导出 CSV</a>
+        </div>
 
       <div className="toolbar">
         <label className="field">
@@ -135,9 +157,19 @@ export default function AuditPage() {
             onChange={(e) => { setHasDiff(e.target.checked); setOffset(0); }} />
         </label>
         <label className="field">
-          <span className="label">字段</span>
+          <span className="label">变更字段</span>
           <input className="input" placeholder="改过该字段,如 cron" value={diffField}
             onChange={(e) => { setDiffField(e.target.value); setOffset(0); }} />
+        </label>
+        <label className="field">
+          <span className="label">快照字段</span>
+          <input className="input" placeholder="前态含该字段,如 shardCount" value={beforeField}
+            onChange={(e) => { setBeforeField(e.target.value); setOffset(0); }} />
+        </label>
+        <label className="field">
+          <span className="label">meta 字段</span>
+          <input className="input" placeholder="meta 含该字段,如 name" value={metaField}
+            onChange={(e) => { setMetaField(e.target.value); setOffset(0); }} />
         </label>
       </div>
 

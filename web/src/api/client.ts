@@ -159,6 +159,8 @@ export interface ListAuditsParams {
   to?: string;
   hasDiff?: boolean; // true → 仅真正改过字段的行(diff 非空对象)
   diffField?: string; // 顶层 JSONB 键:改过该字段的行(如 "cron")
+  beforeField?: string; // 顶层 JSONB 键:操作前快照含该字段的行(如 "shardCount")
+  metaField?: string; // 顶层 JSONB 键:meta 含该字段的行
   limit?: number;
   offset?: number;
 }

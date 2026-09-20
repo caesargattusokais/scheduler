@@ -19,13 +19,29 @@ public interface AuditRepository {
   }
 
   /** 过滤 + 分页,按 occurred_at DESC, id DESC 排序;全部过滤参数可为 null/空(不过滤)。
-   *  hasDiff=true 仅纳入有实际变更的行(diff 非 NULL 且非空对象 `{}`);diffField 非空白按
-   *  JSONB 顶层键存在过滤(改过该字段)。 */
+   *  hasDiff=true 仅纳入有实际变更的行(diff 非 NULL 且非空对象 `{}`);diffField/beforeField/metaField 非空白按
+   *  各 JSONB 列(diff/before_meta/meta)顶层键存在过滤(改过/含该字段),可跨列 AND 组合。 */
   List<AuditEntry> findPage(String operator, String action, String targetType,
                             Long targetId, Instant from, Instant to,
-                            Boolean hasDiff, String diffField, int limit, int offset);
+                            Boolean hasDiff, String diffField, String beforeField, String metaField,
+                            int limit, int offset);
+
+  /** diff/before/meta 三列 JSON 过滤均缺省(null)的便捷重载(既有调用点零改动)。 */
+  default List<AuditEntry> findPage(String operator, String action, String targetType,
+                                    Long targetId, Instant from, Instant to,
+                                    Boolean hasDiff, String diffField, int limit, int offset) {
+    return findPage(operator, action, targetType, targetId, from, to,
+        hasDiff, diffField, null, null, limit, offset);
+  }
 
   /** 与 findPage 相同过滤条件的 count(供 Page.total)。 */
   long count(String operator, String action, String targetType,
-             Long targetId, Instant from, Instant to, Boolean hasDiff, String diffField);
+             Long targetId, Instant from, Instant to, Boolean hasDiff, String diffField,
+             String beforeField, String metaField);
+
+  /** diff/before/meta 三列 JSON 过滤均缺省(null)的便捷重载(既有调用点零改动)。 */
+  default long count(String operator, String action, String targetType,
+                     Long targetId, Instant from, Instant to, Boolean hasDiff, String diffField) {
+    return count(operator, action, targetType, targetId, from, to, hasDiff, diffField, null, null);
+  }
 }

@@ -575,6 +575,78 @@ class ApiIntegrationTest {
         .andExpect(jsonPath("$['items'][0].operator").value("old"));
   }
 
+  /** 审计读端联合检索:beforeField/metaField 过滤 before_meta/meta 顶层键,与 diffField 可跨列 AND;读端直种子。 */
+  @Test
+  void auditReadApi_jointJsonFilter_beforeAndMetaField() throws Exception {
+    long a = seedTaskRow("jf-a"), b = seedTaskRow("jf-b"), c = seedTaskRow("jf-c");
+    // A:before+meta 含 shardCount,diff 含 cron;  B:before+meta 含 cron,无 diff;  C:仅 meta name,无 diff/before。
+    jdbc.update("INSERT INTO app_audit (operator, action, target_type, target_id, meta, diff, before_meta, source)"
+            + " VALUES ('opA','task.update','task',?, '{ \"name\":\"a\",\"shardCount\":1 }'::json,"
+            + " '{ \"cron\":[\"x\"] }'::json, '{ \"name\":\"bA\",\"shardCount\":2 }'::json, 'cli')", a);
+    jdbc.update("INSERT INTO app_audit (operator, action, target_type, target_id, meta, diff, before_meta)"
+            + " VALUES ('opB','dag.pause','dag',?, '{ \"name\":\"B\",\"cron\":\"0 *\" }'::json,"
+            + " NULL, '{ \"name\":\"bB\",\"shardCount\":3,\"cron\":\"0 *\" }'::json)", b);
+    jdbc.update("INSERT INTO app_audit (operator, action, target_type, target_id, meta)"
+            + " VALUES ('opC','execution.cancel','execution',?, '{ \"name\":\"C\" }')", c);
+
+    // beforeField → 过滤 before_meta 顶层键存在(C 无 before → 排除)
+    mvc.perform(get("/api/v1/audits").param("beforeField", "shardCount"))
+        .andExpect(status().isOk()).andExpect(jsonPath("$.total").value(2));
+    mvc.perform(get("/api/v1/audits").param("beforeField", "cron"))
+        .andExpect(status().isOk()).andExpect(jsonPath("$.total").value(1))
+        .andExpect(jsonPath("$['items'][0].operator").value("opB"));
+    mvc.perform(get("/api/v1/audits").param("beforeField", "name"))
+        .andExpect(status().isOk()).andExpect(jsonPath("$.total").value(2)); // A,B(皆含 name);C 无 before
+    // metaField → 过滤 meta 顶层键存在
+    mvc.perform(get("/api/v1/audits").param("metaField", "cron"))
+        .andExpect(status().isOk()).andExpect(jsonPath("$.total").value(1))
+        .andExpect(jsonPath("$['items'][0].operator").value("opB"));
+    mvc.perform(get("/api/v1/audits").param("metaField", "name"))
+        .andExpect(status().isOk()).andExpect(jsonPath("$.total").value(3));
+    // 跨列 AND:diff 含 cron 且 before 含 shardCount → 仅 A
+    mvc.perform(get("/api/v1/audits").param("diffField", "cron").param("beforeField", "shardCount"))
+        .andExpect(status().isOk()).andExpect(jsonPath("$.total").value(1))
+        .andExpect(jsonPath("$['items'][0].operator").value("opA"));
+    // 未命中组合 → 0(before 含 cron 的行 B,其 meta 无 shardCount;meta 含 shardCount 的行 A,其 before 无 cron → 无交叠)
+    mvc.perform(get("/api/v1/audits").param("beforeField", "cron").param("metaField", "shardCount"))
+        .andExpect(status().isOk()).andExpect(jsonPath("$.total").value(0));
+  }
+
+  /** 审计导出:GET /api/v1/audits/export 同过滤全量 CSV,attachment;BOM + 命中/排除 + CSV 转义 + 公式注入防护。 */
+  @Test
+  void auditExport_csv_allFilteredRows_escapedAndFormulaSafe() throws Exception {
+    // 过滤 = beforeField shardCount:A(含 shardCount)命中;B(含 shardCount,operator 为公式向量)命中;C(无 shardCount)排除。
+    long a = seedTaskRow("e-a"), b = seedTaskRow("e-b"), c = seedTaskRow("e-c");
+    // A:命中;source 含双引号与逗号 → 验证单元格转义。
+    String trickySource = "cli;v=abc\"def,ghi";
+    jdbc.update("INSERT INTO app_audit (operator, action, target_type, target_id, meta, diff, before_meta, source)"
+            + " VALUES ('opA','task.update','task',?, '{ \"name\":\"a\" }'::json,"
+            + " '{ \"cron\":[\"x\"] }'::json, '{ \"shardCount\":2 }'::json, ?)", a, trickySource);
+    // B:命中;operator 以 '=' 开头 → 验证公式注入防护前置单引号。
+    jdbc.update("INSERT INTO app_audit (operator, action, target_type, target_id, meta, before_meta)"
+            + " VALUES ('=1+1','dag.pause','dag',?,'{ \"name\":\"B\" }'::json, '{ \"shardCount\":3 }'::json)", b);
+    // C:排除(无 shardCount)。
+    jdbc.update("INSERT INTO app_audit (operator, action, target_type, target_id, meta, before_meta)"
+            + " VALUES ('opX','execution.cancel','execution',?,'{ \"name\":\"C\" }'::json, '{ \"name\":\"cC\" }'::json)", c);
+
+    MvcResult r = mvc.perform(get("/api/v1/audits/export").param("beforeField", "shardCount"))
+        .andExpect(status().isOk())
+        .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.content().contentTypeCompatibleWith(
+            MediaType.valueOf("text/csv")))
+        .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.header()
+            .string("Content-Disposition", "attachment; filename=\"audits.csv\""))
+        .andReturn();
+    byte[] raw = r.getResponse().getContentAsByteArray();
+    assertTrue(raw.length >= 3 && (raw[0] & 0xFF) == 0xEF && (raw[1] & 0xFF) == 0xBB && (raw[2] & 0xFF) == 0xBF,
+        "应带 UTF-8 BOM(0xEF 0xBB 0xBF)以便 Excel 解码中文");
+    String body = r.getResponse().getContentAsString();
+    assertTrue(body.contains("occurredAt,operator,action,targetType,targetId,source,meta,diff,before"), "表头行");
+    assertTrue(body.contains("opA"), "命中行计入");
+    assertTrue(body.contains("\"cli;v=abc\"\"def,ghi\""), "含逗号/引号单元格应双引号包裹且引号翻倍:" + body);
+    assertTrue(body.contains("'=1+1"), "公式注入向量前置单引号防注入(应含 B):" + body);
+    assertTrue(!body.contains("opX"), "过滤排除行(不带 shardCount)不应出现在导出行");
+  }
+
   // ---------- 审计写端:三控制器 15 个写端点接 X-Operator + AuditRecorder ----------
 
   /** 审计写端:TaskController create/update/pause/resume/trigger/delete;X-Operator 缺省记 anonymous;meta 为后态。 */

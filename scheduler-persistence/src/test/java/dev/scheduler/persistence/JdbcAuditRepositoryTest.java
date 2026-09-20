@@ -151,4 +151,44 @@ class JdbcAuditRepositoryTest extends AbstractPostgresTest {
     // 未命中字段 + hasDiff 组合 → 0
     assertEquals(0, audits.count(null, null, null, null, null, null, Boolean.TRUE, "shardCount"));
   }
+
+  @Test
+  void findPage_beforeAndMetaFieldFilterAcrossColumns_jointAnd() {
+    // 三行 before/meta/diff 各异,验证 beforeField/metaField 单列过滤 + 与 diffField 跨列 AND 联合检索。
+    // 行1:before 含 shardCount,meta 含 shardCount,diff 含 cron(有实际变更)
+    audits.record("alice", "task.update", TargetType.TASK, 1L,
+        "{\"name\":\"after\",\"shardCount\":1}",
+        "{\"cron\":[\"x\",\"y\"]}",
+        "{\"name\":\"before\",\"shardCount\":2,\"paused\":false}", "cli");
+    // 行2:before 含 cron,meta 含 cron,无 diff(pause 类动作)
+    audits.record("bob", "dag.pause", TargetType.DAG, 9L,
+        "{\"name\":\"dagb\",\"cron\":\"0 *\"}",
+        null,
+        "{\"name\":\"dagbf\",\"cron\":\"0 *\"}", "cli");
+    // 行3:仅 meta,null diff,null before(6-arg:meta + source,null)
+    audits.record("carol", "execution.cancel", TargetType.EXECUTION, 3L, "{\"name\":\"c\"}", null);
+
+    assertEquals(3, audits.count(null, null, null, null, null, null, null, null, null, null));
+    // beforeField → 过滤 before_meta 顶层键存在(行3 无 before → 排除)
+    assertEquals(1, audits.count(null, null, null, null, null, null, null, null, "shardCount", null));
+    assertEquals(1, audits.count(null, null, null, null, null, null, null, null, "cron", null));
+    assertEquals(2, audits.count(null, null, null, null, null, null, null, null, "name", null));
+    // metaField → 过滤 meta 顶层键存在
+    assertEquals(1, audits.count(null, null, null, null, null, null, null, null, null, "cron"));
+    assertEquals(1, audits.count(null, null, null, null, null, null, null, null, null, "shardCount"));
+    assertEquals(3, audits.count(null, null, null, null, null, null, null, null, null, "name"));
+    // 跨列 AND:diff 含 cron 且 before 含 shardCount → 行1
+    assertEquals(1, audits.count(null, null, null, null, null, null, null, "cron", "shardCount", null));
+    // 跨列 AND:before 含 shardCount 且 meta 含 shardCount → 行1(行2 before 无 shardCount,行3 无 before)
+    assertEquals(1, audits.count(null, null, null, null, null, null, null, null, "shardCount", "shardCount"));
+    // 跨列 AND:未命中组合 → 0(before 含 shardCount 且 meta 含 cron:行1 meta 无 cron,行2 before 无 shardCount)
+    assertEquals(0, audits.count(null, null, null, null, null, null, null, null, "shardCount", "cron"));
+    // findPage 12-arg 读回被命中行,验证 diff/before/meta 出参合一(行1)
+    AuditEntry hit = audits.findPage(null, null, null, null, null, null, null, "cron", "shardCount", null, 10, 0).get(0);
+    assertEquals("{\"cron\":[\"x\",\"y\"]}".replaceAll("\\s+", ""), hit.diff().replaceAll("\\s+", ""));
+    String b = hit.before().replaceAll("\\s+", "");
+    assertTrue(b.contains("\"name\":\"before\"") && b.contains("\"shardCount\":2") && b.contains("\"paused\":false"));
+    assertEquals("alice", hit.operator());
+    assertEquals(1L, hit.targetId());
+  }
 }
