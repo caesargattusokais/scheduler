@@ -120,7 +120,9 @@ class JdbcAuthRepositoryTest extends AbstractPostgresTest {
 
     // 幂等累积多次(递增指数)应被上限 30s 封顶。
     for (int i = 0; i < 12; i++) auth.recordFailure("alice", 30);
-    long cap = Duration.between(Instant.now(), auth.lockedUntil("alice").get()).toSeconds();
+    // locked_until 由 DB now() 计算,JVM 与 Testcontainers 容器时钟偏斜 ~16s → 用 DB now() 比较(与判活/上报同源,见 runtime-deepening 备忘)。
+    Instant dbNow = jdbc.queryForObject("SELECT now()", java.sql.Timestamp.class).toInstant();
+    long cap = Duration.between(dbNow, auth.lockedUntil("alice").get()).toSeconds();
     assertTrue(cap >= 0 && cap <= 30, "backoff 封顶 ≤ 30s,实际=" + cap);
   }
 

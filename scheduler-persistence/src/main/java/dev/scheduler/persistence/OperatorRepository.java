@@ -24,4 +24,7 @@ public interface OperatorRepository {
 
   /** 设置/重置口令哈希(bcrypt 文本;name 须已登记,upsert 语义)。 */
   void setPassword(String name, String bcryptHash);
+
+  /** 尚未设口令(password_hash IS NULL)的操作者 name 列表(按 name 升序);供默认口令引导。 */
+  List<String> namesWithoutPassword();
 }

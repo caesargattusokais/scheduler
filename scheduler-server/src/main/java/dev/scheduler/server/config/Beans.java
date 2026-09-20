@@ -3,12 +3,14 @@ package dev.scheduler.server.config;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.scheduler.core.OperatorRole;
 import dev.scheduler.persistence.AuditRepository;
+import dev.scheduler.persistence.AuthRepository;
 import dev.scheduler.persistence.DagRepository;
 import dev.scheduler.persistence.ExecutionRepository;
 import dev.scheduler.persistence.JdbcAuditRepository;
 import dev.scheduler.persistence.JdbcDagRepository;
 import dev.scheduler.persistence.JdbcExecutionRepository;
 import dev.scheduler.persistence.JdbcOperatorRepository;
+import dev.scheduler.persistence.JdbcAuthRepository;
 import dev.scheduler.persistence.JdbcShardRepository;
 import dev.scheduler.persistence.JdbcTaskRepository;
 import dev.scheduler.persistence.JdbcWorkerRepository;
@@ -22,6 +24,7 @@ import dev.scheduler.server.leader.LeaderElection;
 import dev.scheduler.server.reconcile.Reconciler;
 import dev.scheduler.server.service.AuditRecorder;
 import dev.scheduler.server.service.AuditRetentionService;
+import dev.scheduler.server.service.OperatorPasswordService;
 import dev.scheduler.server.web.AvailableHandlerRefs;
 import dev.scheduler.persistence.retry.FailureResolver;
 import dev.scheduler.persistence.retry.RetryPolicy;
@@ -36,6 +39,7 @@ import org.springframework.boot.ApplicationRunner;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
+import org.springframework.core.annotation.Order;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -71,10 +75,17 @@ public class Beans {
     return new JdbcOperatorRepository(jdbc);
   }
 
+  /** 强认证会话仓储:口令改/停用撤销会话、Task3 登录/锁退避共用。 */
+  @Bean
+  AuthRepository authRepository(JdbcTemplate jdbc) {
+    return new JdbcAuthRepository(jdbc);
+  }
+
   /**
    * 操作者引导:启动时把 {@code scheduler.operators}(形如 {@code alice:ADMIN,bob:OPERATOR})幂等 upsert 进目录,
    * 保证目录恒有可登记的 ADMIN(否则第一次部署建不出管家)。属性为空 → no-op(测试逐个播种)。 */
   @Bean
+  @Order(1)
   ApplicationRunner seedOperators(OperatorRepository operators,
                                   @Value("${scheduler.operators:}") String spec) {
     return args -> {
@@ -94,6 +105,20 @@ public class Beans {
         }
         operators.upsert(kv[0].trim(), role, true);
       }
+    };
+  }
+
+  /**
+   * 操作者默认口令引导:读取 {@code scheduler.operators.default-password},对当前无口令(password_hash IS NULL)
+   * 的操作者经 OperatorPasswordService.bootstrap 应用 BCrypt 默认口令(不覆盖已设口令)。属性为空 → no-op。
+   */
+  @Bean
+  @Order(2)
+  ApplicationRunner seedOperatorPasswords(OperatorRepository ops, OperatorPasswordService svc,
+                                          @Value("${scheduler.operators.default-password:}") String defaultPwd) {
+    return args -> {
+      if (defaultPwd == null || defaultPwd.isBlank()) return;
+      for (String n : ops.namesWithoutPassword()) svc.bootstrap(n, defaultPwd);
     };
   }
 

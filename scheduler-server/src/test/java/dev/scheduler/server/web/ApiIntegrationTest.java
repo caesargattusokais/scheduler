@@ -74,7 +74,9 @@ import org.testcontainers.junit.jupiter.Testcontainers;
         "management.endpoints.web.exposure.include=health,info,prometheus",
         "management.prometheus.metrics.export.enabled=true",
         // 操作者目录引导:上下文启动时幂等 upsert(OperatorBootstrap);既有写用例经下方默认头 alice 授权零改动。
-        "scheduler.operators=alice:ADMIN,bob:OPERATOR"
+        "scheduler.operators=alice:ADMIN,bob:OPERATOR",
+        // 默认口令引导:上下文启动时对无密操作者(alice/bob)应用 BCrypt 默认口令;Task3 用它登录 alice。
+        "scheduler.operators.default-password=boot-pass"
     })
 @AutoConfigureMockMvc
 class ApiIntegrationTest {
@@ -1776,6 +1778,69 @@ class ApiIntegrationTest {
     mvc.perform(post("/api/v1/tasks").header("X-Operator", "mallory")
             .contentType(MediaType.APPLICATION_JSON).content(body))
         .andExpect(status().isForbidden());
+  }
+
+  // ---- 强认证:操作者口令管理 + 默认口令引导 ----
+
+  /** 默认口令引导:上下文启动时(application runner)对无密操作者 alice/bob 应用 boot-pass → password_hash 非空且为 BCrypt。 */
+  @Test
+  void bootstrapDefaultPassword_setsHashOnPasswordlessOperators() {
+    String hash = jdbc.queryForObject(
+        "SELECT password_hash FROM app_operator WHERE name='alice'", String.class);
+    assertTrue(hash != null && hash.startsWith("$2"), "引导后 alice 应持 BCrypt 默认口令哈希,got: " + hash);
+    String bobHash = jdbc.queryForObject(
+        "SELECT password_hash FROM app_operator WHERE name='bob'", String.class);
+    assertTrue(bobHash != null && bobHash.startsWith("$2"), "引导后 bob 也应持默认口令,got: " + bobHash);
+  }
+
+  /** 强认证:ADMIN 设/改操作者口令 → password_hash 落 BCrypt,并撤销该操作者既有活动会话。 */
+  @Test
+  void adminSetsPassword_updatesHashAndRevokesSessions() throws Exception {
+    // 预先给 bob 造一条活动会话(模拟 bob 已登录)→ 改密后应被撤销。
+    jdbc.update("INSERT INTO app_auth_session(token_hash, operator_name, expires_at)"
+        + " VALUES ('dummy-hash', 'bob', now() + interval '1 hour')");
+
+    mvc.perform(post("/api/v1/operators/bob/password").header("X-Operator", "alice")
+            .contentType(MediaType.APPLICATION_JSON)
+            .content("{\"password\":\"new-secret-1\"}"))
+        .andExpect(status().isOk());
+
+    String hash = jdbc.queryForObject(
+        "SELECT password_hash FROM app_operator WHERE name='bob'", String.class);
+    assertTrue(hash != null && hash.startsWith("$2"), "改密后应落 BCrypt 哈希,got: " + hash);
+    // 既有会话被撤销(revoked_at 非空),token 不再可解析。
+    assertEquals(1L, jdbc.queryForObject(
+        "SELECT count(*) FROM app_auth_session WHERE operator_name='bob' AND revoked_at IS NOT NULL",
+        Long.class));
+  }
+
+  /** 强认证:OPERATOR(bob)调改密端点 → 403(操作者管理整体 ADMIN)。 */
+  @Test
+  void operatorCannotSetPassword_returns403() throws Exception {
+    mvc.perform(post("/api/v1/operators/carol/password").header("X-Operator", "bob")
+            .contentType(MediaType.APPLICATION_JSON)
+            .content("{\"password\":\"new-secret-1\"}"))
+        .andExpect(status().isForbidden());
+  }
+
+  /** 强认证:密码短于 8 → IllegalArgumentException → 400。 */
+  @Test
+  void setPassword_tooShort_returns400() throws Exception {
+    mvc.perform(post("/api/v1/operators/bob/password").header("X-Operator", "alice")
+            .contentType(MediaType.APPLICATION_JSON)
+            .content("{\"password\":\"short\"}"))
+        .andExpect(status().isBadRequest())
+        .andExpect(jsonPath("$.message").value(
+            org.hamcrest.Matchers.containsString("at least 8")));
+  }
+
+  /** 强认证:为未登记操作者设密 → 400(避免"成功但没改到")。 */
+  @Test
+  void setPassword_unknownOperator_returns400() throws Exception {
+    mvc.perform(post("/api/v1/operators/no-such-op/password").header("X-Operator", "alice")
+            .contentType(MediaType.APPLICATION_JSON)
+            .content("{\"password\":\"new-secret-1\"}"))
+        .andExpect(status().isBadRequest());
   }
 
   /** 权限拒绝会留一条 access.denied 审计(自带称操作者),自动进取证链。 */

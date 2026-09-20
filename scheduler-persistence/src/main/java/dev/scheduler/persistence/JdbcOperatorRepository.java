@@ -51,4 +51,10 @@ public class JdbcOperatorRepository implements OperatorRepository {
   public void setPassword(String name, String bcryptHash) {
     jdbc.update("UPDATE app_operator SET password_hash = ? WHERE name = ?", bcryptHash, name);
   }
+
+  @Override
+  public List<String> namesWithoutPassword() {
+    return jdbc.query("SELECT name FROM app_operator WHERE password_hash IS NULL ORDER BY name",
+        (rs, i) -> rs.getString("name"));
+  }
 }

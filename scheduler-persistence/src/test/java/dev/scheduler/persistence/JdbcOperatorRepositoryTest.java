@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import dev.scheduler.core.OperatorRole;
+import java.util.List;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -72,5 +73,18 @@ class JdbcOperatorRepositoryTest extends AbstractPostgresTest {
 
     operators.deactivate("alice");
     assertTrue(operators.activePasswordHash("alice").isEmpty(), "停用 → 即使有哈希也不返回");
+  }
+
+  @Test
+  void namesWithoutPassword_listsOnlyNullHash() {
+    assertTrue(operators.namesWithoutPassword().isEmpty());
+    operators.upsert("alice", OperatorRole.ADMIN, true);
+    operators.upsert("bob", OperatorRole.OPERATOR, true);
+    operators.upsert("carol", OperatorRole.OPERATOR, true);
+    assertEquals(List.of("alice", "bob", "carol"), operators.namesWithoutPassword());
+
+    // setPassword 后 alice 不再无密;bob/carol 仍无密
+    operators.setPassword("alice", "bcrypt-hash");
+    assertEquals(List.of("bob", "carol"), operators.namesWithoutPassword());
   }
 }
