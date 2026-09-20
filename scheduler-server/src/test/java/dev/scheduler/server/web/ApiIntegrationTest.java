@@ -6,6 +6,7 @@ import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.not;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
@@ -42,6 +43,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
+import org.springframework.boot.test.autoconfigure.web.servlet.MockMvcBuilderCustomizer;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
 import org.testcontainers.containers.PostgreSQLContainer;
@@ -70,7 +72,9 @@ import org.testcontainers.junit.jupiter.Testcontainers;
         "scheduler.loop.enabled=false",
         "scheduler.dag.enabled=false", // 关闭 DagLoop,消除异步扫描对同步驱动断言(dagEngine.scanOnce)的竞态
         "management.endpoints.web.exposure.include=health,info,prometheus",
-        "management.prometheus.metrics.export.enabled=true"
+        "management.prometheus.metrics.export.enabled=true",
+        // 操作者目录引导:上下文启动时幂等 upsert(OperatorBootstrap);既有写用例经下方默认头 alice 授权零改动。
+        "scheduler.operators=alice:ADMIN,bob:OPERATOR"
     })
 @AutoConfigureMockMvc
 class ApiIntegrationTest {
@@ -119,6 +123,18 @@ class ApiIntegrationTest {
   }
 
   /**
+   * 给 MockMvc 请求默认带 X-Operator=alice(ADMIN),使既有未显式断言权限的写用例零改动通过写端授权;
+   * 权限相关用例显式 .header("X-Operator", ...) 覆盖默认(显式头排在默认头之前,same-name 取首值)。
+   */
+  @TestConfiguration
+  static class DefaultOperatorConfig {
+    @Bean
+    MockMvcBuilderCustomizer defaultOperatorHeader() {
+      return builder -> builder.defaultRequest(get("/").header("X-Operator", "alice"));
+    }
+  }
+
+  /**
    * 指标在上下文启动(绑定时刻)为当时的每个任务各注册一条 series;此后新建的任务要等下次重启才有
    * series(§5.2 已知重启边界)。因此这里在共享上下文创建前(静态 @BeforeAll,镜像 AbstractPostgresTest
    * 的 Flyway+裸 JDBC)先落一条 disabled 任务,保证其 tagged series 在绑定时刻确定存在。
@@ -152,6 +168,11 @@ class ApiIntegrationTest {
   void resetDb() {
     jdbc.execute("TRUNCATE app_dag CASCADE; TRUNCATE execution, execution_outcome, execution_shard,"
         + " execution_shard_outcome, app_task, app_audit, worker RESTART IDENTITY CASCADE");
+    // app_operator 不在 TRUNCATE 之列(写端授权依赖其在引导/测试期间恒在):幂等确保 alice/bob 每用例都在,
+    //  即便某用例 deactivate 过也不会让后续用例缺人。
+    jdbc.update("INSERT INTO app_operator(name, role, active) VALUES "
+        + "('alice','ADMIN',true),('bob','OPERATOR',true),('carol','ADMIN',true),('dave','OPERATOR',true)"
+        + " ON CONFLICT (name) DO UPDATE SET role = EXCLUDED.role, active = true");
     CLOCK.now = BASE;
     // M6.3:server 上下文无进程内 handler——测试建任务须先注册一个存活 worker 提供 handlerRef(demo);
     //  该 worker 在未拨动 CLOCK.now 的用例中恒存活(见 handlersEndpoint 用例拨钟后须重播种)。
@@ -712,13 +733,13 @@ class ApiIntegrationTest {
         .andExpect(jsonPath("$['items'][0].before").value(org.hamcrest.Matchers.not(
             org.hamcrest.Matchers.containsString("renamed-audit"))));
 
-    // 无 X-Operator 头 → operator 兜底 'anonymous'
+    // 写端点缺省头(defaultRequest=alice)→ 审计记录 alice;写必需已授权的操作者,不再兜底 anonymous
     mvc.perform(post("/api/v1/tasks/" + id + "/pause")).andExpect(status().isOk());
     mvc.perform(post("/api/v1/tasks/" + id + "/resume")).andExpect(status().isOk());
     mvc.perform(get("/api/v1/audits").param("action", "task.pause"))
-        .andExpect(status().isOk()).andExpect(jsonPath("$['items'][0].operator").value("anonymous"));
+        .andExpect(status().isOk()).andExpect(jsonPath("$['items'][0].operator").value("alice"));
     mvc.perform(get("/api/v1/audits").param("action", "task.resume"))
-        .andExpect(status().isOk()).andExpect(jsonPath("$['items'][0].operator").value("anonymous"));
+        .andExpect(status().isOk()).andExpect(jsonPath("$['items'][0].operator").value("alice"));
 
     // trigger → task.trigger(目标 = 任务 id)
     mvc.perform(post("/api/v1/tasks/" + id + "/trigger").header("X-Operator", "alice"))
@@ -736,23 +757,22 @@ class ApiIntegrationTest {
             .content("{\"name\":\"audit-del\",\"kind\":\"cron\",\"handlerRef\":\"demo\","
                 + "\"cron\":\"" + CRON + "\",\"shardCount\":1}"))
         .andExpect(status().isCreated()).andReturn().getResponse().getContentAsString()).get("id").asLong();
-    mvc.perform(delete("/api/v1/tasks/" + delId).header("X-Operator", "bob")).andExpect(status().isNoContent());
+    // task.delete 需 ADMIN:改用 carol(ADMIN),审计仍记录操作者 carol
+    mvc.perform(delete("/api/v1/tasks/" + delId).header("X-Operator", "carol")).andExpect(status().isNoContent());
     mvc.perform(get("/api/v1/audits").param("action", "task.delete").param("targetId", String.valueOf(delId)))
         .andExpect(status().isOk())
-        .andExpect(jsonPath("$['items'][0].operator").value("bob"));
+        .andExpect(jsonPath("$['items'][0].operator").value("carol"));
   }
 
   /** 同值 update(不改任何字段)→ task.update,但 before/after 无差异 → diff 为空对象 {},meta 仍全量后态。 */
   @Test
   void taskUpdate_identicalFields_diffIsEmptyObject() throws Exception {
-    long id = objectMapper.readTree(mvc.perform(post("/api/v1/tasks").header("X-Operator", "u")
-            .contentType(MediaType.APPLICATION_JSON)
+    long id = objectMapper.readTree(mvc.perform(post("/api/v1/tasks")            .contentType(MediaType.APPLICATION_JSON)
             .content("{\"name\":\"same-task\",\"kind\":\"cron\",\"handlerRef\":\"demo\","
                 + "\"cron\":\"" + CRON + "\",\"shardCount\":1}"))
         .andExpect(status().isCreated()).andReturn().getResponse().getContentAsString()).get("id").asLong();
     // 完全相同的定义再 PUT 一次(不改任何字段)→ task.update,但 diff 应为空对象 {}
-    mvc.perform(put("/api/v1/tasks/" + id).header("X-Operator", "u")
-            .contentType(MediaType.APPLICATION_JSON)
+    mvc.perform(put("/api/v1/tasks/" + id)            .contentType(MediaType.APPLICATION_JSON)
             .content("{\"name\":\"same-task\",\"kind\":\"cron\",\"handlerRef\":\"demo\","
                 + "\"cron\":\"" + CRON + "\",\"shardCount\":1}"))
         .andExpect(status().isOk());
@@ -765,12 +785,12 @@ class ApiIntegrationTest {
   /** 取证:task.delete 物理删除后其完整定义只在 before 留存,可据此还原。 */
   @Test
   void taskDelete_beforeSnapshotRetainsDefinition() throws Exception {
-    long delId = objectMapper.readTree(mvc.perform(post("/api/v1/tasks").header("X-Operator", "delsnap")
+    long delId = objectMapper.readTree(mvc.perform(post("/api/v1/tasks").header("X-Operator", "alice")
             .contentType(MediaType.APPLICATION_JSON)
             .content("{\"name\":\"snap-del\",\"kind\":\"cron\",\"handlerRef\":\"demo\","
                 + "\"cron\":\"" + CRON + "\",\"shardCount\":2}"))
         .andExpect(status().isCreated()).andReturn().getResponse().getContentAsString()).get("id").asLong();
-    mvc.perform(delete("/api/v1/tasks/" + delId).header("X-Operator", "delsnap")).andExpect(status().isNoContent());
+    mvc.perform(delete("/api/v1/tasks/" + delId).header("X-Operator", "alice")).andExpect(status().isNoContent());
     // 任务已物理删除;审计行仍持 before 全量快照
     mvc.perform(get("/api/v1/audits").param("action", "task.delete").param("targetId", String.valueOf(delId)))
         .andExpect(status().isOk())
@@ -783,13 +803,11 @@ class ApiIntegrationTest {
   /** 同值 update 亦有 before(diff={} 但 before 为全量前态)。 */
   @Test
   void taskUpdate_identicalFields_hasBeforeThoEmptyDiff() throws Exception {
-    long id = objectMapper.readTree(mvc.perform(post("/api/v1/tasks").header("X-Operator", "u2")
-            .contentType(MediaType.APPLICATION_JSON)
+    long id = objectMapper.readTree(mvc.perform(post("/api/v1/tasks")            .contentType(MediaType.APPLICATION_JSON)
             .content("{\"name\":\"same-before\",\"kind\":\"cron\",\"handlerRef\":\"demo\","
                 + "\"cron\":\"" + CRON + "\",\"shardCount\":1}"))
         .andExpect(status().isCreated()).andReturn().getResponse().getContentAsString()).get("id").asLong();
-    mvc.perform(put("/api/v1/tasks/" + id).header("X-Operator", "u2")
-            .contentType(MediaType.APPLICATION_JSON)
+    mvc.perform(put("/api/v1/tasks/" + id)            .contentType(MediaType.APPLICATION_JSON)
             .content("{\"name\":\"same-before\",\"kind\":\"cron\",\"handlerRef\":\"demo\","
                 + "\"cron\":\"" + CRON + "\",\"shardCount\":1}"))
         .andExpect(status().isOk());
@@ -901,48 +919,44 @@ class ApiIntegrationTest {
   @Test
   void auditReadApi_diffFilters() throws Exception {
     // 真变更:create(create→diff NULL)后 PUT 改 cron → task.update 的非空 diff
-    long changed = objectMapper.readTree(mvc.perform(post("/api/v1/tasks").header("X-Operator", "d")
-            .contentType(MediaType.APPLICATION_JSON)
+    long changed = objectMapper.readTree(mvc.perform(post("/api/v1/tasks")            .contentType(MediaType.APPLICATION_JSON)
             .content("{\"name\":\"diff-c-1\",\"kind\":\"cron\",\"handlerRef\":\"demo\","
                 + "\"cron\":\"" + CRON + "\",\"shardCount\":1}"))
         .andExpect(status().isCreated()).andReturn().getResponse().getContentAsString()).get("id").asLong();
-    mvc.perform(put("/api/v1/tasks/" + changed).header("X-Operator", "d")
-            .contentType(MediaType.APPLICATION_JSON)
+    mvc.perform(put("/api/v1/tasks/" + changed)            .contentType(MediaType.APPLICATION_JSON)
             .content("{\"name\":\"diff-c-1\",\"kind\":\"cron\",\"handlerRef\":\"demo\","
                 + "\"cron\":\"0 */9 * * * *\",\"shardCount\":1}"))
         .andExpect(status().isOk());
     // no-op:同值再 PUT → task.update 的 diff 为空对象 {}
-    long same = objectMapper.readTree(mvc.perform(post("/api/v1/tasks").header("X-Operator", "d")
-            .contentType(MediaType.APPLICATION_JSON)
+    long same = objectMapper.readTree(mvc.perform(post("/api/v1/tasks")            .contentType(MediaType.APPLICATION_JSON)
             .content("{\"name\":\"diff-s-1\",\"kind\":\"cron\",\"handlerRef\":\"demo\","
                 + "\"cron\":\"" + CRON + "\",\"shardCount\":1}"))
         .andExpect(status().isCreated()).andReturn().getResponse().getContentAsString()).get("id").asLong();
-    mvc.perform(put("/api/v1/tasks/" + same).header("X-Operator", "d")
-            .contentType(MediaType.APPLICATION_JSON)
+    mvc.perform(put("/api/v1/tasks/" + same)            .contentType(MediaType.APPLICATION_JSON)
             .content("{\"name\":\"diff-s-1\",\"kind\":\"cron\",\"handlerRef\":\"demo\","
                 + "\"cron\":\"" + CRON + "\",\"shardCount\":1}"))
         .andExpect(status().isOk());
 
     // hasDiff=true → 仅真变更行(排除 {} 的 no-op update 与 NULL 的 create)
-    mvc.perform(get("/api/v1/audits").param("hasDiff", "true").param("operator", "d"))
+    mvc.perform(get("/api/v1/audits").param("hasDiff", "true").param("operator", "alice"))
         .andExpect(status().isOk())
         .andExpect(jsonPath("$.total").value(1))
         .andExpect(jsonPath("$['items'][0].targetId").value(changed))
         .andExpect(jsonPath("$['items'][0].diff").value(org.hamcrest.Matchers.containsString("cron")));
 
     // diffField=cron → 同样仅命中改过 cron 的行
-    mvc.perform(get("/api/v1/audits").param("diffField", "cron").param("operator", "d"))
+    mvc.perform(get("/api/v1/audits").param("diffField", "cron").param("operator", "alice"))
         .andExpect(status().isOk())
         .andExpect(jsonPath("$.total").value(1))
         .andExpect(jsonPath("$['items'][0].targetId").value(changed));
 
     // 组合 hasDiff=true + diffField=cron
-    mvc.perform(get("/api/v1/audits").param("hasDiff", "true").param("diffField", "cron").param("operator", "d"))
+    mvc.perform(get("/api/v1/audits").param("hasDiff", "true").param("diffField", "cron").param("operator", "alice"))
         .andExpect(status().isOk())
         .andExpect(jsonPath("$.total").value(1));
 
     // 未改过的字段 shardCount → 0 命中(顶层键不在任何 diff 中)
-    mvc.perform(get("/api/v1/audits").param("diffField", "shardCount").param("operator", "d"))
+    mvc.perform(get("/api/v1/audits").param("diffField", "shardCount").param("operator", "alice"))
         .andExpect(status().isOk())
         .andExpect(jsonPath("$.total").value(0));
   }
@@ -992,10 +1006,10 @@ class ApiIntegrationTest {
   void dagWriteActions_areAudited() throws Exception {
     long t = postTask("audit-dag-task");
     long dagId = postDag("audit-dag", new long[]{t}, new String[]{"A"}, new String[][]{});
-    // postDag 无 X-Operator → anonymous
+    // postDag 缺省头(defaultRequest=alice)→ 审计记录 alice(写必需已授权操作者)
     mvc.perform(get("/api/v1/audits").param("action", "dag.create").param("targetId", String.valueOf(dagId)))
         .andExpect(status().isOk())
-        .andExpect(jsonPath("$['items'][0].operator").value("anonymous"))
+        .andExpect(jsonPath("$['items'][0].operator").value("alice"))
         .andExpect(jsonPath("$['items'][0].meta").value(org.hamcrest.Matchers.containsString("audit-dag")));
 
     // pause / resume
@@ -1656,6 +1670,84 @@ class ApiIntegrationTest {
   }
 
   
+  // ---- 操作者授权 / 审计访问控制 ----
+
+  /** 写端点缺 X-Operator(空头)→ 401。读端点仍开放。 */
+  @Test
+  void write_withBlankOperator_returns401_readStaysOpen() throws Exception {
+    String body = "{\"name\":\"no-op\",\"kind\":\"cron\",\"handlerRef\":\"demo\",\"cron\":\"" + CRON + "\"}";
+    mvc.perform(post("/api/v1/tasks").header("X-Operator", "").contentType(MediaType.APPLICATION_JSON).content(body))
+        .andExpect(status().isUnauthorized());
+    // 读端点不受影响(空头也开放)
+    mvc.perform(get("/api/v1/audits").header("X-Operator", ""))
+        .andExpect(status().isOk());
+  }
+
+  /** 未登记(或停用)操作者写端点 → 403。 */
+  @Test
+  void write_unknownOperator_returns403() throws Exception {
+    String body = "{\"name\":\"mallory-task\",\"kind\":\"cron\",\"handlerRef\":\"demo\",\"cron\":\"" + CRON + "\"}";
+    mvc.perform(post("/api/v1/tasks").header("X-Operator", "mallory")
+            .contentType(MediaType.APPLICATION_JSON).content(body))
+        .andExpect(status().isForbidden());
+  }
+
+  /** OPERATOR 可写常规端点(如 pause):能建任务(经默认 alice)后由 bob 暂停。 */
+  @Test
+  void operationalRole_routineWrite_isAllowed() throws Exception {
+    long id = postTask("bob-routine");
+    mvc.perform(post("/api/v1/tasks/" + id + "/pause").header("X-Operator", "bob"))
+        .andExpect(status().isOk());
+  }
+
+  /** OPERATOR 删任务(提权到 ADMIN 的端点)→ 403;ADMIN 删 → 204。 */
+  @Test
+  void operationalRole_cannotDeleteTask_butAdminCan() throws Exception {
+    long id = postTask("role-delete");
+    mvc.perform(delete("/api/v1/tasks/" + id).header("X-Operator", "bob"))
+        .andExpect(status().isForbidden());
+    // alice(ADMIN)仍可删
+    mvc.perform(delete("/api/v1/tasks/" + id).header("X-Operator", "alice"))
+        .andExpect(status().isNoContent());
+  }
+
+  /** 操作者管理整体 ADMIN:OPERATOR 连读都 403;ADMIN 可登记/停用。 */
+  @Test
+  void operatorManagement_isAdminOnly() throws Exception {
+    mvc.perform(get("/api/v1/operators").header("X-Operator", "bob"))
+        .andExpect(status().isForbidden());
+    String upsert = "{\"name\":\"mallory\",\"role\":\"OPERATOR\",\"active\":true}";
+    mvc.perform(post("/api/v1/operators").header("X-Operator", "bob")
+            .contentType(MediaType.APPLICATION_JSON).content(upsert))
+        .andExpect(status().isForbidden());
+    // ADMIN 登记成功 → 目录含 mallory
+    mvc.perform(post("/api/v1/operators").header("X-Operator", "alice")
+            .contentType(MediaType.APPLICATION_JSON).content(upsert))
+        .andExpect(status().isOk());
+    mvc.perform(get("/api/v1/operators").header("X-Operator", "alice"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$[*].name", hasItem("mallory")));
+    // 停用后 mallory 再写被拒
+    mvc.perform(post("/api/v1/operators/mallory/deactivate").header("X-Operator", "alice"))
+        .andExpect(status().isOk());
+    String body = "{\"name\":\"x\",\"kind\":\"cron\",\"handlerRef\":\"demo\",\"cron\":\"" + CRON + "\"}";
+    mvc.perform(post("/api/v1/tasks").header("X-Operator", "mallory")
+            .contentType(MediaType.APPLICATION_JSON).content(body))
+        .andExpect(status().isForbidden());
+  }
+
+  /** 权限拒绝会留一条 access.denied 审计(自带称操作者),自动进取证链。 */
+  @Test
+  void accessDenied_isAudited() throws Exception {
+    long id = postTask("deny-audit");
+    mvc.perform(delete("/api/v1/tasks/" + id).header("X-Operator", "bob"))
+        .andExpect(status().isForbidden());
+    var denied = jdbc.queryForList(
+        "SELECT operator, action FROM app_audit WHERE action='access.denied'");
+    assertFalse(denied.isEmpty(), "403 应落一条 access.denied 审计");
+    assertEquals("bob", denied.get(0).get("operator"));
+  }
+
   /** 可复写的皮时钟:instant 由测试控制,getZone 固定 UTC。 */
   static final class MutableClock extends Clock {
     Instant now;

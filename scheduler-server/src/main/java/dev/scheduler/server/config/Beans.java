@@ -1,15 +1,18 @@
 package dev.scheduler.server.config;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import dev.scheduler.core.OperatorRole;
 import dev.scheduler.persistence.AuditRepository;
 import dev.scheduler.persistence.DagRepository;
 import dev.scheduler.persistence.ExecutionRepository;
 import dev.scheduler.persistence.JdbcAuditRepository;
 import dev.scheduler.persistence.JdbcDagRepository;
 import dev.scheduler.persistence.JdbcExecutionRepository;
+import dev.scheduler.persistence.JdbcOperatorRepository;
 import dev.scheduler.persistence.JdbcShardRepository;
 import dev.scheduler.persistence.JdbcTaskRepository;
 import dev.scheduler.persistence.JdbcWorkerRepository;
+import dev.scheduler.persistence.OperatorRepository;
 import dev.scheduler.persistence.ShardRepository;
 import dev.scheduler.persistence.TaskRepository;
 import dev.scheduler.persistence.WorkerRepository;
@@ -59,6 +62,38 @@ public class Beans {
   @Bean
   AuditRepository auditRepository(JdbcTemplate jdbc) {
     return new JdbcAuditRepository(jdbc);
+  }
+
+  /** 操作者目录:写端点授权拦截器读白名单/角色的数据源。 */
+  @Bean
+  OperatorRepository operatorRepository(JdbcTemplate jdbc) {
+    return new JdbcOperatorRepository(jdbc);
+  }
+
+  /**
+   * 操作者引导:启动时把 {@code scheduler.operators}(形如 {@code alice:ADMIN,bob:OPERATOR})幂等 upsert 进目录,
+   * 保证目录恒有可登记的 ADMIN(否则第一次部署建不出管家)。属性为空 → no-op(测试逐个播种)。 */
+  @Bean
+  ApplicationRunner seedOperators(OperatorRepository operators,
+                                  @Value("${scheduler.operators:}") String spec) {
+    return args -> {
+      if (spec == null || spec.isBlank()) return;
+      for (String pair : spec.split(",")) {
+        String[] kv = pair.trim().split(":", 2);
+        if (kv.length != 2 || kv[0].isBlank()) {
+          log.warn("skip malformed scheduler.operators entry: '{}'", pair);
+          continue;
+        }
+        OperatorRole role;
+        try {
+          role = OperatorRole.valueOf(kv[1].trim().toUpperCase());
+        } catch (IllegalArgumentException e) {
+          log.warn("skip entry '{}' with unknown role '{}'", kv[0].trim(), kv[1].trim());
+          continue;
+        }
+        operators.upsert(kv[0].trim(), role, true);
+      }
+    };
   }
 
   @Bean

@@ -1,4 +1,5 @@
 import { BrowserRouter, NavLink, Navigate, Route, Routes } from 'react-router-dom';
+import { getOperatorName, setOperator } from './api/client';
 import TasksPage from './pages/TasksPage';
 import ExecutionsPage from './pages/ExecutionsPage';
 import DlqPage from './pages/DlqPage';
@@ -32,6 +33,11 @@ export default function App() {
               </NavLink>
             ))}
           </nav>
+          <div className="sidebar-operator">
+            <span className="label">操作者</span>
+            <input className="input" defaultValue={getOperatorName()} placeholder="操作者名(写操作按此授权)"
+              onChange={(e) => setOperator(e.target.value)} />
+          </div>
         </aside>
         <main className="content">
           <Routes>

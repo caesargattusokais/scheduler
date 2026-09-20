@@ -18,9 +18,21 @@ import type {
   UpdateTaskRequest,
 } from './types';
 
+/** 当前会话自报操作者:写端授权按 X-Operator 收口(未登记/欠角色 → 401/403)。defaultRequest 缺省 alice。 */
+let currentOperator = localStorage.getItem('scheduler.operator') || 'alice';
+export const getOperatorName = () => currentOperator;
+export const setOperator = (op: string) => {
+  currentOperator = op;
+  localStorage.setItem('scheduler.operator', op);
+};
+
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, {
-    headers: init?.body ? { 'Content-Type': 'application/json' } : undefined,
+    headers: {
+      ...(init?.body ? { 'Content-Type': 'application/json' } : {}),
+      ...(currentOperator ? { 'X-Operator': currentOperator } : {}),
+      ...(init?.headers as Record<string, string> | undefined),
+    },
     ...init,
   });
   if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
