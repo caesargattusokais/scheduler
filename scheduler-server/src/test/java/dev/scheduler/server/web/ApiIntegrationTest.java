@@ -7,6 +7,8 @@ import static org.hamcrest.Matchers.not;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
@@ -18,11 +20,14 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.scheduler.core.ExecutionStatus;
 import dev.scheduler.core.Shard;
+import dev.scheduler.persistence.AuthHashing;
 import dev.scheduler.persistence.ShardRepository;
 import dev.scheduler.persistence.WorkerRegistration;
 import dev.scheduler.persistence.WorkerRepository;
 import dev.scheduler.server.reconcile.Reconciler;
+import dev.scheduler.server.service.AuthService;
 import dev.scheduler.server.trigger.TriggerEngine;
+import jakarta.servlet.http.Cookie;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneId;
@@ -87,6 +92,14 @@ class ApiIntegrationTest {
   private static final Instant BASE = Instant.parse("2026-01-01T10:05:00Z");
   static final MutableClock CLOCK = new MutableClock(BASE);
 
+  /** 会话令牌明文(64-char lower hex,与 AuthService.randomToken 同形):alice/bob/carol/dave 在 resetDb 播种落库;
+   *  mallory 不播种 → 其 cookie 解析为空(匿名),用于 401 用例。 */
+  private static final String ALICE_TOKEN = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  private static final String BOB_TOKEN = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+  private static final String CAROL_TOKEN = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+  private static final String DAVE_TOKEN = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+  private static final String MALLORY_TOKEN = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+
   @DynamicPropertySource
   static void datasource(DynamicPropertyRegistry registry) {
     registry.add("spring.datasource.url", PG::getJdbcUrl);
@@ -97,6 +110,8 @@ class ApiIntegrationTest {
   @Autowired MockMvc mvc;
   @Autowired ObjectMapper objectMapper;
   @Autowired JdbcTemplate jdbc;
+  /** 强认证服务:轮换/解析断言(旧 token 失效、新 token 可解析)读它。 */
+  @Autowired AuthService authService;
   @Autowired ShardRepository shards;
   /** M6:装配的 worker 表读写 bean——控制面据此读共享 DB 的存活 worker 注册视图(refs),供 M6.2 校验。 */
   @Autowired WorkerRepository workerRepository;
@@ -125,14 +140,16 @@ class ApiIntegrationTest {
   }
 
   /**
-   * 给 MockMvc 请求默认带 X-Operator=alice(ADMIN),使既有未显式断言权限的写用例零改动通过写端授权;
-   * 权限相关用例显式 .header("X-Operator", ...) 覆盖默认(显式头排在默认头之前,same-name 取首值)。
+   * 给 MockMvc 请求默认带 session cookie(session=ALICE_TOKEN,ADMIN),使既有未显式断言权限的写用例零改动
+   * 通过写端授权;拦截器按 cookie 解析身份。权限相关用例显式 .cookie(new Cookie("session", X_TOKEN)) 覆盖默认
+   * (Spring 6.1 MockHttpServletRequestBuilder cookie 合并按 name 判重,默认 cookie 被同名显式 cookie 顶掉)。
    */
   @TestConfiguration
   static class DefaultOperatorConfig {
     @Bean
-    MockMvcBuilderCustomizer defaultOperatorHeader() {
-      return builder -> builder.defaultRequest(get("/").header("X-Operator", "alice"));
+    MockMvcBuilderCustomizer defaultOperatorCookie() {
+      return builder -> builder.defaultRequest(
+          get("/").cookie(new Cookie("session", ALICE_TOKEN)));
     }
   }
 
@@ -169,12 +186,22 @@ class ApiIntegrationTest {
   @BeforeEach
   void resetDb() {
     jdbc.execute("TRUNCATE app_dag CASCADE; TRUNCATE execution, execution_outcome, execution_shard,"
-        + " execution_shard_outcome, app_task, app_audit, app_audit_archive, worker RESTART IDENTITY CASCADE");
-    // app_operator 不在 TRUNCATE 之列(写端授权依赖其在引导/测试期间恒在):幂等确保 alice/bob 每用例都在,
+        + " execution_shard_outcome, app_task, app_audit, app_audit_archive, worker,"
+        + " app_auth_session, app_login_attempt RESTART IDENTITY CASCADE");
+    // app_operator 不在 TRUNCATE 之列(写端授权依赖其在引导/测试期间恒在;且不清 password_hash,保留上下文
+    // 启动时 boot-pass 引导的口令,login(boot-pass) 恒可用):幂等确保 alice/bob/carol/dave 每用例都在,
     //  即便某用例 deactivate 过也不会让后续用例缺人。
     jdbc.update("INSERT INTO app_operator(name, role, active) VALUES "
         + "('alice','ADMIN',true),('bob','OPERATOR',true),('carol','ADMIN',true),('dave','OPERATOR',true)"
         + " ON CONFLICT (name) DO UPDATE SET role = EXCLUDED.role, active = true");
+    // 为每个授权 actor 播种固定会话(SHA-256(token) 落库;明文不入库)。mallory 不播种 → 其 cookie 恒匿名(401)。
+    jdbc.update("INSERT INTO app_auth_session(token_hash, operator_name, created_at, expires_at) VALUES"
+            + " (?, 'alice', now(), now() + interval '8 hour'),"
+            + " (?, 'bob', now(), now() + interval '8 hour'),"
+            + " (?, 'carol', now(), now() + interval '8 hour'),"
+            + " (?, 'dave', now(), now() + interval '8 hour')",
+        AuthHashing.sha256(ALICE_TOKEN), AuthHashing.sha256(BOB_TOKEN),
+        AuthHashing.sha256(CAROL_TOKEN), AuthHashing.sha256(DAVE_TOKEN));
     CLOCK.now = BASE;
     // M6.3:server 上下文无进程内 handler——测试建任务须先注册一个存活 worker 提供 handlerRef(demo);
     //  该 worker 在未拨动 CLOCK.now 的用例中恒存活(见 handlersEndpoint 用例拨钟后须重播种)。
@@ -674,7 +701,7 @@ class ApiIntegrationTest {
   @Test
   void auditIntegrity_api_cleanThenFlagsTamper() throws Exception {
     // 经写端创建任务 → AuditRecorder 落一条带链哈希的 task.create。
-    objectMapper.readTree(mvc.perform(post("/api/v1/tasks").header("X-Operator", "alice")
+    objectMapper.readTree(mvc.perform(post("/api/v1/tasks").cookie(session(ALICE_TOKEN))
             .contentType(MediaType.APPLICATION_JSON)
             .content("{\"name\":\"chain-task\",\"kind\":\"cron\",\"handlerRef\":\"demo\","
                 + "\"cron\":\"" + CRON + "\",\"shardCount\":1}"))
@@ -702,7 +729,7 @@ class ApiIntegrationTest {
   @Test
   void auditArchive_api_adminArchivesOldRows_thenIntegrityStillVerified() throws Exception {
     // 写端产生一条真实审计链行,再把其 occurred_at 回拨到过去 → eligible for archive。
-    objectMapper.readTree(mvc.perform(post("/api/v1/tasks").header("X-Operator", "alice")
+    objectMapper.readTree(mvc.perform(post("/api/v1/tasks").cookie(session(ALICE_TOKEN))
             .contentType(MediaType.APPLICATION_JSON)
             .content("{\"name\":\"archive-task\",\"kind\":\"cron\",\"handlerRef\":\"demo\","
                 + "\"cron\":\"" + CRON + "\",\"shardCount\":1}"))
@@ -713,7 +740,7 @@ class ApiIntegrationTest {
 
     // ADMIN(alice)归档 → 返回 archived=1;归档删除不透支取证链。
     mvc.perform(post("/api/v1/audits/archive")
-            .header("X-Operator", "alice")
+            .cookie(session(ALICE_TOKEN))
             .param("olderThan", "2021-01-01T00:00:00Z"))
         .andExpect(status().isOk())
         .andExpect(jsonPath("$.archived").value(1))
@@ -732,7 +759,7 @@ class ApiIntegrationTest {
 
     // OPERATOR(bob)无权归档 → 403 + access.denied 审计。
     mvc.perform(post("/api/v1/audits/archive")
-            .header("X-Operator", "bob")
+            .cookie(session(BOB_TOKEN))
             .param("olderThan", "2021-01-01T00:00:00Z"))
         .andExpect(status().isForbidden());
     assertEquals(1L, jdbc.queryForObject(
@@ -745,7 +772,7 @@ class ApiIntegrationTest {
   @Test
   void taskWriteActions_areAudited() throws Exception {
     // create with X-Operator → operator 为该头,meta 含后态 name
-    long id = objectMapper.readTree(mvc.perform(post("/api/v1/tasks").header("X-Operator", "alice")
+    long id = objectMapper.readTree(mvc.perform(post("/api/v1/tasks").cookie(session(ALICE_TOKEN))
             .contentType(MediaType.APPLICATION_JSON)
             .content("{\"name\":\"audited-task\",\"kind\":\"cron\",\"handlerRef\":\"demo\","
                 + "\"cron\":\"" + CRON + "\",\"shardCount\":1}"))
@@ -759,7 +786,7 @@ class ApiIntegrationTest {
         .andExpect(jsonPath("$['items'][0].diff").value(org.hamcrest.Matchers.nullValue()));
 
     // update → task.update,targetId=id,meta 为后态(改名后)
-    mvc.perform(put("/api/v1/tasks/" + id).header("X-Operator", "alice")
+    mvc.perform(put("/api/v1/tasks/" + id).cookie(session(ALICE_TOKEN))
             .contentType(MediaType.APPLICATION_JSON)
             .content("{\"name\":\"renamed-audit\",\"kind\":\"cron\",\"handlerRef\":\"demo\","
                 + "\"cron\":\"0 */6 * * * *\",\"shardCount\":1}"))
@@ -786,7 +813,7 @@ class ApiIntegrationTest {
         .andExpect(status().isOk()).andExpect(jsonPath("$['items'][0].operator").value("alice"));
 
     // trigger → task.trigger(目标 = 任务 id)
-    mvc.perform(post("/api/v1/tasks/" + id + "/trigger").header("X-Operator", "alice"))
+    mvc.perform(post("/api/v1/tasks/" + id + "/trigger").cookie(session(ALICE_TOKEN)))
         .andExpect(status().isCreated());
     mvc.perform(get("/api/v1/audits").param("action", "task.trigger").param("targetId", String.valueOf(id)))
         .andExpect(status().isOk()).andExpect(jsonPath("$.total").value(1));
@@ -796,13 +823,13 @@ class ApiIntegrationTest {
     // 409-conflict delete 记录为空:动作实际未发生
     mvc.perform(get("/api/v1/audits").param("action", "task.delete").param("targetId", String.valueOf(id)))
         .andExpect(status().isOk()).andExpect(jsonPath("$.total").value(0));
-    long delId = objectMapper.readTree(mvc.perform(post("/api/v1/tasks").header("X-Operator", "bob")
+    long delId = objectMapper.readTree(mvc.perform(post("/api/v1/tasks").cookie(session(BOB_TOKEN))
             .contentType(MediaType.APPLICATION_JSON)
             .content("{\"name\":\"audit-del\",\"kind\":\"cron\",\"handlerRef\":\"demo\","
                 + "\"cron\":\"" + CRON + "\",\"shardCount\":1}"))
         .andExpect(status().isCreated()).andReturn().getResponse().getContentAsString()).get("id").asLong();
     // task.delete 需 ADMIN:改用 carol(ADMIN),审计仍记录操作者 carol
-    mvc.perform(delete("/api/v1/tasks/" + delId).header("X-Operator", "carol")).andExpect(status().isNoContent());
+    mvc.perform(delete("/api/v1/tasks/" + delId).cookie(session(CAROL_TOKEN))).andExpect(status().isNoContent());
     mvc.perform(get("/api/v1/audits").param("action", "task.delete").param("targetId", String.valueOf(delId)))
         .andExpect(status().isOk())
         .andExpect(jsonPath("$['items'][0].operator").value("carol"));
@@ -829,12 +856,12 @@ class ApiIntegrationTest {
   /** 取证:task.delete 物理删除后其完整定义只在 before 留存,可据此还原。 */
   @Test
   void taskDelete_beforeSnapshotRetainsDefinition() throws Exception {
-    long delId = objectMapper.readTree(mvc.perform(post("/api/v1/tasks").header("X-Operator", "alice")
+    long delId = objectMapper.readTree(mvc.perform(post("/api/v1/tasks").cookie(session(ALICE_TOKEN))
             .contentType(MediaType.APPLICATION_JSON)
             .content("{\"name\":\"snap-del\",\"kind\":\"cron\",\"handlerRef\":\"demo\","
                 + "\"cron\":\"" + CRON + "\",\"shardCount\":2}"))
         .andExpect(status().isCreated()).andReturn().getResponse().getContentAsString()).get("id").asLong();
-    mvc.perform(delete("/api/v1/tasks/" + delId).header("X-Operator", "alice")).andExpect(status().isNoContent());
+    mvc.perform(delete("/api/v1/tasks/" + delId).cookie(session(ALICE_TOKEN))).andExpect(status().isNoContent());
     // 任务已物理删除;审计行仍持 before 全量快照
     mvc.perform(get("/api/v1/audits").param("action", "task.delete").param("targetId", String.valueOf(delId)))
         .andExpect(status().isOk())
@@ -1016,7 +1043,7 @@ class ApiIntegrationTest {
       jdbc.update("UPDATE execution_shard SET status='SUCCESS', finished_at=now() WHERE id=?", sid);
     jdbc.update("UPDATE execution SET status='SUCCESS', finished_at=now() WHERE id=? AND status='DUE'", execId);
     long newId = objectMapper.readTree(mvc.perform(post("/api/v1/executions/" + execId + "/rerun")
-            .header("X-Operator", "carol")).andExpect(status().isCreated()).andReturn()
+            .cookie(session(CAROL_TOKEN))).andExpect(status().isCreated()).andReturn()
         .getResponse().getContentAsString()).get("id").asLong();
     mvc.perform(get("/api/v1/audits").param("action", "execution.rerun").param("targetId", String.valueOf(newId)))
         .andExpect(status().isOk())
@@ -1024,14 +1051,14 @@ class ApiIntegrationTest {
 
     // requeue FAILED+dead_letter shard → shard.requeue
     Shard dlq = seedDeadLetter(id);
-    mvc.perform(post("/api/v1/executions/shards/" + dlq.id() + "/requeue").header("X-Operator", "carol"))
+    mvc.perform(post("/api/v1/executions/shards/" + dlq.id() + "/requeue").cookie(session(CAROL_TOKEN)))
         .andExpect(status().isOk());
     mvc.perform(get("/api/v1/audits").param("action", "shard.requeue").param("targetId", String.valueOf(dlq.id())))
         .andExpect(status().isOk()).andExpect(jsonPath("$.total").value(1));
 
     // cancel(无 RUNNING shard → 直取消)→ execution.cancel
     long cancelTarget = triggerParent(id);
-    mvc.perform(post("/api/v1/executions/" + cancelTarget + "/cancel").header("X-Operator", "carol"))
+    mvc.perform(post("/api/v1/executions/" + cancelTarget + "/cancel").cookie(session(CAROL_TOKEN)))
         .andExpect(status().isOk());
     mvc.perform(get("/api/v1/audits").param("action", "execution.cancel").param("targetId", String.valueOf(cancelTarget)))
         .andExpect(status().isOk())
@@ -1039,7 +1066,7 @@ class ApiIntegrationTest {
         .andExpect(jsonPath("$.total").value(1));
 
     // 幂等重取消已 CANCELED → 200 短路,不产生新审计(动作实际未发生):total 仍 1
-    mvc.perform(post("/api/v1/executions/" + cancelTarget + "/cancel").header("X-Operator", "carol"))
+    mvc.perform(post("/api/v1/executions/" + cancelTarget + "/cancel").cookie(session(CAROL_TOKEN)))
         .andExpect(status().isOk());
     mvc.perform(get("/api/v1/audits").param("action", "execution.cancel").param("targetId", String.valueOf(cancelTarget)))
         .andExpect(status().isOk()).andExpect(jsonPath("$.total").value(1));
@@ -1069,20 +1096,20 @@ class ApiIntegrationTest {
 
     // dag_run.cancel(scanOnce 后 A RUNNING → cancel 全节点级联终态)→ 记录一次
     dagEngine.scanOnce();
-    mvc.perform(post("/api/v1/dags/runs/" + runId + "/cancel").header("X-Operator", "dave"))
+    mvc.perform(post("/api/v1/dags/runs/" + runId + "/cancel").cookie(session(DAVE_TOKEN)))
         .andExpect(status().isOk());
     mvc.perform(get("/api/v1/audits").param("action", "dag_run.cancel").param("targetId", String.valueOf(runId)))
         .andExpect(status().isOk()).andExpect(jsonPath("$['items'][0].operator").value("dave"));
 
     // 幂等重取消已 CANCELED run → 200 短路,不产生新审计:total 仍 1
-    mvc.perform(post("/api/v1/dags/runs/" + runId + "/cancel").header("X-Operator", "dave"))
+    mvc.perform(post("/api/v1/dags/runs/" + runId + "/cancel").cookie(session(DAVE_TOKEN)))
         .andExpect(status().isOk());
     mvc.perform(get("/api/v1/audits").param("action", "dag_run.cancel").param("targetId", String.valueOf(runId)))
         .andExpect(status().isOk()).andExpect(jsonPath("$.total").value(1));
 
     // dag_node.rerun:终态节点可重跑(rerunNode 仅要求节点 isTerminal();A 已 CANCELED)→ targetId=runId, meta 含 nodeId
     long aId = dagNodeId(runId, "A");
-    mvc.perform(post("/api/v1/dags/runs/" + runId + "/nodes/" + aId + "/rerun").header("X-Operator", "dave"))
+    mvc.perform(post("/api/v1/dags/runs/" + runId + "/nodes/" + aId + "/rerun").cookie(session(DAVE_TOKEN)))
         .andExpect(status().isOk());
     mvc.perform(get("/api/v1/audits").param("action", "dag_node.rerun").param("targetId", String.valueOf(runId)))
         .andExpect(status().isOk())
@@ -1713,34 +1740,40 @@ class ApiIntegrationTest {
         "SELECT status FROM execution_shard WHERE execution_id=?", String.class, parentId);
   }
 
+  /** 显式会话 cookie(session=token):用于覆盖默认 alice cookie 的权限相关用例。 */
+  private static Cookie session(String token) {
+    return new Cookie("session", token);
+  }
+
   
   // ---- 操作者授权 / 审计访问控制 ----
 
-  /** 写端点缺 X-Operator(空头)→ 401。读端点仍开放。 */
+  /** 无有效会话 cookie 的写 → 401(匿名);读端点仍开放(会话无关)。 */
   @Test
-  void write_withBlankOperator_returns401_readStaysOpen() throws Exception {
+  void write_withoutSession_returns401_readStaysOpen() throws Exception {
     String body = "{\"name\":\"no-op\",\"kind\":\"cron\",\"handlerRef\":\"demo\",\"cron\":\"" + CRON + "\"}";
-    mvc.perform(post("/api/v1/tasks").header("X-Operator", "").contentType(MediaType.APPLICATION_JSON).content(body))
+    mvc.perform(post("/api/v1/tasks").cookie(session(MALLORY_TOKEN))
+            .contentType(MediaType.APPLICATION_JSON).content(body))
         .andExpect(status().isUnauthorized());
-    // 读端点不受影响(空头也开放)
-    mvc.perform(get("/api/v1/audits").header("X-Operator", ""))
+    // 读端点不受影响(开放)
+    mvc.perform(get("/api/v1/audits").cookie(session(MALLORY_TOKEN)))
         .andExpect(status().isOk());
   }
 
-  /** 未登记(或停用)操作者写端点 → 403。 */
+  /** 未登记操作者(mallory 未播种会话)→ 匿名 401(cookie 会话必须由登录/播种建立,授权仅认已解析身份)。 */
   @Test
-  void write_unknownOperator_returns403() throws Exception {
+  void write_unknownOperator_withoutSession_returns401() throws Exception {
     String body = "{\"name\":\"mallory-task\",\"kind\":\"cron\",\"handlerRef\":\"demo\",\"cron\":\"" + CRON + "\"}";
-    mvc.perform(post("/api/v1/tasks").header("X-Operator", "mallory")
+    mvc.perform(post("/api/v1/tasks").cookie(session(MALLORY_TOKEN))
             .contentType(MediaType.APPLICATION_JSON).content(body))
-        .andExpect(status().isForbidden());
+        .andExpect(status().isUnauthorized());
   }
 
   /** OPERATOR 可写常规端点(如 pause):能建任务(经默认 alice)后由 bob 暂停。 */
   @Test
   void operationalRole_routineWrite_isAllowed() throws Exception {
     long id = postTask("bob-routine");
-    mvc.perform(post("/api/v1/tasks/" + id + "/pause").header("X-Operator", "bob"))
+    mvc.perform(post("/api/v1/tasks/" + id + "/pause").cookie(session(BOB_TOKEN)))
         .andExpect(status().isOk());
   }
 
@@ -1748,36 +1781,36 @@ class ApiIntegrationTest {
   @Test
   void operationalRole_cannotDeleteTask_butAdminCan() throws Exception {
     long id = postTask("role-delete");
-    mvc.perform(delete("/api/v1/tasks/" + id).header("X-Operator", "bob"))
+    mvc.perform(delete("/api/v1/tasks/" + id).cookie(session(BOB_TOKEN)))
         .andExpect(status().isForbidden());
     // alice(ADMIN)仍可删
-    mvc.perform(delete("/api/v1/tasks/" + id).header("X-Operator", "alice"))
+    mvc.perform(delete("/api/v1/tasks/" + id).cookie(session(ALICE_TOKEN)))
         .andExpect(status().isNoContent());
   }
 
   /** 操作者管理整体 ADMIN:OPERATOR 连读都 403;ADMIN 可登记/停用。 */
   @Test
   void operatorManagement_isAdminOnly() throws Exception {
-    mvc.perform(get("/api/v1/operators").header("X-Operator", "bob"))
+    mvc.perform(get("/api/v1/operators").cookie(session(BOB_TOKEN)))
         .andExpect(status().isForbidden());
     String upsert = "{\"name\":\"mallory\",\"role\":\"OPERATOR\",\"active\":true}";
-    mvc.perform(post("/api/v1/operators").header("X-Operator", "bob")
+    mvc.perform(post("/api/v1/operators").cookie(session(BOB_TOKEN))
             .contentType(MediaType.APPLICATION_JSON).content(upsert))
         .andExpect(status().isForbidden());
     // ADMIN 登记成功 → 目录含 mallory
-    mvc.perform(post("/api/v1/operators").header("X-Operator", "alice")
+    mvc.perform(post("/api/v1/operators").cookie(session(ALICE_TOKEN))
             .contentType(MediaType.APPLICATION_JSON).content(upsert))
         .andExpect(status().isOk());
-    mvc.perform(get("/api/v1/operators").header("X-Operator", "alice"))
+    mvc.perform(get("/api/v1/operators").cookie(session(ALICE_TOKEN)))
         .andExpect(status().isOk())
         .andExpect(jsonPath("$[*].name", hasItem("mallory")));
-    // 停用后 mallory 再写被拒
-    mvc.perform(post("/api/v1/operators/mallory/deactivate").header("X-Operator", "alice"))
+    // 停用后 mallory 再写被拒(mallory 无会话 → 匿名 401)
+    mvc.perform(post("/api/v1/operators/mallory/deactivate").cookie(session(ALICE_TOKEN)))
         .andExpect(status().isOk());
     String body = "{\"name\":\"x\",\"kind\":\"cron\",\"handlerRef\":\"demo\",\"cron\":\"" + CRON + "\"}";
-    mvc.perform(post("/api/v1/tasks").header("X-Operator", "mallory")
+    mvc.perform(post("/api/v1/tasks").cookie(session(MALLORY_TOKEN))
             .contentType(MediaType.APPLICATION_JSON).content(body))
-        .andExpect(status().isForbidden());
+        .andExpect(status().isUnauthorized());
   }
 
   // ---- 强认证:操作者口令管理 + 默认口令引导 ----
@@ -1793,14 +1826,15 @@ class ApiIntegrationTest {
     assertTrue(bobHash != null && bobHash.startsWith("$2"), "引导后 bob 也应持默认口令,got: " + bobHash);
   }
 
-  /** 强认证:ADMIN 设/改操作者口令 → password_hash 落 BCrypt,并撤销该操作者既有活动会话。 */
+  /** 强认证:ADMIN 设/改操作者口令 → password_hash 落 BCrypt,并撤销该操作者既有活动会话(bob 旧会话 → 401)。 */
   @Test
   void adminSetsPassword_updatesHashAndRevokesSessions() throws Exception {
-    // 预先给 bob 造一条活动会话(模拟 bob 已登录)→ 改密后应被撤销。
-    jdbc.update("INSERT INTO app_auth_session(token_hash, operator_name, expires_at)"
-        + " VALUES ('dummy-hash', 'bob', now() + interval '1 hour')");
+    // resetDb 已为 bob 播种 BOB_TOKEN 活动会话(模拟 bob 已登录)→ 改密后应被撤销。
+    assertEquals(1L, jdbc.queryForObject(
+        "SELECT count(*) FROM app_auth_session WHERE token_hash=? AND revoked_at IS NULL",
+        Long.class, AuthHashing.sha256(BOB_TOKEN)));
 
-    mvc.perform(post("/api/v1/operators/bob/password").header("X-Operator", "alice")
+    mvc.perform(post("/api/v1/operators/bob/password").cookie(session(ALICE_TOKEN))
             .contentType(MediaType.APPLICATION_JSON)
             .content("{\"password\":\"new-secret-1\"}"))
         .andExpect(status().isOk());
@@ -1812,12 +1846,17 @@ class ApiIntegrationTest {
     assertEquals(1L, jdbc.queryForObject(
         "SELECT count(*) FROM app_auth_session WHERE operator_name='bob' AND revoked_at IS NOT NULL",
         Long.class));
+    // bob 旧会话已撤 → 再以 BOB_TOKEN 写 → 401。
+    String body = "{\"name\":\"post-pwd\",\"kind\":\"cron\",\"handlerRef\":\"demo\",\"cron\":\"" + CRON + "\"}";
+    mvc.perform(post("/api/v1/tasks").cookie(session(BOB_TOKEN))
+            .contentType(MediaType.APPLICATION_JSON).content(body))
+        .andExpect(status().isUnauthorized());
   }
 
   /** 强认证:OPERATOR(bob)调改密端点 → 403(操作者管理整体 ADMIN)。 */
   @Test
   void operatorCannotSetPassword_returns403() throws Exception {
-    mvc.perform(post("/api/v1/operators/carol/password").header("X-Operator", "bob")
+    mvc.perform(post("/api/v1/operators/carol/password").cookie(session(BOB_TOKEN))
             .contentType(MediaType.APPLICATION_JSON)
             .content("{\"password\":\"new-secret-1\"}"))
         .andExpect(status().isForbidden());
@@ -1826,7 +1865,7 @@ class ApiIntegrationTest {
   /** 强认证:密码短于 8 → IllegalArgumentException → 400。 */
   @Test
   void setPassword_tooShort_returns400() throws Exception {
-    mvc.perform(post("/api/v1/operators/bob/password").header("X-Operator", "alice")
+    mvc.perform(post("/api/v1/operators/bob/password").cookie(session(ALICE_TOKEN))
             .contentType(MediaType.APPLICATION_JSON)
             .content("{\"password\":\"short\"}"))
         .andExpect(status().isBadRequest())
@@ -1837,7 +1876,7 @@ class ApiIntegrationTest {
   /** 强认证:为未登记操作者设密 → 400(避免"成功但没改到")。 */
   @Test
   void setPassword_unknownOperator_returns400() throws Exception {
-    mvc.perform(post("/api/v1/operators/no-such-op/password").header("X-Operator", "alice")
+    mvc.perform(post("/api/v1/operators/no-such-op/password").cookie(session(ALICE_TOKEN))
             .contentType(MediaType.APPLICATION_JSON)
             .content("{\"password\":\"new-secret-1\"}"))
         .andExpect(status().isBadRequest());
@@ -1847,12 +1886,122 @@ class ApiIntegrationTest {
   @Test
   void accessDenied_isAudited() throws Exception {
     long id = postTask("deny-audit");
-    mvc.perform(delete("/api/v1/tasks/" + id).header("X-Operator", "bob"))
+    mvc.perform(delete("/api/v1/tasks/" + id).cookie(session(BOB_TOKEN)))
         .andExpect(status().isForbidden());
     var denied = jdbc.queryForList(
         "SELECT operator, action FROM app_audit WHERE action='access.denied'");
     assertFalse(denied.isEmpty(), "403 应落一条 access.denied 审计");
     assertEquals("bob", denied.get(0).get("operator"));
+  }
+
+  // ---- 强认证:登录 / me / 登出 / 轮换 / 写授权 ----
+
+  /** 正确口令登录 → 200 {operator, expiresAt} + Set-Cookie(session,HttpOnly) + 落一条 SHA-256(token) 会话行。 */
+  @Test
+  void login_success_setsSessionCookieAndDBSessionRow() throws Exception {
+    MvcResult r = mvc.perform(post("/api/v1/auth/login")
+            .contentType(MediaType.APPLICATION_JSON)
+            .content("{\"name\":\"alice\",\"password\":\"boot-pass\"}"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.operator.name").value("alice"))
+        .andExpect(jsonPath("$.operator.role").value("ADMIN"))
+        .andExpect(jsonPath("$.expiresAt").isNotEmpty())
+        .andReturn();
+    String setCookie = r.getResponse().getHeader("Set-Cookie");
+    assertTrue(setCookie != null && setCookie.startsWith("session=")
+            && setCookie.contains("HttpOnly") && setCookie.contains("SameSite=Strict"),
+        "登录应带回 HttpOnly 会话 Set-Cookie: " + setCookie);
+    String token = setCookie.substring("session=".length(), setCookie.indexOf(';')).trim();
+    assertEquals(64, token.length(), "会话令牌应为 64-char hex");
+    assertEquals(1L, jdbc.queryForObject(
+        "SELECT count(*) FROM app_auth_session WHERE token_hash=? AND revoked_at IS NULL",
+        Long.class, AuthHashing.sha256(token)));
+  }
+
+  /** 错误口令 → 401 且记一条 operator=提交名 的 access.denied。 */
+  @Test
+  void login_wrongPassword_401_auditsDenied() throws Exception {
+    mvc.perform(post("/api/v1/auth/login")
+            .contentType(MediaType.APPLICATION_JSON)
+            .content("{\"name\":\"alice\",\"password\":\"wrong-pass\"}"))
+        .andExpect(status().isUnauthorized());
+    assertEquals(1L, jdbc.queryForObject(
+        "SELECT count(*) FROM app_audit WHERE action='access.denied' AND operator='alice'",
+        Long.class));
+  }
+
+  /** 连续失败累计退避 → 锁定后正确口令也 401(locked 分支不验密直接拒)。 */
+  @Test
+  void login_repeatedFailures_backoffLocks() throws Exception {
+    for (int i = 0; i < 6; i++) {
+      mvc.perform(post("/api/v1/auth/login").contentType(MediaType.APPLICATION_JSON)
+              .content("{\"name\":\"alice\",\"password\":\"bad-" + i + "\"}"))
+          .andExpect(status().isUnauthorized());
+    }
+    // 退避 cap 30s(DB now() 起)→ 现仍锁定,即便密码正确也 401
+    mvc.perform(post("/api/v1/auth/login").contentType(MediaType.APPLICATION_JSON)
+            .content("{\"name\":\"alice\",\"password\":\"boot-pass\"}"))
+        .andExpect(status().isUnauthorized());
+  }
+
+  /** 带 alice cookie 写 → 200(拦截器按 cookie 解析出 alice·ADMIN)。 */
+  @Test
+  void write_withAliceCookie_authorized() throws Exception {
+    String body = "{\"name\":\"cookie-write\",\"kind\":\"cron\",\"handlerRef\":\"demo\","
+        + "\"cron\":\"" + CRON + "\",\"shardCount\":1}";
+    mvc.perform(post("/api/v1/tasks").cookie(session(ALICE_TOKEN))
+            .contentType(MediaType.APPLICATION_JSON).content(body))
+        .andExpect(status().isCreated());
+    assertEquals(1L, jdbc.queryForObject("SELECT count(*) FROM app_task WHERE name='cookie-write'", Long.class));
+  }
+
+  /** 轮换:把 alice 会话 expires_at 置 now()(剩余 TTL≈0<8h/2)→ 该请求即轮换:旧 cookie 失效 + 响应新 Set-Cookie + 新 token 可解析。 */
+  @Test
+  void sessionRotation_remainingBelowHalf_rotatesCookieAndRevokesOld() throws Exception {
+    jdbc.update("UPDATE app_auth_session SET expires_at = now() + interval '1 hour' WHERE token_hash=?",
+        AuthHashing.sha256(ALICE_TOKEN));
+    MvcResult r = mvc.perform(post("/api/v1/tasks").cookie(session(ALICE_TOKEN))
+            .contentType(MediaType.APPLICATION_JSON)
+            .content("{\"name\":\"rot-task\",\"kind\":\"cron\",\"handlerRef\":\"demo\","
+                + "\"cron\":\"" + CRON + "\",\"shardCount\":1}"))
+        .andExpect(status().isCreated())
+        .andReturn();
+    String setCookie = r.getResponse().getHeader("Set-Cookie");
+    assertTrue(setCookie != null && setCookie.startsWith("session="),
+        "轮换应回写新会话 Set-Cookie: " + setCookie);
+    String newToken = setCookie.substring("session=".length(), setCookie.indexOf(';')).trim();
+    assertEquals(64, newToken.length());
+    assertTrue(!newToken.equals(ALICE_TOKEN), "轮换令牌应不同于旧令牌");
+    // 旧 token 已轮换撤销 → 不可解析;新 token 可解析出 alice
+    assertNull(authService.resolve(ALICE_TOKEN), "旧 token 轮换后失效");
+    var nr = authService.resolve(newToken);
+    assertNotNull(nr, "新 token 应可解析");
+    assertEquals("alice", nr.operator(), "新 token 归属 alice");
+  }
+
+  /** GET /auth/me:无有效会话 → 401;alice cookie → 200 {operator:{name}}。 */
+  @Test
+  void authMe_noSession_401_withAlice_returnsOperator() throws Exception {
+    mvc.perform(get("/api/v1/auth/me").cookie(session(MALLORY_TOKEN)))
+        .andExpect(status().isUnauthorized());
+    mvc.perform(get("/api/v1/auth/me").cookie(session(ALICE_TOKEN)))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.operator.name").value("alice"))
+        .andExpect(jsonPath("$.operator.role").value("ADMIN"));
+  }
+
+  /** POST /auth/logout → 撤销该 cookie 会话 → 之后以同一 cookie 写 → 401。 */
+  @Test
+  void logout_revokesSession_subsequentWrite401() throws Exception {
+    mvc.perform(post("/api/v1/auth/logout").cookie(session(ALICE_TOKEN)))
+        .andExpect(status().isOk());
+    assertEquals(1L, jdbc.queryForObject(
+        "SELECT count(*) FROM app_auth_session WHERE token_hash=? AND revoked_at IS NOT NULL",
+        Long.class, AuthHashing.sha256(ALICE_TOKEN)));
+    String body = "{\"name\":\"post-logout\",\"kind\":\"cron\",\"handlerRef\":\"demo\",\"cron\":\"" + CRON + "\"}";
+    mvc.perform(post("/api/v1/tasks").cookie(session(ALICE_TOKEN))
+            .contentType(MediaType.APPLICATION_JSON).content(body))
+        .andExpect(status().isUnauthorized());
   }
 
   /** 可复写的皮时钟:instant 由测试控制,getZone 固定 UTC。 */

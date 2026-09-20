@@ -5,6 +5,7 @@ import dev.scheduler.core.TargetType;
 import dev.scheduler.core.Task;
 import dev.scheduler.persistence.ShardRepository;
 import dev.scheduler.persistence.TaskRepository;
+import dev.scheduler.server.security.CurrentOperator;
 import dev.scheduler.server.service.AuditRecorder;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -20,7 +21,6 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
-import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
@@ -36,13 +36,15 @@ public class TaskController {
   private final ShardRepository shards;
   private final AvailableHandlerRefs availableRefs;
   private final AuditRecorder auditor;
+  private final CurrentOperator current;
 
   public TaskController(TaskRepository tasks, ShardRepository shards, AvailableHandlerRefs availableRefs,
-                        AuditRecorder auditor) {
+                        AuditRecorder auditor, CurrentOperator current) {
     this.tasks = tasks;
     this.shards = shards;
     this.availableRefs = availableRefs;
     this.auditor = auditor;
+    this.current = current;
   }
 
   public record CreateTaskRequest(String name, String kind, String handlerRef, String cron,
@@ -57,7 +59,6 @@ public class TaskController {
 
   @PostMapping
   public ResponseEntity<Task> create(
-      @RequestHeader(value = "X-Operator", required = false) String operator,
       @RequestBody CreateTaskRequest req) {
     if (req == null || req.name() == null || req.name().isBlank()) {
       throw new IllegalArgumentException("name is required");
@@ -80,13 +81,12 @@ public class TaskController {
         req.backoffMs() == null ? 1000L : req.backoffMs(),
         req.retryableFailurePattern(), req.maxActiveConcurrent() == null ? 8 : req.maxActiveConcurrent(),
         true, false, req.retryMode(), req.retryCapMs(), req.retryBudgetMs()));
-    auditor.record(operator, "task.create", TargetType.TASK, created.id(), taskMeta(created));
+    auditor.record(current.get(), "task.create", TargetType.TASK, created.id(), taskMeta(created));
     return ResponseEntity.status(HttpStatus.CREATED).body(created);
   }
 
   @PutMapping("/{id}")
-  public Task update(@RequestHeader(value = "X-Operator", required = false) String operator,
-                     @PathVariable long id, @RequestBody UpdateTaskRequest req) {
+  public Task update(@PathVariable long id, @RequestBody UpdateTaskRequest req) {
     Task existing = requireTask(id);
     if (req == null || req.name() == null || req.name().isBlank()) {
       throw new IllegalArgumentException("name is required");
@@ -118,7 +118,7 @@ public class TaskController {
       throw notFound("task " + id);
     }
     Task saved = tasks.findById(id).orElseThrow(() -> notFound("task " + id));
-    auditor.record(operator, "task.update", TargetType.TASK, saved.id(), taskMeta(saved), taskDiff(existing, saved), taskBefore(existing));
+    auditor.record(current.get(), "task.update", TargetType.TASK, saved.id(), taskMeta(saved), taskDiff(existing, saved), taskBefore(existing));
     return saved;
   }
 
@@ -140,20 +140,18 @@ public class TaskController {
   }
 
   @PostMapping("/{id}/pause")
-  public Task pause(@RequestHeader(value = "X-Operator", required = false) String operator,
-                    @PathVariable long id) {
+  public Task pause(@PathVariable long id) {
     Task before = requireTask(id);
     tasks.setPaused(id, true);
-    auditor.record(operator, "task.pause", TargetType.TASK, id, Map.of(), null, taskBefore(before));
+    auditor.record(current.get(), "task.pause", TargetType.TASK, id, Map.of(), null, taskBefore(before));
     return tasks.findById(id).orElseThrow(() -> notFound("task " + id));
   }
 
   @PostMapping("/{id}/resume")
-  public Task resume(@RequestHeader(value = "X-Operator", required = false) String operator,
-                     @PathVariable long id) {
+  public Task resume(@PathVariable long id) {
     Task before = requireTask(id);
     tasks.setPaused(id, false);
-    auditor.record(operator, "task.resume", TargetType.TASK, id, Map.of(), null, taskBefore(before));
+    auditor.record(current.get(), "task.resume", TargetType.TASK, id, Map.of(), null, taskBefore(before));
     return tasks.findById(id).orElseThrow(() -> notFound("task " + id));
   }
 
@@ -162,8 +160,7 @@ public class TaskController {
    * 有子记录 → 409 并说明被什么阻塞;任务不存在 → 404;成功 → 204。
    */
   @DeleteMapping("/{id}")
-  public ResponseEntity<Void> delete(@RequestHeader(value = "X-Operator", required = false) String operator,
-                                     @PathVariable long id) {
+  public ResponseEntity<Void> delete(@PathVariable long id) {
     Task before = requireTask(id);
     List<String> blockers = new ArrayList<>();
     long ec = tasks.executionCount(id);
@@ -177,17 +174,16 @@ public class TaskController {
     if (!tasks.delete(id)) {
       throw notFound("task " + id); // 竞态兜底:计数后并发插入的子记录
     }
-    auditor.record(operator, "task.delete", TargetType.TASK, id, Map.of(), null, taskBefore(before));
+    auditor.record(current.get(), "task.delete", TargetType.TASK, id, Map.of(), null, taskBefore(before));
     return ResponseEntity.noContent().build();
   }
 
   @PostMapping("/{id}/trigger")
   public ResponseEntity<Execution> trigger(
-      @RequestHeader(value = "X-Operator", required = false) String operator,
       @PathVariable long id) {
     Task before = requireTask(id);
     Execution run = manualRun(id, UUID.randomUUID().toString());
-    auditor.record(operator, "task.trigger", TargetType.TASK, id, Map.of(), null, taskBefore(before));
+    auditor.record(current.get(), "task.trigger", TargetType.TASK, id, Map.of(), null, taskBefore(before));
     return ResponseEntity.status(HttpStatus.CREATED).body(run);
   }
 

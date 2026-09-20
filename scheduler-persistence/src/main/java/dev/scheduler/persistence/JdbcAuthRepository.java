@@ -17,6 +17,13 @@ public class JdbcAuthRepository implements AuthRepository {
   }
 
   @Override
+  public Instant now() {
+    // PGJDBC 42.6 的 getObject(col, Instant.class) 不支持(仅 Timestamp/LocalDateTime/OffsetDateTime)。
+    // 经 Timestamp.toInstant 收敛到 DB now()(与 JdbcAuthRepositoryTest 既有读法同源,保证语义一致)。
+    return jdbc.queryForObject("SELECT now()", Timestamp.class).toInstant();
+  }
+
+  @Override
   public Optional<Session> resolve(String rawToken) {
     String hash = AuthHashing.sha256(rawToken);
     List<Map<String, Object>> rows = jdbc.queryForList(

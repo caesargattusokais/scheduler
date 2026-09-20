@@ -7,6 +7,7 @@ import dev.scheduler.core.TargetType;
 import dev.scheduler.persistence.ExecutionRepository;
 import dev.scheduler.persistence.ShardRepository;
 import dev.scheduler.persistence.TaskRef;
+import dev.scheduler.server.security.CurrentOperator;
 import dev.scheduler.server.service.AuditRecorder;
 import dev.scheduler.server.service.DlqView;
 import dev.scheduler.server.service.ExecutionDetail;
@@ -24,7 +25,6 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
-import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
@@ -42,13 +42,15 @@ public class ExecutionController {
   private final ShardRepository shards;
   private final ExecutionQueryService queryService;
   private final AuditRecorder auditor;
+  private final CurrentOperator current;
 
   public ExecutionController(ExecutionRepository executions, ShardRepository shards,
-                             JdbcTemplate jdbc, AuditRecorder auditor) {
+                             JdbcTemplate jdbc, AuditRecorder auditor, CurrentOperator current) {
     this.executions = executions;
     this.shards = shards;
     this.queryService = new ExecutionQueryService(jdbc, executions, shards);
     this.auditor = auditor;
+    this.current = current;
   }
 
   @GetMapping
@@ -90,7 +92,6 @@ public class ExecutionController {
    */
   @PostMapping("/{id}/rerun")
   public ResponseEntity<Execution> rerun(
-      @RequestHeader(value = "X-Operator", required = false) String operator,
       @PathVariable long id) {
     Execution source = executions.findById(id).orElseThrow(() -> notFound("execution " + id));
     if (!RERUNNABLE.contains(source.status())) {
@@ -100,7 +101,7 @@ public class ExecutionController {
     String key = "rerun:" + source.id() + ":" + UUID.randomUUID();
     Execution created = shards.createParentWithShards(
         source.taskId(), key, source.shardCount(), source.args(), source.id());
-    auditor.record(operator, "execution.rerun", TargetType.EXECUTION, created.id(), Map.of(), null, executionBefore(source));
+    auditor.record(current.get(), "execution.rerun", TargetType.EXECUTION, created.id(), Map.of(), null, executionBefore(source));
     return ResponseEntity.status(HttpStatus.CREATED).body(created);
   }
 
@@ -134,7 +135,6 @@ public class ExecutionController {
    */
   @PostMapping("/shards/{shardId}/requeue")
   public ResponseEntity<Shard> requeue(
-      @RequestHeader(value = "X-Operator", required = false) String operator,
       @PathVariable long shardId) {
     Shard s = shards.findShard(shardId).orElseThrow(() -> notFound("shard " + shardId));
     if (s.status() != ExecutionStatus.FAILED) {
@@ -142,7 +142,7 @@ public class ExecutionController {
           "shard " + shardId + " is " + s.status() + " and cannot be requeued (only FAILED can)");
     }
     shards.requeueShard(shardId);
-    auditor.record(operator, "shard.requeue", TargetType.SHARD, shardId, Map.of(), null, shardBefore(s));
+    auditor.record(current.get(), "shard.requeue", TargetType.SHARD, shardId, Map.of(), null, shardBefore(s));
     return ResponseEntity.ok(
         shards.findShard(shardId).orElseThrow(() -> notFound("shard " + shardId)));
   }
@@ -160,7 +160,6 @@ public class ExecutionController {
    */
   @PostMapping("/{id}/cancel")
   public ResponseEntity<Execution> cancel(
-      @RequestHeader(value = "X-Operator", required = false) String operator,
       @PathVariable long id) {
     Execution e = executions.findById(id).orElseThrow(() -> notFound("execution " + id));
     if (e.status() == ExecutionStatus.CANCELED) {
@@ -172,11 +171,11 @@ public class ExecutionController {
     }
     if (shards.hasRunningShard(id)) {
       shards.requestCancelParent(id); // 有 RUNNING 片 → 协作取消
-      auditor.record(operator, "execution.cancel", TargetType.EXECUTION, id, Map.of(), null, executionBefore(e));
+      auditor.record(current.get(), "execution.cancel", TargetType.EXECUTION, id, Map.of(), null, executionBefore(e));
       return ResponseEntity.accepted().body(derived(id));
     }
     shards.cancelParentImmediate(id); // 无 RUNNING 片 → 直取消(父 → CANCELED)
-    auditor.record(operator, "execution.cancel", TargetType.EXECUTION, id, Map.of(), null, executionBefore(e));
+    auditor.record(current.get(), "execution.cancel", TargetType.EXECUTION, id, Map.of(), null, executionBefore(e));
     return ResponseEntity.ok(derived(id));
   }
 

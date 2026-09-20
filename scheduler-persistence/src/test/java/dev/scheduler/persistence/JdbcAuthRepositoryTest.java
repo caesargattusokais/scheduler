@@ -127,6 +127,15 @@ class JdbcAuthRepositoryTest extends AbstractPostgresTest {
   }
 
   @Test
+  void now_returnsDBCurrentTime() {
+    Instant a = auth.now();
+    Instant b = auth.now();
+    assertTrue(!b.isBefore(a), "DB now() 应单调不减");
+    Instant db = jdbc.queryForObject("SELECT now()", java.sql.Timestamp.class).toInstant();
+    assertTrue(Duration.between(db, a).abs().toSeconds() < 5, "auth.now() 应与裸 SELECT now() 同源(误差<5s)");
+  }
+
+  @Test
   void resetLockout_clears() {
     auth.recordFailure("alice", 30);
     assertTrue(auth.lockedUntil("alice").isPresent());

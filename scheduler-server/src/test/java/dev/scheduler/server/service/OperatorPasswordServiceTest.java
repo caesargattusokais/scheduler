@@ -48,6 +48,8 @@ class OperatorPasswordServiceTest {
   private static final class FakeAuth implements AuthRepository {
     final List<String> revokedAll = new ArrayList<>();
 
+    @Override public Instant now() { return Instant.now(); }
+
     @Override public Optional<Session> resolve(String rawToken) { return Optional.empty(); }
 
     @Override public void create(String rawToken, String operator, java.time.Duration ttl) { }

@@ -9,6 +9,9 @@ public interface AuthRepository {
   /** 会话解析结果:操作者 + 创建/过期时刻(均由 DB 时钟回填)。 */
   record Session(String operator, Instant created, Instant expires) {}
 
+  /** DB 时钟 now():会话 create/expire/resolve 与 AuthService 轮换判定同源,避免应用/DB 时区漂移。 */
+  Instant now();
+
   /** 令牌明文(64-char hex)→ 有效会话(未撤销、未过期、绝对寿命 < 5d);无效 → empty。 */
   Optional<Session> resolve(String rawToken);
 
