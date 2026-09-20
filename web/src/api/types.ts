@@ -146,6 +146,15 @@ export interface OperatorEntry {
   role: 'OPERATOR' | 'ADMIN';
   active: boolean;
 }
+/** POST /api/v1/auth/login 响应:当前登录操作者与会话失效时刻(ISO)。 */
+export interface LoginResponse {
+  operator: OperatorEntry;
+  expiresAt: string;
+}
+/** GET /api/v1/auth/me 响应:当前会话对应操作者。 */
+export interface MeResponse {
+  operator: OperatorEntry;
+}
 export interface UpsertOperatorRequest {
   name: string;
   role: 'OPERATOR' | 'ADMIN';

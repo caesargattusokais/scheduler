@@ -11,6 +11,8 @@ import type {
   DlqRow,
   Execution,
   ExecutionDetail,
+  LoginResponse,
+  MeResponse,
   OperatorEntry,
   Page,
   ParsedMetric,
@@ -21,19 +23,14 @@ import type {
   UpsertOperatorRequest,
 } from './types';
 
-/** 当前会话自报操作者:写端授权按 X-Operator 收口(未登记/欠角色 → 401/403)。defaultRequest 缺省 alice。 */
-let currentOperator = localStorage.getItem('scheduler.operator') || 'alice';
-export const getOperatorName = () => currentOperator;
-export const setOperator = (op: string) => {
-  currentOperator = op;
-  localStorage.setItem('scheduler.operator', op);
-};
+// 清理旧版自报身份的残留 key(原 localStorage 'scheduler.operator');会话身份现由 HttpOnly cookie 承载。
+localStorage.removeItem('scheduler.operator');
 
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, {
+    // 同源 fetch 自动携带 HttpOnly 会话 cookie(Path=/api),无需 credentials 标志。
     headers: {
       ...(init?.body ? { 'Content-Type': 'application/json' } : {}),
-      ...(currentOperator ? { 'X-Operator': currentOperator } : {}),
       ...(init?.headers as Record<string, string> | undefined),
     },
     ...init,
@@ -42,6 +39,28 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
   if (res.status === 204) return undefined as T; // 无响应体(如 DELETE)
   return res.json() as Promise<T>;
 }
+
+// ---- 认证(强认证:HttpOnly 会话 cookie,浏览器自动存储/携带) ----
+/** 登录:POST /auth/login。浏览器据 Set-Cookie 自动落 HttpOnly 会话 cookie(本函数不手动读 cookie)。失败抛错(含状态码与响应文本)。 */
+export const login = async (name: string, password: string): Promise<LoginResponse> => {
+  const res = await fetch('/api/v1/auth/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, password }),
+  });
+  if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+  return res.json() as Promise<LoginResponse>;
+};
+/** 当前会话身份:401 → 未认证(AuthGate 据此跳登录页)。 */
+export const me = (): Promise<MeResponse> => req<MeResponse>('/api/v1/auth/me');
+/** 登出:注销服务端会话并清除 cookie。 */
+export const logout = (): Promise<void> => req<void>('/api/v1/auth/logout', { method: 'POST' });
+/** 设密码(ADMIN 专属服务端收口):成功后该操作者的既有会话被撤销,需重新登录。 */
+export const setPassword = (name: string, password: string): Promise<void> =>
+  req<void>(`/api/v1/operators/${encodeURIComponent(name)}/password`, {
+    method: 'POST',
+    body: JSON.stringify({ password }),
+  });
 
 /** 把可选查询参数拼成查询串(空值/空串跳过)。 */
 function qstr(p: object): string {

@@ -1,6 +1,6 @@
 // web/src/pages/OperatorsPage.tsx
 import { useEffect, useState } from 'react';
-import { deactivateOperator, listOperators, upsertOperator } from '../api/client';
+import { deactivateOperator, listOperators, setPassword, upsertOperator } from '../api/client';
 import { OperatorEntry } from '../api/types';
 
 const ROLE_OPTS = ['OPERATOR', 'ADMIN'] as const;
@@ -8,6 +8,7 @@ const ROLE_OPTS = ['OPERATOR', 'ADMIN'] as const;
 export default function OperatorsPage() {
   const [rows, setRows] = useState<OperatorEntry[]>([]);
   const [err, setErr] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [name, setName] = useState('');
   const [role, setRole] = useState<'OPERATOR' | 'ADMIN'>('OPERATOR');
   const [active, setActive] = useState(true);
@@ -31,6 +32,16 @@ export default function OperatorsPage() {
     catch (e) { setErr(String(e)); }
   };
 
+  // 「设密码」:ADMIN 专属;成功后该操作者的既有会话被服务端撤销,需重新登录。
+  const setPwd = async (n: string) => {
+    const pwd = window.prompt(`为操作者「${n}」设置新密码(成功后其现有会话将被撤销):`);
+    if (pwd === null || pwd === '') return;
+    try {
+      await setPassword(n, pwd);
+      setNotice(`已为 ${n} 设置新密码,其会话被撤销,需重新登录`); setErr(null);
+    } catch (e) { setErr(String(e)); }
+  };
+
   const badge = (r: string) => r === 'ADMIN'
     ? 'rounded bg-indigo-100 px-1.5 py-0.5 text-xs font-medium text-indigo-700'
     : 'rounded bg-slate-100 px-1.5 py-0.5 text-xs font-medium text-slate-700';
@@ -44,6 +55,7 @@ export default function OperatorsPage() {
         </div>
       </div>
 
+      {notice && <div className="mb-4 rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-700">{notice}</div>}
       {err && <div className="mb-4 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{err}</div>}
 
       <div className="card mb-4 p-4">
@@ -87,6 +99,8 @@ export default function OperatorsPage() {
                     ? <span className="rounded bg-emerald-100 px-1.5 py-0.5 text-xs font-medium text-emerald-700">启用</span>
                     : <span className="rounded bg-slate-200 px-1.5 py-0.5 text-xs font-medium text-slate-600">已停用</span>}</td>
                   <td className="text-right">
+                    <button className="btn btn-secondary" title="设置该操作者的登录密码(ADMIN;成功后其会话被撤销,需重新登录)"
+                      onClick={() => setPwd(r.name)}>设密码</button>
                     {r.active && (
                       <button className="btn btn-secondary" title="停用后该操作者不再能执行写操作"
                         onClick={() => deactivate(r.name)}>停用</button>
