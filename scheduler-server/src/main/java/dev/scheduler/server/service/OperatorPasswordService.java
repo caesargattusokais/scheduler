@@ -25,7 +25,8 @@ public class OperatorPasswordService {
       throw new IllegalArgumentException("password must be at least " + MIN_PASSWORD + " chars");
   }
 
-  /** 该操作者是否已登记(不存在则 true,setPassword 对未知名静默 no-op,故先校验避免"成功但没改到")。 */
+  /** 校验操作者是否已登记;未登记则抛 IllegalArgumentException(setPassword 落库是对未知名行的静默 no-op,
+   *  故先校验,避免误把未知名当作"成功改密")。 */
   private void requireRegistered(String name) {
     if (operators.list().stream().noneMatch(e -> e.name().equals(name)))
       throw new IllegalArgumentException("unknown operator: " + name);

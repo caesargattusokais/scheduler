@@ -35,11 +35,12 @@ import java.time.Clock;
 import javax.sql.DataSource;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.boot.ApplicationArguments;
 import org.springframework.boot.ApplicationRunner;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
-import org.springframework.core.annotation.Order;
+import org.springframework.core.Ordered;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -83,12 +84,13 @@ public class Beans {
 
   /**
    * 操作者引导:启动时把 {@code scheduler.operators}(形如 {@code alice:ADMIN,bob:OPERATOR})幂等 upsert 进目录,
-   * 保证目录恒有可登记的 ADMIN(否则第一次部署建不出管家)。属性为空 → no-op(测试逐个播种)。 */
+   * 保证目录恒有可登记的 ADMIN(否则第一次部署建不出管家)。属性为空 → no-op(测试逐个播种)。
+   * 实现为 {@link Ordered}(order 1),确保先于 seedOperatorPasswords(order 2)执行:Spring 的
+   * ApplicationRunner 排序只读 bean 对象类上的摘要/Ordered,不读 @Bean 工厂方法上的 @Order。 */
   @Bean
-  @Order(1)
   ApplicationRunner seedOperators(OperatorRepository operators,
                                   @Value("${scheduler.operators:}") String spec) {
-    return args -> {
+    return new OrderedApplicationRunner(1, args -> {
       if (spec == null || spec.isBlank()) return;
       for (String pair : spec.split(",")) {
         String[] kv = pair.trim().split(":", 2);
@@ -105,21 +107,20 @@ public class Beans {
         }
         operators.upsert(kv[0].trim(), role, true);
       }
-    };
+    });
   }
 
   /**
    * 操作者默认口令引导:读取 {@code scheduler.operators.default-password},对当前无口令(password_hash IS NULL)
    * 的操作者经 OperatorPasswordService.bootstrap 应用 BCrypt 默认口令(不覆盖已设口令)。属性为空 → no-op。
-   */
+   * 实现为 {@link Ordered}(order 2),保证在 seedOperators(order 1)已 upsert 目录后才对无密者应用默认口令。 */
   @Bean
-  @Order(2)
   ApplicationRunner seedOperatorPasswords(OperatorRepository ops, OperatorPasswordService svc,
                                           @Value("${scheduler.operators.default-password:}") String defaultPwd) {
-    return args -> {
+    return new OrderedApplicationRunner(2, args -> {
       if (defaultPwd == null || defaultPwd.isBlank()) return;
       for (String n : ops.namesWithoutPassword()) svc.bootstrap(n, defaultPwd);
-    };
+    });
   }
 
   @Bean
@@ -293,6 +294,22 @@ public class Beans {
   AuditRetentionLoop auditRetentionLoop(AuditRetentionService retention, LeaderElection leader,
                                         @Value("${scheduler.audit.retention-days:0}") int retentionDays) {
     return new AuditRetentionLoop(retention, leader, retentionDays);
+  }
+
+  /** ApplicationRunner + Ordered:使启动引导按 order 升序确定性执行(Spring 的 runner 排序读对象类的
+   *  Ordered/@Order,不读 @Bean 工厂方法注解——lambda 无法承载得靠实体包装)。 */
+  private static final class OrderedApplicationRunner implements ApplicationRunner, Ordered {
+    private final int order;
+    private final ApplicationRunner delegate;
+
+    OrderedApplicationRunner(int order, ApplicationRunner delegate) {
+      this.order = order;
+      this.delegate = delegate;
+    }
+
+    @Override public int getOrder() { return order; }
+
+    @Override public void run(ApplicationArguments args) throws Exception { delegate.run(args); }
   }
 
   public static final class ScanLoop {
