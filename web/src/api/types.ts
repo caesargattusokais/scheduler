@@ -131,3 +131,11 @@ export interface AuditEntry {
   diff: string | null; // task.update 的 {field:[before,after]} JSON 文本;null = 未启用 diff 的动作
   before: string | null; // 操作前全量 Task 快照(task.* 动作);其余 null
 }
+
+/** /api/v1/audits/integrity — 审计取证链完整性(total 表全量,chained 已入链,firstTamperedId 首个被篡改行 id)。 */
+export interface AuditIntegrity {
+  totalRecords: number;
+  chainedRecords: number;
+  firstTamperedId: number | null;
+  verified: boolean;
+}

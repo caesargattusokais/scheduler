@@ -1,8 +1,8 @@
 // web/src/pages/AuditPage.tsx
 import { useCallback, useEffect, useState } from 'react';
-import { listAudits } from '../api/client';
+import { getAuditIntegrity, listAudits } from '../api/client';
 import { useInterval } from '../lib/useInterval';
-import { AuditEntry } from '../api/types';
+import { AuditEntry, AuditIntegrity } from '../api/types';
 import Pager from '../components/Pager';
 
 const PAGE_SIZE = 20;
@@ -56,6 +56,7 @@ export default function AuditPage() {
   const [metaField, setMetaField] = useState('');
   const [offset, setOffset] = useState(0);
   const [err, setErr] = useState<string | null>(null);
+  const [integrity, setIntegrity] = useState<AuditIntegrity | null>(null);
 
   /** 由当前过滤状态派生查询参数(不含分页,供列表与导出共用);字段过滤空置即剔除。 */
   const filters = useCallback(() => {
@@ -93,7 +94,12 @@ export default function AuditPage() {
     return `/api/v1/audits/export${s ? `?${s}` : ''}`;
   }, [filters]);
 
-  useEffect(() => { load(); }, [load]);
+  /** 校验取证链完整性(挂载时自动一次,可手动重查)。 */
+  const checkIntegrity = async () => {
+    try { setIntegrity(await getAuditIntegrity()); setErr(null); }
+    catch (e) { setErr(String(e)); }
+  };
+  useEffect(() => { load(); checkIntegrity(); }, [load]); // eslint-disable-line react-hooks/exhaustive-deps
   useInterval(load, 5000);
 
   return (
@@ -108,9 +114,17 @@ export default function AuditPage() {
 
       {err && <div className="mb-4 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{err}</div>}
 
-        <div className="mb-4 text-right">
-          <a className="btn btn-secondary" download="audits.csv"
-            href={exportHref()}>导出 CSV</a>
+        <div className="mb-4 flex items-center justify-end gap-3">
+          {integrity && (
+            integrity.verified
+              ? <span className="rounded bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-700"
+                  title={`${integrity.chainedRecords}/${integrity.totalRecords} 行已入链`}>取证链 ✓</span>
+              : <span className="rounded bg-red-100 px-2 py-0.5 text-xs font-medium text-red-700"
+                  title={`${integrity.chainedRecords}/${integrity.totalRecords} 行已入链`}>
+                  链路已篡改{integrity.firstTamperedId != null && ` · 首个异常行 ${integrity.firstTamperedId}`} ✗</span>
+          )}
+          <button className="btn btn-secondary" onClick={() => checkIntegrity()}>校验</button>
+          <a className="btn btn-secondary" download="audits.csv" href={exportHref()}>导出 CSV</a>
         </div>
 
       <div className="toolbar">

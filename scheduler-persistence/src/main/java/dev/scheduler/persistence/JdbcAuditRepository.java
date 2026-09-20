@@ -1,25 +1,65 @@
 package dev.scheduler.persistence;
 
 import dev.scheduler.core.AuditEntry;
+import dev.scheduler.core.AuditIntegrity;
 import dev.scheduler.core.TargetType;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 
 public class JdbcAuditRepository implements AuditRepository {
   private final JdbcTemplate jdbc;
-  public JdbcAuditRepository(JdbcTemplate jdbc) { this.jdbc = jdbc; }
+  private final TransactionTemplate tx;
+
+  public JdbcAuditRepository(JdbcTemplate jdbc) {
+    this.jdbc = jdbc;
+    this.tx = new TransactionTemplate(new DataSourceTransactionManager(jdbc.getDataSource()));
+  }
+
+  /** 审计链 append 的 DB 咨询锁键(固定常量):串行化"取前驱→插入",避免并发读到同一前驱产生 fork 导致假篡改告警。 */
+  private static final long CHAIN_LOCK = 0x4155444F_4E4C59L; // 'AUDONLY'
 
   @Override
   public void record(String operator, String action, TargetType targetType,
                      long targetId, String metaJson, String diffJson, String beforeJson, String source) {
-    // ?::json 把文本转 JSONB;metaJson/diffJson/beforeJson 为 null 时 NULL::json = NULL。
-    jdbc.update("""
-        INSERT INTO app_audit (operator, action, target_type, target_id, meta, diff, before_meta, source)
-        VALUES (?, ?, ?, ?, ?::json, ?::json, ?::json, ?)""",
-        operator, action, targetType.db(), targetId, metaJson, diffJson, beforeJson, source);
+    // ?::jsonb 把文本转 JSONB;metaJson/diffJson/beforeJson 为 null 时 NULL::jsonb = NULL。
+    // 取证链:同事务内先取咨询锁串行化,再读末行 chunk 作 prev,插入行并以 scheduler_audit_chunk() 计算自身 chunk
+    // (哈希函数与 V13 迁移/校验端同源,杜绝字节漂移)。occurred_at 由 now() 生成(chunk 内用同一 now())。
+    tx.executeWithoutResult(status -> {
+      jdbc.queryForObject("SELECT pg_advisory_xact_lock(?)", Object.class, CHAIN_LOCK);
+      String prev = jdbc.query("SELECT chunk_hash FROM app_audit ORDER BY id DESC LIMIT 1",
+          rs -> rs.next() ? rs.getString(1) : null);
+      jdbc.update("""
+          INSERT INTO app_audit (operator, action, target_type, target_id, meta, diff, before_meta, source, occurred_at, prev_hash, chunk_hash)
+          VALUES (?, ?, ?, ?, ?::jsonb, ?::jsonb, ?::jsonb, ?, now(), ?,
+                  scheduler_audit_chunk(?::text, ?, ?, ?, ?, now(), ?::jsonb, ?, ?::jsonb, ?::jsonb))""",
+          operator, action, targetType.db(), targetId, metaJson, diffJson, beforeJson, source, prev,
+          prev, operator, action, targetType.db(), targetId, metaJson, source, diffJson, beforeJson);
+    });
+  }
+
+  @Override
+  public AuditIntegrity integrity() {
+    // total = 表全量;chained = 已入链行数;firstTamperedId = 自哈希异常 UNION 链衔接异常 的最靠前行 id。
+    Long total = jdbc.queryForObject("SELECT count(*) FROM app_audit", Long.class);
+    Long chained = jdbc.queryForObject(
+        "SELECT count(*) FROM app_audit WHERE chunk_hash IS NOT NULL", Long.class);
+    Long tampered = jdbc.query(
+        """
+        SELECT MIN(x.id) FROM (
+          SELECT id FROM app_audit WHERE chunk_hash IS NOT NULL
+            AND chunk_hash <> scheduler_audit_chunk(prev_hash, operator, action, target_type, target_id,
+                                                    occurred_at, meta, source, diff, before_meta)
+          UNION ALL
+          SELECT cur.id FROM app_audit cur JOIN app_audit prev ON prev.id = cur.id - 1
+            WHERE cur.prev_hash IS DISTINCT FROM prev.chunk_hash
+        ) x""",
+        rs -> rs.next() ? (rs.getObject(1) == null ? null : rs.getLong(1)) : null);
+    return new AuditIntegrity(total == null ? 0 : total, chained == null ? 0 : chained, tampered);
   }
 
   /** WHERE 片段(与 JdbcTaskRepository)配套 {@link #filterArgs}。operator 子串 ILIKE,其余等值。

@@ -647,6 +647,33 @@ class ApiIntegrationTest {
     assertTrue(!body.contains("opX"), "过滤排除行(不带 shardCount)不应出现在导出行");
   }
 
+  /** 审计取证链完整性:GET /api/v1/audits/integrity。写端产生真实链 → verified;篡改审计行 meta → 定位该行。 */
+  @Test
+  void auditIntegrity_api_cleanThenFlagsTamper() throws Exception {
+    // 经写端创建任务 → AuditRecorder 落一条带链哈希的 task.create。
+    objectMapper.readTree(mvc.perform(post("/api/v1/tasks").header("X-Operator", "alice")
+            .contentType(MediaType.APPLICATION_JSON)
+            .content("{\"name\":\"chain-task\",\"kind\":\"cron\",\"handlerRef\":\"demo\","
+                + "\"cron\":\"" + CRON + "\",\"shardCount\":1}"))
+        .andExpect(status().isCreated()).andReturn().getResponse().getContentAsString());
+
+    mvc.perform(get("/api/v1/audits/integrity"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.verified").value(true))
+        .andExpect(jsonPath("$.totalRecords").value(1))
+        .andExpect(jsonPath("$.chainedRecords").value(1))
+        .andExpect(jsonPath("$.firstTamperedId").value(org.hamcrest.Matchers.nullValue()));
+
+    // 篡改该审计行 meta → 自哈希不再匹配 → verified=false,firstTamperedId 指向它。
+    long auditId = jdbc.queryForObject("SELECT id FROM app_audit WHERE action='task.create'", Long.class);
+    jdbc.update("UPDATE app_audit SET meta='{\"name\":\"evil\"}'::jsonb WHERE id=?", auditId);
+    mvc.perform(get("/api/v1/audits/integrity"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.verified").value(false))
+        .andExpect(jsonPath("$.chainedRecords").value(1))
+        .andExpect(jsonPath("$.firstTamperedId").value(auditId));
+  }
+
   // ---------- 审计写端:三控制器 15 个写端点接 X-Operator + AuditRecorder ----------
 
   /** 审计写端:TaskController create/update/pause/resume/trigger/delete;X-Operator 缺省记 anonymous;meta 为后态。 */

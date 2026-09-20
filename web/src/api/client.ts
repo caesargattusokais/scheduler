@@ -1,5 +1,6 @@
 import type {
   AuditEntry,
+  AuditIntegrity,
   CreateTaskRequest,
   CreateDagRequest,
   Dag,
@@ -166,3 +167,5 @@ export interface ListAuditsParams {
 }
 export const listAudits = (p: ListAuditsParams = {}): Promise<Page<AuditEntry>> =>
   req<Page<AuditEntry>>(`/api/v1/audits${qstr(p)}`);
+/** 审计取证链完整性:全量入链且无篡改 → verified。 */
+export const getAuditIntegrity = () => req<AuditIntegrity>('/api/v1/audits/integrity');

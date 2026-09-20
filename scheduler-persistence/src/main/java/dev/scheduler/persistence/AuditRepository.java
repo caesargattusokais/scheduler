@@ -1,6 +1,7 @@
 package dev.scheduler.persistence;
 
 import dev.scheduler.core.AuditEntry;
+import dev.scheduler.core.AuditIntegrity;
 import dev.scheduler.core.TargetType;
 import java.time.Instant;
 import java.util.List;
@@ -44,4 +45,8 @@ public interface AuditRepository {
                      Long targetId, Instant from, Instant to, Boolean hasDiff, String diffField) {
     return count(operator, action, targetType, targetId, from, to, hasDiff, diffField, null, null);
   }
+
+  /** 取证链完整性:自哈希 + 链衔接双重校验。totalRecords 为表全量,chainedRecords 为已入链行数,
+   *  firstTamperedId 为最靠前的异常行 id(数据被改或哈希被改,无则 null);verified 仅全部行入链且无篡改时成立。 */
+  AuditIntegrity integrity();
 }

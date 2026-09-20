@@ -1,9 +1,11 @@
 package dev.scheduler.persistence;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import dev.scheduler.core.AuditEntry;
+import dev.scheduler.core.AuditIntegrity;
 import dev.scheduler.core.TargetType;
 import java.sql.Timestamp;
 import java.time.Instant;
@@ -190,5 +192,60 @@ class JdbcAuditRepositoryTest extends AbstractPostgresTest {
     assertTrue(b.contains("\"name\":\"before\"") && b.contains("\"shardCount\":2") && b.contains("\"paused\":false"));
     assertEquals("alice", hit.operator());
     assertEquals(1L, hit.targetId());
+  }
+
+  @Test
+  void record_buildsTamperEvidenceChain_firstRowPrevNull() {
+    // 三条写入(第2条带 diff/before,覆盖全列哈希)。
+    audits.record("alice", "task.create", TargetType.TASK, 1L, "{\"name\":\"a\"}", "cli");
+    audits.record("bob", "task.update", TargetType.TASK, 2L,
+        "{\"name\":\"b\",\"shardCount\":1}", "{\"cron\":[\"x\",\"y\"]}",
+        "{\"name\":\"beforeB\",\"paused\":true}", "cli");
+    audits.record("carol", "dag.pause", TargetType.DAG, 9L, "{\"name\":\"c\"}", "scheduler");
+
+    AuditIntegrity ok = audits.integrity();
+    assertEquals(3, ok.totalRecords());
+    assertEquals(3, ok.chainedRecords());
+    assertEquals(null, ok.firstTamperedId());
+    assertTrue(ok.isVerified(), "全量入链且无篡改 → verified");
+
+    // 链衔接:id 升序下,行n+1.prev_hash == 行n.chunk_hash(首行 prev NULL)。
+    List<Map<String, Object>> rows = jdbc.queryForList(
+        "SELECT id, prev_hash, chunk_hash FROM app_audit ORDER BY id");
+    assertEquals(3, rows.size());
+    assertEquals(null, rows.get(0).get("prev_hash"), "首行链头 prev_hash 应为 NULL");
+    assertEquals(rows.get(0).get("chunk_hash"), rows.get(1).get("prev_hash"));
+    assertEquals(rows.get(1).get("chunk_hash"), rows.get(2).get("prev_hash"));
+    // 自身哈希与 DB 同源函数重算一致(SQL helper 是写入/校验的单一实现源)。
+    assertEquals(rows.get(1).get("chunk_hash"), jdbc.queryForObject(
+        "SELECT scheduler_audit_chunk(prev_hash, operator, action, target_type, target_id,"
+            + " occurred_at, meta, source, diff, before_meta) FROM app_audit WHERE id=?",
+        String.class, rows.get(1).get("id")));
+  }
+
+  @Test
+  void integrity_tamperingAMiddleRow_flagsItsId() {
+    audits.record("alice", "task.create", TargetType.TASK, 1L, "{\"name\":\"a\"}", "cli");
+    audits.record("bob", "task.update", TargetType.TASK, 2L, "{\"name\":\"b\"}", "cli");
+    audits.record("carol", "dag.pause", TargetType.DAG, 9L, "{\"name\":\"c\"}", "cli");
+    long midId = jdbc.queryForObject("SELECT id FROM app_audit WHERE action='task.update'", Long.class);
+
+    jdbc.update("UPDATE app_audit SET meta='{\"name\":\"evil\"}'::jsonb WHERE id=?", midId);
+
+    AuditIntegrity bad = audits.integrity();
+    assertTrue(bad.totalRecords() == 3 && bad.chainedRecords() == 3);
+    assertFalse(bad.isVerified(), "改过数据行 → 不通过");
+    assertEquals(midId, bad.firstTamperedId().longValue(), "首个被篡改行应指向改动的 id");
+  }
+
+  @Test
+  void integrity_untamperedRow_recomputeMatchesAfterIdempotentReinsert() {
+    // 冒烟:改后把 meta 改回原值,self-hash 重新一致 → verified 恢复(篡改检测为"内容与哈希不符")。
+    audits.record("alice", "task.create", TargetType.TASK, 1L, "{\"name\":\"a\"}", "cli");
+    long id = jdbc.queryForObject("SELECT id FROM app_audit", Long.class);
+    jdbc.update("UPDATE app_audit SET meta='{\"name\":\"evil\"}'::jsonb WHERE id=?", id);
+    assertFalse(audits.integrity().isVerified());
+    jdbc.update("UPDATE app_audit SET meta='{\"name\":\"a\"}'::jsonb WHERE id=?", id);
+    assertTrue(audits.integrity().isVerified(), "改回原值后内容与哈希恢复一致");
   }
 }

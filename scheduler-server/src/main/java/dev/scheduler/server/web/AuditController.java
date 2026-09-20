@@ -1,8 +1,7 @@
 package dev.scheduler.server.web;
 
 import dev.scheduler.core.AuditEntry;
-import dev.scheduler.persistence.AuditRepository;
-import dev.scheduler.core.AuditEntry;
+import dev.scheduler.core.AuditIntegrity;
 import dev.scheduler.persistence.AuditRepository;
 import java.time.Instant;
 import java.time.format.DateTimeParseException;
@@ -106,6 +105,10 @@ public class AuditController {
         .contentType(MediaType.parseMediaType("text/csv; charset=utf-8"))
         .body(out);
   }
+
+  /** 取证链完整性:全量入链 + 无篡改 → verified(true);异常 → 给出最靠前的被篡改行 id。 */
+  @GetMapping("/integrity")
+  public AuditIntegrity integrity() { return audits.integrity(); }
 
   /** CSV 单元格:null → 空;含逗号/引号/换行 → 双引号包裹并把内部双引号翻倍;
    *  以 = + - @ 开头(Excel 公式注入向量)前置单引号。 */
