@@ -38,4 +38,17 @@ public class JdbcOperatorRepository implements OperatorRepository {
   public void deactivate(String name) {
     jdbc.update("UPDATE app_operator SET active = false WHERE name = ?", name);
   }
+
+  @Override
+  public Optional<String> activePasswordHash(String name) {
+    List<String> hashes = jdbc.query(
+        "SELECT password_hash FROM app_operator WHERE name = ? AND active AND password_hash IS NOT NULL",
+        (rs, i) -> rs.getString(1), name);
+    return hashes.isEmpty() ? Optional.empty() : Optional.of(hashes.get(0));
+  }
+
+  @Override
+  public void setPassword(String name, String bcryptHash) {
+    jdbc.update("UPDATE app_operator SET password_hash = ? WHERE name = ?", bcryptHash, name);
+  }
 }

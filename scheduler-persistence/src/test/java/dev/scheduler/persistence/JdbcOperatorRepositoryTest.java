@@ -60,4 +60,17 @@ class JdbcOperatorRepositoryTest extends AbstractPostgresTest {
     assertEquals(OperatorRole.ADMIN, all.get(0).role());
     assertFalse(all.get(1).active(), "停用的 bob 在目录中仍出现但 active=false");
   }
+
+  @Test
+  void passwordHash_setThenGet_activeRequired() {
+    assertTrue(operators.activePasswordHash("alice").isEmpty(), "未登记 → empty");
+    operators.upsert("alice", OperatorRole.ADMIN, true);
+    assertTrue(operators.activePasswordHash("alice").isEmpty(), "无密 → empty");
+
+    operators.setPassword("alice", "bcrypt-hash");
+    assertEquals("bcrypt-hash", operators.activePasswordHash("alice").orElseThrow());
+
+    operators.deactivate("alice");
+    assertTrue(operators.activePasswordHash("alice").isEmpty(), "停用 → 即使有哈希也不返回");
+  }
 }

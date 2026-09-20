@@ -18,4 +18,10 @@ public interface OperatorRepository {
 
   /** 停用(active=false)并保留行,维系已写审计的可读性;name 不存在则为 no-op。 */
   void deactivate(String name);
+
+  /** 取 name 对应活跃操作者的口令哈希(未登记/停用/无密 → empty)。 */
+  Optional<String> activePasswordHash(String name);
+
+  /** 设置/重置口令哈希(bcrypt 文本;name 须已登记,upsert 语义)。 */
+  void setPassword(String name, String bcryptHash);
 }
