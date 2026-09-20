@@ -135,7 +135,9 @@ public class OperatorInterceptor implements HandlerInterceptor {
     return null;
   }
 
-  /** 写 401/403 JSON 并记 access.denied 审计;返回 false 终止继续处理。 */
+  /** 写 401/403 JSON 并记 access.denied 审计;返回 false 终止继续处理。
+   *  preHandle 返回 false 时 Spring 不会回调 afterCompletion,故此处必须先清 CurrentOperator,
+   *  否则放池线程上残留的旧身份会污染下一请求的 /me 与 deny 归属(线程复用泄漏)。 */
   private boolean deny(HttpServletRequest req, HttpServletResponse res, int status, OperatorRole required,
                        String reason) throws IOException {
     String who = current.get();
@@ -143,6 +145,7 @@ public class OperatorInterceptor implements HandlerInterceptor {
         "access.denied", targetFrom(req.getRequestURI()), 0L,
         Map.of("path", req.getRequestURI(), "method", req.getMethod(),
             "reason", reason, "required", required.name()));
+    current.clear(); // 所有终止路径必清(deny 早退 + 正常 afterCompletion 双保险)
     res.setStatus(status);
     res.setContentType("application/json");
     res.getWriter().write(json.writeValueAsString(new ApiError(reason)));

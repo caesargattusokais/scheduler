@@ -77,7 +77,9 @@ public class AuthController {
       return ResponseEntity.ok(Map.of());
     }
     auth.logout(c.getValue());
-    res.addHeader("Set-Cookie", "session=; Path=/api; Max-Age=0; HttpOnly; SameSite=Strict");
+    // 清除 cookie 须按 secure 分支对齐登录 cookie:Secure 属性开启时浏览器要求删除 cookie 也为 Secure 才覆盖。
+    res.addHeader("Set-Cookie", "session=; Path=/api; Max-Age=0; HttpOnly; SameSite=Strict"
+        + (secureCookies ? "; Secure" : ""));
     return ResponseEntity.ok(Map.of());
   }
 

@@ -1990,6 +1990,18 @@ class ApiIntegrationTest {
         .andExpect(jsonPath("$.operator.role").value("ADMIN"));
   }
 
+  /** deny 早退前必须清 CurrentOperator(preHandle 返回 false 时 Spring 不回调 afterCompletion):先触发 403(OPERATOR
+   *  bob 写 ADMIN 门禁端点,resolve 已 set bob),再以无 cookie 请求 /me → 必须 401(不得因线程池残留而误报 bob)。 */
+  @Test
+  void deny_clearsCurrentOperator_soNextMeWithoutCookieIs401() throws Exception {
+    mvc.perform(delete("/api/v1/tasks/1").cookie(session(BOB_TOKEN)))
+        .andExpect(status().isForbidden()); // bob·OPERATOR 写 DELETE task(ADMIN 门禁)→ 403
+    // defaultRequest 恒注入 alice cookie,故以无会话的 mallory cookie 模拟"无有效身份":
+    // 若 deny 早退未清 ThreadLocal,此处会复用上一拒绝请求残留的 bob → 200;修正后 → 401。
+    mvc.perform(get("/api/v1/auth/me").cookie(session(MALLORY_TOKEN)))
+        .andExpect(status().isUnauthorized());
+  }
+
   /** POST /auth/logout → 撤销该 cookie 会话 → 之后以同一 cookie 写 → 401。 */
   @Test
   void logout_revokesSession_subsequentWrite401() throws Exception {

@@ -11,7 +11,7 @@ import org.slf4j.LoggerFactory;
 /**
  * 操作审计记录器:控制器写 handler 在操作成功落库后调用,追加一条审计。
  * <ul>
- *   <li>operator 缺省/空 → 'anonymous'(服务端无认证,语义在 X-Operator 头)。</li>
+ *   <li>operator 缺省/空 → 'anonymous'(由会话 principal/{@code CurrentOperator} 解析,不再自报 X-Operator 头)。</li>
  *   <li>meta 为 Map,经 ObjectMapper 序列化为 JSON 文本后交由持久层落 JSONB(persistence 无 Jackson);before 为操作前全量快照。</li>
  *   <li>审计非阻断:序列化或 insert 失败只 log.warn,不抛、不改变用户操作结果(操作已先提交)。</li>
  * </ul>
