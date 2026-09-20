@@ -167,7 +167,7 @@ class ApiIntegrationTest {
   @BeforeEach
   void resetDb() {
     jdbc.execute("TRUNCATE app_dag CASCADE; TRUNCATE execution, execution_outcome, execution_shard,"
-        + " execution_shard_outcome, app_task, app_audit, worker RESTART IDENTITY CASCADE");
+        + " execution_shard_outcome, app_task, app_audit, app_audit_archive, worker RESTART IDENTITY CASCADE");
     // app_operator 不在 TRUNCATE 之列(写端授权依赖其在引导/测试期间恒在):幂等确保 alice/bob 每用例都在,
     //  即便某用例 deactivate 过也不会让后续用例缺人。
     jdbc.update("INSERT INTO app_operator(name, role, active) VALUES "
@@ -693,6 +693,48 @@ class ApiIntegrationTest {
         .andExpect(jsonPath("$.verified").value(false))
         .andExpect(jsonPath("$.chainedRecords").value(1))
         .andExpect(jsonPath("$.firstTamperedId").value(auditId));
+  }
+
+  /** 审计归档端点:POST /api/v1/audits/archive(ADMIN)。归档旧行即删即重链 → integrity 仍 verified;
+   *  OPERATOR 调用 → 403 且落 access.denied。 */
+  @Test
+  void auditArchive_api_adminArchivesOldRows_thenIntegrityStillVerified() throws Exception {
+    // 写端产生一条真实审计链行,再把其 occurred_at 回拨到过去 → eligible for archive。
+    objectMapper.readTree(mvc.perform(post("/api/v1/tasks").header("X-Operator", "alice")
+            .contentType(MediaType.APPLICATION_JSON)
+            .content("{\"name\":\"archive-task\",\"kind\":\"cron\",\"handlerRef\":\"demo\","
+                + "\"cron\":\"" + CRON + "\",\"shardCount\":1}"))
+        .andExpect(status().isCreated()).andReturn().getResponse().getContentAsString());
+    long auditId = jdbc.queryForObject("SELECT id FROM app_audit WHERE action='task.create'", Long.class);
+    jdbc.update("UPDATE app_audit SET occurred_at=? WHERE id=?",
+        new java.sql.Timestamp(Instant.parse("2020-01-01T00:00:00Z").toEpochMilli()), auditId);
+
+    // ADMIN(alice)归档 → 返回 archived=1;归档删除不透支取证链。
+    mvc.perform(post("/api/v1/audits/archive")
+            .header("X-Operator", "alice")
+            .param("olderThan", "2021-01-01T00:00:00Z"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.archived").value(1))
+        .andExpect(jsonPath("$.olderThan").isNotEmpty());
+    // 归档动作本身又追记一条 target=none 的 audit.archive(新行 occurred_at=now,不再 eligible)。
+    assertEquals(1L, jdbc.queryForObject("SELECT count(*) FROM app_audit", Long.class));
+    assertEquals(1L, jdbc.queryForObject(
+        "SELECT count(*) FROM app_audit WHERE action='audit.archive' AND target_type='none'", Long.class));
+    assertEquals(1L, jdbc.queryForObject("SELECT count(*) FROM app_audit_archive", Long.class));
+    // 归档删除 + 重链后,剩余 audit.archive 单行自成链头,integrity 仍 verified。
+    mvc.perform(get("/api/v1/audits/integrity"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.verified").value(true))
+        .andExpect(jsonPath("$.totalRecords").value(1))
+        .andExpect(jsonPath("$.chainedRecords").value(1));
+
+    // OPERATOR(bob)无权归档 → 403 + access.denied 审计。
+    mvc.perform(post("/api/v1/audits/archive")
+            .header("X-Operator", "bob")
+            .param("olderThan", "2021-01-01T00:00:00Z"))
+        .andExpect(status().isForbidden());
+    assertEquals(1L, jdbc.queryForObject(
+        "SELECT count(*) FROM app_audit WHERE action='access.denied' AND operator='bob'", Long.class));
   }
 
   // ---------- 审计写端:三控制器 15 个写端点接 X-Operator + AuditRecorder ----------

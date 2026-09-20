@@ -6,6 +6,7 @@ import DlqPage from './pages/DlqPage';
 import DagsPage from './pages/DagsPage';
 import MetricsPage from './pages/MetricsPage';
 import AuditPage from './pages/AuditPage';
+import OperatorsPage from './pages/OperatorsPage';
 
 const NAV = [
   { to: '/tasks', label: '任务', icon: '▤' },
@@ -14,6 +15,7 @@ const NAV = [
   { to: '/dags', label: '工作流', icon: '⌗' },
   { to: '/metrics', label: '指标', icon: '▦' },
   { to: '/audits', label: '审计', icon: '≡' }, // 第 6 入口
+  { to: '/operators', label: '操作者', icon: '☺' }, // 第 7 入口(操作者目录,仅 ADMIN 可管理)
 ];
 
 export default function App() {
@@ -48,6 +50,7 @@ export default function App() {
             <Route path="/dags" element={<DagsPage />} />
             <Route path="/metrics" element={<MetricsPage />} />
             <Route path="/audits" element={<AuditPage />} />
+            <Route path="/operators" element={<OperatorsPage />} />
           </Routes>
         </main>
       </div>

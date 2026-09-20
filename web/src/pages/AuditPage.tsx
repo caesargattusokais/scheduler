@@ -1,6 +1,6 @@
 // web/src/pages/AuditPage.tsx
 import { useCallback, useEffect, useState } from 'react';
-import { getAuditIntegrity, listAudits } from '../api/client';
+import { archiveAudits, getAuditIntegrity, listAudits } from '../api/client';
 import { useInterval } from '../lib/useInterval';
 import { AuditEntry, AuditIntegrity } from '../api/types';
 import Pager from '../components/Pager';
@@ -57,6 +57,20 @@ export default function AuditPage() {
   const [offset, setOffset] = useState(0);
   const [err, setErr] = useState<string | null>(null);
   const [integrity, setIntegrity] = useState<AuditIntegrity | null>(null);
+  const [archiveOlderThan, setArchiveOlderThan] = useState('');
+  const [archiveMsg, setArchiveMsg] = useState<string | null>(null);
+
+  /** 归档保留:把早于选定时点的审计行即删即重链(ADMIN 专属;后端权限收口)。归档后刷新列表 + 重查完整性。 */
+  const doArchive = async () => {
+    try {
+      const r = await archiveAudits(new Date(archiveOlderThan).toISOString(), 1000);
+      setArchiveMsg(`已归档 ${r.archived} 条(< ${r.olderThan})`);
+      setErr(null);
+      setOffset(0);
+      await load();
+      await checkIntegrity();
+    } catch (e) { setErr(String(e)); }
+  };
 
   /** 由当前过滤状态派生查询参数(不含分页,供列表与导出共用);字段过滤空置即剔除。 */
   const filters = useCallback(() => {
@@ -125,6 +139,14 @@ export default function AuditPage() {
           )}
           <button className="btn btn-secondary" onClick={() => checkIntegrity()}>校验</button>
           <a className="btn btn-secondary" download="audits.csv" href={exportHref()}>导出 CSV</a>
+          <div className="flex items-center gap-2">
+            <input className="input" type="datetime-local" title="归档早于该时点的审计行(ADMIN)"
+              value={archiveOlderThan}
+              onChange={(e) => setArchiveOlderThan(e.target.value)} />
+            <button className="btn btn-secondary" onClick={doArchive} disabled={!archiveOlderThan}
+              title="归档并删除早于该时点的审计行(ADMIN,即删即重链)">归档</button>
+          </div>
+          {archiveMsg && <span className="text-xs text-emerald-600">{archiveMsg}</span>}
         </div>
 
       <div className="toolbar">

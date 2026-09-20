@@ -33,11 +33,12 @@ public class OperatorInterceptor implements HandlerInterceptor {
   private static final String PREFIX = "/api/v1";
   private static final String OPERATORS = "/api/v1/operators/**";
 
-  /** 提权到 ADMIN 的敏感写端点:删除 / 取消 / 触发 DAG。其余写端点 OPERATOR 即可。 */
+  /** 提权到 ADMIN 的敏感写端点:删除 / 取消 / 触发 DAG / 归档审计。其余写端点 OPERATOR 即可。 */
   private static final List<String[]> ADMIN_WRITES = List.of(
       new String[]{"DELETE", "/api/v1/tasks/{id}"},
       new String[]{"POST", "/api/v1/executions/{id}/cancel"},
-      new String[]{"POST", "/api/v1/dags/{id}/trigger"});
+      new String[]{"POST", "/api/v1/dags/{id}/trigger"},
+      new String[]{"POST", "/api/v1/audits/archive"});
 
   private final OperatorRepository operators;
   private final AuditRecorder auditor;

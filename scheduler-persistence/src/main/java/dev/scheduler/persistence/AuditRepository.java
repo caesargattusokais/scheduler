@@ -49,4 +49,8 @@ public interface AuditRepository {
   /** 取证链完整性:自哈希 + 链衔接双重校验。totalRecords 为表全量,chainedRecords 为已入链行数,
    *  firstTamperedId 为最靠前的异常行 id(数据被改或哈希被改,无则 null);verified 仅全部行入链且无篡改时成立。 */
   AuditIntegrity integrity();
+
+  /** 把 occurred_at < cutoff 的旧行(按 id 升序,单次至多 limit 条)复制到 app_audit_archive 并从 app_audit 删除,
+   *  随后重链剩余行——删除不破坏取证链(integrity() 仍 verified)。同事务原子;返回本次归档行数。 */
+  long archiveOlderThan(Instant cutoff, int limit);
 }

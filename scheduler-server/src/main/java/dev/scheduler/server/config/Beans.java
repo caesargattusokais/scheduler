@@ -21,6 +21,7 @@ import dev.scheduler.server.leader.AdvisoryLockLeaderElection;
 import dev.scheduler.server.leader.LeaderElection;
 import dev.scheduler.server.reconcile.Reconciler;
 import dev.scheduler.server.service.AuditRecorder;
+import dev.scheduler.server.service.AuditRetentionService;
 import dev.scheduler.server.web.AvailableHandlerRefs;
 import dev.scheduler.persistence.retry.FailureResolver;
 import dev.scheduler.persistence.retry.RetryPolicy;
@@ -260,6 +261,15 @@ public class Beans {
     return new DagLoop(engine);
   }
 
+  /** 审计保留循环:leader 门控,按 {@code scheduler.audit.retention-days} 定期归档过期审计行。
+   *  retention-days<=0 → 不归档(不开策略)。operator 以 'retention' 占位,追记一条 audit.archive。 */
+  @Bean
+  @ConditionalOnProperty(name = "scheduler.audit.retention.enabled", havingValue = "true", matchIfMissing = true)
+  AuditRetentionLoop auditRetentionLoop(AuditRetentionService retention, LeaderElection leader,
+                                        @Value("${scheduler.audit.retention-days:0}") int retentionDays) {
+    return new AuditRetentionLoop(retention, leader, retentionDays);
+  }
+
   public static final class ScanLoop {
     private static final Logger log = LoggerFactory.getLogger(ScanLoop.class);
     private final TriggerEngine engine;
@@ -296,6 +306,32 @@ public class Beans {
         reconciler.scanOnce();
       } catch (Throwable t) {
         log.warn("reconcile loop tick failed; continuing next tick", t);
+      }
+    }
+  }
+
+  /** 审计保留循环:按 retention-days 归档 occurred_at 早于 now-days 的行,单次 1000 条。leader 门控 + 失败兜底。 */
+  public static final class AuditRetentionLoop {
+    private static final Logger log = LoggerFactory.getLogger(AuditRetentionLoop.class);
+    private final AuditRetentionService retention;
+    private final LeaderElection leader;
+    private final int retentionDays;
+
+    AuditRetentionLoop(AuditRetentionService retention, LeaderElection leader, int retentionDays) {
+      this.retention = retention;
+      this.leader = leader;
+      this.retentionDays = retentionDays;
+    }
+
+    @Scheduled(fixedDelayString = "${scheduler.audit.retention.delay-ms:3600000}")
+    public void tick() {
+      if (retentionDays <= 0) return;
+      if (!leader.isLeader()) return;
+      try {
+        retention.archiveOlderThan("retention",
+            java.time.Instant.now().minus(java.time.Duration.ofDays(retentionDays)), 1000);
+      } catch (Throwable t) {
+        log.warn("audit retention tick failed; continuing next tick", t);
       }
     }
   }

@@ -3,25 +3,34 @@ package dev.scheduler.server.web;
 import dev.scheduler.core.AuditEntry;
 import dev.scheduler.core.AuditIntegrity;
 import dev.scheduler.persistence.AuditRepository;
+import dev.scheduler.server.service.AuditRetentionService;
 import java.time.Instant;
 import java.time.format.DateTimeParseException;
 import java.util.List;
+import java.util.Map;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.server.ResponseStatusException;
 
-/** 审计只读 API:GET /api/v1/audits 过滤 + 分页,occurred_at DESC(镜像 TaskController.list 信封);/export 全量 CSV。 */
+/** 审计 API:GET /api/v1/audits 过滤 + 分页,occurred_at DESC(镜像 TaskController.list 信封);/export 全量 CSV;
+ *  /integrity 取证链;POST /archive 归档旧行(ADMIN,即删即重链)。 */
 @RestController
 @RequestMapping("/api/v1/audits")
 public class AuditController {
   private final AuditRepository audits;
-  public AuditController(AuditRepository audits) { this.audits = audits; }
+  private final AuditRetentionService retention;
+  public AuditController(AuditRepository audits, AuditRetentionService retention) {
+    this.audits = audits;
+    this.retention = retention;
+  }
 
   /** 导出上限:一次性拉全量,超过即截断(append-only 审计表防无界内存)。 */
   private static final int MAX_EXPORT_ROWS = 50_000;
@@ -109,6 +118,21 @@ public class AuditController {
   /** 取证链完整性:全量入链 + 无篡改 → verified(true);异常 → 给出最靠前的被篡改行 id。 */
   @GetMapping("/integrity")
   public AuditIntegrity integrity() { return audits.integrity(); }
+
+  /** 归档 retention 旧行:operator 取 X-Operator 头(拦截器已保证为已登录操作者);
+   *  olderThan 为 ISO-8601 截止(不含),limit 为该次最多归档条数(按 id 升序),默认 1000。
+   *  返回形如 {"archived":n,"olderThan":"..."}。 */
+  @PostMapping("/archive")
+  public Map<String, Object> archive(
+      @RequestHeader(value = "X-Operator", defaultValue = "anonymous") String operator,
+      @RequestParam String olderThan,
+      @RequestParam(required = false) Integer limit) {
+    Instant cutoff = parseInstant(olderThan);
+    if (cutoff == null) throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "missing `olderThan`");
+    int cap = (limit == null || limit < 1) ? 1000 : limit;
+    long archived = retention.archiveOlderThan(operator, cutoff, cap);
+    return java.util.Map.of("archived", archived, "olderThan", cutoff.toString());
+  }
 
   /** CSV 单元格:null → 空;含逗号/引号/换行 → 双引号包裹并把内部双引号翻倍;
    *  以 = + - @ 开头(Excel 公式注入向量)前置单引号。 */

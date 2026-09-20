@@ -62,6 +62,31 @@ public class JdbcAuditRepository implements AuditRepository {
     return new AuditIntegrity(total == null ? 0 : total, chained == null ? 0 : chained, tampered);
   }
 
+  @Override
+  public long archiveOlderThan(Instant cutoff, int limit) {
+    // 归档即删除+重链:同事务内 INSERT→DELETE→重链。以本事务 now() 写入 archived_at,并只删该批次
+    // (archived_at = 当前最大),避免并发归档误删彼此批次;随后 scheduler_audit_rechain() 重算剩余行,
+    // 使删除不破坏取证链(integrity() 仍 verified)。LIMIT 按 id 升序截断单次删除行数,供预算控制。
+    return tx.execute(status -> {
+      int copied = jdbc.update("""
+          INSERT INTO app_audit_archive (id, operator, action, target_type, target_id, meta, diff, before_meta,
+                                         source, occurred_at, prev_hash, chunk_hash, archived_at)
+          SELECT id, operator, action, target_type, target_id, meta, diff, before_meta,
+                 source, occurred_at, prev_hash, chunk_hash, now()
+            FROM app_audit
+           WHERE id IN (SELECT id FROM app_audit WHERE occurred_at < ? ORDER BY id LIMIT ?)""",
+          Timestamp.from(cutoff), limit);
+      if (copied > 0) {
+        jdbc.update("""
+            DELETE FROM app_audit
+             WHERE id IN (SELECT id FROM app_audit_archive
+                           WHERE archived_at = (SELECT max(archived_at) FROM app_audit_archive))""");
+        jdbc.queryForObject("SELECT scheduler_audit_rechain()", Long.class);
+      }
+      return copied;
+    });
+  }
+
   /** WHERE 片段(与 JdbcTaskRepository)配套 {@link #filterArgs}。operator 子串 ILIKE,其余等值。
    *  diff/before/meta 三列 JSON 顶层键过滤可跨列 AND(diffField→diff、beforeField→before_meta、metaField→meta)。 */
   private String where(String operator, String action, String targetType,

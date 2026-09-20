@@ -19,7 +19,7 @@ class JdbcAuditRepositoryTest extends AbstractPostgresTest {
 
   @BeforeEach
   void clean() {
-    jdbc.execute("TRUNCATE app_audit RESTART IDENTITY CASCADE");
+    jdbc.execute("TRUNCATE app_audit, app_audit_archive RESTART IDENTITY CASCADE");
     audits = new JdbcAuditRepository(jdbc);
   }
 
@@ -247,5 +247,56 @@ class JdbcAuditRepositoryTest extends AbstractPostgresTest {
     assertFalse(audits.integrity().isVerified());
     jdbc.update("UPDATE app_audit SET meta='{\"name\":\"a\"}'::jsonb WHERE id=?", id);
     assertTrue(audits.integrity().isVerified(), "改回原值后内容与哈希恢复一致");
+  }
+
+  @Test
+  void archive_movesOldRowsDeletesAndRechains_keepsVerified() {
+    // 三条写入,再把其中两条 occurred_at 回拨到过去,验证归档只删旧留新、且删除后重链仍 verified。
+    audits.record("alice", "task.create", TargetType.TASK, 1L, null, null);
+    audits.record("bob",   "dag.pause",  TargetType.DAG,  9L, null, null);
+    audits.record("carol", "task.update", TargetType.TASK, 3L, null, null); // 保留(新)
+    long oldId = jdbc.queryForObject("SELECT id FROM app_audit WHERE action='task.create'", Long.class);
+    long midId = jdbc.queryForObject("SELECT id FROM app_audit WHERE action='dag.pause'", Long.class);
+    jdbc.update("UPDATE app_audit SET occurred_at=? WHERE id IN (?,?)",
+        Timestamp.from(Instant.parse("2020-01-01T00:00:00Z")), oldId, midId);
+    Instant cutoff = Instant.parse("2021-01-01T00:00:00Z");
+
+    assertEquals(3, audits.integrity().totalRecords());
+    long archived = audits.archiveOlderThan(cutoff, 100);
+    assertEquals(2, archived, "两条旧行(按 id 升序)应被归档删除");
+    assertEquals(1L, jdbc.queryForObject("SELECT count(*) FROM app_audit", Long.class));
+    assertEquals(1L, jdbc.queryForObject("SELECT count(*) FROM app_audit WHERE action='task.update'", Long.class));
+    assertEquals(2L, jdbc.queryForObject("SELECT count(*) FROM app_audit_archive", Long.class));
+    // 归档行携带其冻结的哈希列 + archived_at 批次标记
+    assertEquals(2L, jdbc.queryForObject(
+        "SELECT count(*) FROM app_audit_archive WHERE archived_at IS NOT NULL", Long.class));
+    // 归档删除不透支取证链:剩余唯一行被重链为新的链头,自身哈希一致。
+    AuditIntegrity ok = audits.integrity();
+    assertEquals(1, ok.totalRecords());
+    assertEquals(1, ok.chainedRecords());
+    assertEquals(null, ok.firstTamperedId());
+    assertTrue(ok.isVerified(), "归档删除后重链 → 仍 verified");
+  }
+
+  @Test
+  void archive_respectsLimit_budgetCapsArchivedRows() {
+    for (int i = 1; i <= 5; i++) audits.record("a", "task.create", TargetType.TASK, (long) i, null, null);
+    // 全部回拨到过去 → 全部 eligible,但 limit=2 只归档最旧的 2 条(按 id 升序)。
+    jdbc.update("UPDATE app_audit SET occurred_at=?",
+        Timestamp.from(Instant.parse("2020-01-01T00:00:00Z")));
+    long archived = audits.archiveOlderThan(Instant.parse("2021-01-01T00:00:00Z"), 2);
+    assertEquals(2, archived);
+    assertEquals(3L, jdbc.queryForObject("SELECT count(*) FROM app_audit", Long.class));
+    assertEquals(2L, jdbc.queryForObject("SELECT count(*) FROM app_audit_archive", Long.class));
+    assertTrue(audits.integrity().isVerified(), "部分归档后剩余行重链仍 verified");
+  }
+
+  @Test
+  void archive_nothingOlder_noop_keepsRowsAndVerified() {
+    audits.record("alice", "task.create", TargetType.TASK, 1L, null, null); // occurred_at = now(新)
+    assertEquals(0, audits.archiveOlderThan(Instant.parse("2020-01-01T00:00:00Z"), 10));
+    assertEquals(1L, jdbc.queryForObject("SELECT count(*) FROM app_audit", Long.class));
+    assertEquals(0L, jdbc.queryForObject("SELECT count(*) FROM app_audit_archive", Long.class));
+    assertTrue(audits.integrity().isVerified());
   }
 }

@@ -1,4 +1,5 @@
 import type {
+  AuditArchiveResult,
   AuditEntry,
   AuditIntegrity,
   CreateTaskRequest,
@@ -10,12 +11,14 @@ import type {
   DlqRow,
   Execution,
   ExecutionDetail,
+  OperatorEntry,
   Page,
   ParsedMetric,
   RunDetail,
   Shard,
   Task,
   UpdateTaskRequest,
+  UpsertOperatorRequest,
 } from './types';
 
 /** 当前会话自报操作者:写端授权按 X-Operator 收口(未登记/欠角色 → 401/403)。defaultRequest 缺省 alice。 */
@@ -181,3 +184,13 @@ export const listAudits = (p: ListAuditsParams = {}): Promise<Page<AuditEntry>> 
   req<Page<AuditEntry>>(`/api/v1/audits${qstr(p)}`);
 /** 审计取证链完整性:全量入链且无篡改 → verified。 */
 export const getAuditIntegrity = () => req<AuditIntegrity>('/api/v1/audits/integrity');
+/** 归档 occurred_at 早于 olderThan(ISO)的审计行,即删即重链(ADMIN 专属)。返回本次归档行数。 */
+export const archiveAudits = (olderThan: string, limit?: number) =>
+  req<AuditArchiveResult>(`/api/v1/audits/archive?olderThan=${encodeURIComponent(olderThan)}${limit ? `&limit=${limit}` : ''}`, { method: 'POST' });
+
+// ---- 操作者目录(仅 ADMIN,OperatorInterceptor 收口) ----
+export const listOperators = () => req<OperatorEntry[]>('/api/v1/operators');
+export const upsertOperator = (b: UpsertOperatorRequest) =>
+  req<OperatorEntry>('/api/v1/operators', { method: 'POST', body: JSON.stringify(b) });
+export const deactivateOperator = (name: string) =>
+  req<void>(`/api/v1/operators/${encodeURIComponent(name)}/deactivate`, { method: 'POST' });

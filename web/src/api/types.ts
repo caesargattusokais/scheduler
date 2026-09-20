@@ -139,3 +139,17 @@ export interface AuditIntegrity {
   firstTamperedId: number | null;
   verified: boolean;
 }
+
+/** 操作者目录条目(镜像 OperatorController.list → OperatorEntry)。role 取 'OPERATOR'|'ADMIN'。 */
+export interface OperatorEntry {
+  name: string;
+  role: 'OPERATOR' | 'ADMIN';
+  active: boolean;
+}
+export interface UpsertOperatorRequest {
+  name: string;
+  role: 'OPERATOR' | 'ADMIN';
+  active: boolean;
+}
+/** POST /api/v1/audits/archive 响应:{archived: 本次归档行数, olderThan: 截止时刻 ISO}。 */
+export interface AuditArchiveResult { archived: number; olderThan: string; }
