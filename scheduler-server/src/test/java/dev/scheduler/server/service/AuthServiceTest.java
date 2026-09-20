@@ -116,6 +116,27 @@ class AuthServiceTest {
     assertTrue(auth.created.contains(rr.rotatedToken()), "新 token 已建库");
   }
 
+  /** 轮换建新会话须把旧会话的 created(绝对寿命基线)透传给 create,而非重置为 now()。 */
+  @Test
+  void resolve_rotateBranch_preservesOriginalCreatedAt() {
+    Instant origin = auth.now.minus(Duration.ofDays(4).plusHours(23)); // ≈5d 边缘但仍 <5d(可解析)
+    auth.resolved = Optional.of(new Session("alice", origin, auth.now.plus(Duration.ofHours(2))));
+    var rr = svc.resolve("tok");
+    assertNotNull(rr.rotatedToken());
+    assertEquals(List.of(origin), auth.createdAts,
+        "轮换 create 应传旧会话 created_at,保留绝对寿命基线而非重置 now()");
+  }
+
+  /** 登录建会话 created_at 缺省(传 null)→ 由持久层以 DB now() 落库。 */
+  @Test
+  void login_create_passesNullCreatedAt() {
+    auth.locked = Optional.empty();
+    svc = new AuthService(auth, withHash(enc.encode("secret-pass")), auditor);
+    svc.login("alice", "secret-pass");
+    assertEquals(1, auth.createdAts.size());
+    assertEquals(null, auth.createdAts.get(0), "登录建会话 created_at=DB now()(传 null)");
+  }
+
   /** 绝对寿命超限(now-created ≥ 5d)→ 撤销旧并强制重登(返回 null operator)。 */
   @Test
   void resolve_absoluteLifetimeExceeded_forcesRelogin() {
@@ -160,13 +181,18 @@ class AuthServiceTest {
     final List<String> revoked = new ArrayList<>();
     final List<String> failures = new ArrayList<>();
     final List<String> resets = new ArrayList<>();
+    final List<Instant> createdAts = new ArrayList<>();
     Duration lastTtl;
 
     @Override public Instant now() { return now; }
     @Override public Optional<Session> resolve(String rawToken) { return resolved; }
     @Override public void create(String rawToken, String operator, Duration ttl) {
+      create(rawToken, operator, ttl, null); // 登录:created_at 缺省 → DB now()
+    }
+    @Override public void create(String rawToken, String operator, Duration ttl, Instant createdAt) {
       lastTtl = ttl;
       created.add(rawToken);
+      createdAts.add(createdAt); // 轮换应传原 created_at;登录传 null
     }
     @Override public void revoke(String rawToken) { revoked.add(rawToken); }
     @Override public void revokeAllForOperator(String operator) { }

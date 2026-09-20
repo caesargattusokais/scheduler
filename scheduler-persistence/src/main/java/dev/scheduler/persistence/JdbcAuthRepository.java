@@ -42,11 +42,18 @@ public class JdbcAuthRepository implements AuthRepository {
 
   @Override
   public void create(String rawToken, String operator, Duration ttl) {
-    // expires_at 由 SQL 以 DB now() 计算,统一 DB 时钟,避免应用/DB 时区漂移。
+    create(rawToken, operator, ttl, null); // 登录:created_at = DB now()
+  }
+
+  @Override
+  public void create(String rawToken, String operator, Duration ttl, Instant createdAt) {
+    // createdAt 非 null(轮换传原会话 created_at)→ 用作 created_at,保留绝对寿命基线;
+    // null(登录)→ DB now()。expires_at 恒以 DB now() + ttl 滚动(短 TTL,规避应用/DB 时区漂移)。
     jdbc.update(
         "INSERT INTO app_auth_session (token_hash, operator_name, created_at, expires_at)"
-            + " VALUES (?, ?, now(), now() + (?) * interval '1 second')",
-        AuthHashing.sha256(rawToken), operator, ttl.getSeconds());
+            + " VALUES (?, ?, COALESCE(CAST(? AS timestamptz), now()), now() + (?) * interval '1 second')",
+        AuthHashing.sha256(rawToken), operator,
+        createdAt == null ? null : Timestamp.from(createdAt), ttl.getSeconds());
   }
 
   @Override

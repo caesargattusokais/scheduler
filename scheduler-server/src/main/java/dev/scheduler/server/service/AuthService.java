@@ -97,7 +97,8 @@ public class AuthService {
       return new ResolveResult(null, null); // 强制重登
     }
     String newTk = randomToken();
-    auth.create(newTk, operator, TOKEN_TTL);
+    // 以旧会话的 created 作新行 created_at:使绝对寿命基线(自首次登录 ≤ 5d)跨轮换保留,而非重置 now() 续杯。
+    auth.create(newTk, operator, TOKEN_TTL, sess.created());
     return new ResolveResult(operator, newTk);
   }
 

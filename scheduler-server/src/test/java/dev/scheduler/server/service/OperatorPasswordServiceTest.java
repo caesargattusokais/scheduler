@@ -54,6 +54,8 @@ class OperatorPasswordServiceTest {
 
     @Override public void create(String rawToken, String operator, java.time.Duration ttl) { }
 
+    @Override public void create(String rawToken, String operator, java.time.Duration ttl, java.time.Instant createdAt) { }
+
     @Override public void revoke(String rawToken) { }
 
     @Override public void revokeAllForOperator(String operator) { revokedAll.add(operator); }

@@ -766,12 +766,12 @@ class ApiIntegrationTest {
         "SELECT count(*) FROM app_audit WHERE action='access.denied' AND operator='bob'", Long.class));
   }
 
-  // ---------- 审计写端:三控制器 15 个写端点接 X-Operator + AuditRecorder ----------
+  // ---------- 审计写端:三控制器 15 个写端点,审计operator取会话 cookie principal ----------
 
-  /** 审计写端:TaskController create/update/pause/resume/trigger/delete;X-Operator 缺省记 anonymous;meta 为后态。 */
+  /** 审计写端:TaskController create/update/pause/resume/trigger/delete;operator 取 CurrentOperator(会话 principal);meta 为后态。 */
   @Test
   void taskWriteActions_areAudited() throws Exception {
-    // create with X-Operator → operator 为该头,meta 含后态 name
+    // create(以 alice cookie)→ operator=alice,meta 含后态 name
     long id = objectMapper.readTree(mvc.perform(post("/api/v1/tasks").cookie(session(ALICE_TOKEN))
             .contentType(MediaType.APPLICATION_JSON)
             .content("{\"name\":\"audited-task\",\"kind\":\"cron\",\"handlerRef\":\"demo\","
@@ -1745,6 +1745,15 @@ class ApiIntegrationTest {
     return new Cookie("session", token);
   }
 
+  /** 从轮换响应的 Set-Cookie 提取新会话令牌明文(须已由调用方断言存在)。 */
+  private static String rotationToken(MvcResult r) {
+    String setCookie = r.getResponse().getHeader("Set-Cookie");
+    assertTrue(setCookie != null && setCookie.startsWith("session="), "轮换应回写新会话 Set-Cookie: " + setCookie);
+    String t = setCookie.substring("session=".length(), setCookie.indexOf(';')).trim();
+    assertEquals(64, t.length());
+    return t;
+  }
+
   
   // ---- 操作者授权 / 审计访问控制 ----
 
@@ -1809,6 +1818,26 @@ class ApiIntegrationTest {
         .andExpect(status().isOk());
     String body = "{\"name\":\"x\",\"kind\":\"cron\",\"handlerRef\":\"demo\",\"cron\":\"" + CRON + "\"}";
     mvc.perform(post("/api/v1/tasks").cookie(session(MALLORY_TOKEN))
+            .contentType(MediaType.APPLICATION_JSON).content(body))
+        .andExpect(status().isUnauthorized());
+  }
+
+  /** 停用操作者须撤销其现役会话(即使该操作者有活动 cookie):bob 有 BOB_TOKEN 会话 → 停用后该行 revoked + 再写 401。 */
+  @Test
+  void deactivate_revokesOperatorsActiveSession() throws Exception {
+    // bob·OPERATOR 的活动会话在 resetDb 已播种(BOB_TOKEN)→ 应从 app_auth_session 读到未撤销行。
+    assertEquals(1L, jdbc.queryForObject(
+        "SELECT count(*) FROM app_auth_session WHERE token_hash=? AND revoked_at IS NULL",
+        Long.class, AuthHashing.sha256(BOB_TOKEN)));
+    // alice(ADMIN)停用 bob
+    mvc.perform(post("/api/v1/operators/bob/deactivate").cookie(session(ALICE_TOKEN)))
+        .andExpect(status().isOk());
+    // bob 会话被撤销(revoked_at 置非空);再用 BOB_TOKEN 写 → 401
+    assertEquals(1L, jdbc.queryForObject(
+        "SELECT count(*) FROM app_auth_session WHERE token_hash=? AND revoked_at IS NOT NULL",
+        Long.class, AuthHashing.sha256(BOB_TOKEN)));
+    String body = "{\"name\":\"post-deact\",\"kind\":\"cron\",\"handlerRef\":\"demo\",\"cron\":\"" + CRON + "\"}";
+    mvc.perform(post("/api/v1/tasks").cookie(session(BOB_TOKEN))
             .contentType(MediaType.APPLICATION_JSON).content(body))
         .andExpect(status().isUnauthorized());
   }
@@ -1977,6 +2006,33 @@ class ApiIntegrationTest {
     var nr = authService.resolve(newToken);
     assertNotNull(nr, "新 token 应可解析");
     assertEquals("alice", nr.operator(), "新 token 归属 alice");
+  }
+
+  /** 轮换必须保留绝对寿命基线(自首次登录 ≤5d),而非重置 created_at=now()。
+   *  (a) 轮换后新行 created_at ≈ 原登录 created_at(≈5d 前),非近 now();(b) 血缘跨过 5d → 现有 SQL 拒绝 → 强制重登。 */
+  @Test
+  void sessionRotation_preservesAbsoluteLifetimeOrigin_andCapStillBinds() throws Exception {
+    // 播种接近 5d 边缘的会话:created=5d-5h(仍 <5d 可解析),expires=1h(剩余<半程4h → 轮换)。
+    jdbc.update("UPDATE app_auth_session SET created_at = now() - interval '4 days 19 hours',"
+            + " expires_at = now() + interval '1 hour' WHERE token_hash=?",
+        AuthHashing.sha256(ALICE_TOKEN));
+    MvcResult r = mvc.perform(post("/api/v1/tasks").cookie(session(ALICE_TOKEN))
+            .contentType(MediaType.APPLICATION_JSON)
+            .content("{\"name\":\"abs-cap-rot\",\"kind\":\"cron\",\"handlerRef\":\"demo\","
+                + "\"cron\":\"" + CRON + "\",\"shardCount\":1}"))
+        .andExpect(status().isCreated())
+        .andReturn();
+    String newToken = rotationToken(r);
+    // (a) 轮换行 created_at 应 ≈ 原登录(5d-5h=115h 前),而非重置为 now()(≈0h)。容差 ±20 分钟。
+    long ageMinutes = jdbc.queryForObject(
+        "SELECT extract(epoch FROM (now() - created_at)) / 60::int FROM app_auth_session WHERE token_hash=?",
+        Long.class, AuthHashing.sha256(newToken));
+    assertTrue(ageMinutes >= 115 * 60 - 20 && ageMinutes <= 115 * 60 + 20,
+        "轮换行保留原 created_at(≈115h),实际分钟=" + ageMinutes);
+    // (b) 血缘跨过 5d:现有 SQL now()-created_at<5d 拒绝 → resolve 空 → 强制重登(拿不到操作者)。
+    jdbc.update("UPDATE app_auth_session SET created_at = now() - interval '6 days' WHERE token_hash=?",
+        AuthHashing.sha256(newToken));
+    assertNull(authService.resolve(newToken), "血缘≥5d 后轮换 token 应强制重登(空)");
   }
 
   /** GET /auth/me:无有效会话 → 401;alice cookie → 200 {operator:{name}}。 */
