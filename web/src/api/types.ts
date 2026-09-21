@@ -146,14 +146,17 @@ export interface OperatorEntry {
   role: 'OPERATOR' | 'ADMIN';
   active: boolean;
 }
-/** POST /api/v1/auth/login 响应:当前登录操作者与会话失效时刻(ISO)。 */
+/** POST /api/v1/auth/login 响应:当前登录操作者与会话失效时刻(ISO)+必须改密标(共享默认口令引导置位)。 */
 export interface LoginResponse {
   operator: OperatorEntry;
   expiresAt: string;
+  /** true=口令仍为共享默认,须先自助改密才能进入主界面。 */
+  mustChangePassword: boolean;
 }
-/** GET /api/v1/auth/me 响应:当前会话对应操作者。 */
+/** GET /api/v1/auth/me 响应:当前会话对应操作者 + 必须改密标。 */
 export interface MeResponse {
   operator: OperatorEntry;
+  mustChangePassword: boolean;
 }
 export interface UpsertOperatorRequest {
   name: string;

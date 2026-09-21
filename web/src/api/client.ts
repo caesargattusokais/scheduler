@@ -62,6 +62,24 @@ export const setPassword = (name: string, password: string): Promise<void> =>
     body: JSON.stringify({ password }),
   });
 
+// ---- 自助改密(登录态自证)+ 首登强制改密 ----
+/** 自助改密:验当前密 + 落新密 + 撤销旧会话 + 无缝签发新会话(cookie 自动更新)。成功必清服务端 must_change 标。
+ *  当前密不符 → 后端 401;新密过短 → 400。返回 200 {operator, expiresAt}(同登录形)。 */
+export const changePassword = (currentPassword: string, newPassword: string): Promise<LoginResponse> =>
+  req<LoginResponse>('/api/v1/auth/change-password', { method: 'POST', body: JSON.stringify({ currentPassword, newPassword }) });
+
+// 首登强制改密":登录时若 mustChangePassword=true,把本次提交的(共享默认)口令暂存,交 ForcePasswordChange 预填当前密,
+// 免去重输默认口令。仅内存、一次性消费;页面刷新则失效(回到须自填当前密)。
+let pendingCurrentPassword: string | null = null;
+export function setPendingCurrentPassword(pw: string): void {
+  pendingCurrentPassword = pw;
+}
+export function consumePendingCurrentPassword(): string | null {
+  const p = pendingCurrentPassword;
+  pendingCurrentPassword = null;
+  return p;
+}
+
 /** 把可选查询参数拼成查询串(空值/空串跳过)。 */
 function qstr(p: object): string {
   const q = new URLSearchParams();
