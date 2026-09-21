@@ -7,11 +7,14 @@ import Pager from '../components/Pager';
 
 const PAGE_SIZE = 20;
 const ACTIONS = [
+  // 资源动作
   'task.create', 'task.update', 'task.pause', 'task.resume', 'task.delete', 'task.trigger',
   'execution.rerun', 'execution.cancel', 'shard.requeue',
   'dag.create', 'dag.pause', 'dag.resume', 'dag.trigger', 'dag_run.cancel', 'dag_node.rerun',
+  // 认证动作(登录/认证全量审计:成功侧 auth.* + 失败侧 access.denied + ADMIN 强制登出)
+  'auth.login', 'auth.change_password', 'auth.logout', 'access.denied', 'operator.sessions.revoke',
 ];
-const TARGET_TYPES = ['task', 'execution', 'shard', 'dag', 'dag_run'];
+const TARGET_TYPES = ['task', 'execution', 'shard', 'dag', 'dag_run', 'none'];
 
 const fmt = (t: string) => (t ? new Date(t).toLocaleString() : '—');
 /** meta 是后端透出的 JSON 文本,解析为紧凑摘要展示。 */
