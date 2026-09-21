@@ -63,10 +63,22 @@ public class JdbcAuthRepository implements AuthRepository {
   }
 
   @Override
-  public void revokeAllForOperator(String operator) {
-    jdbc.update(
+  public int revokeAllForOperator(String operator) {
+    return jdbc.update(
         "UPDATE app_auth_session SET revoked_at = now()"
             + " WHERE operator_name = ? AND revoked_at IS NULL",
+        operator);
+  }
+
+  @Override
+  public List<SessionInfo> activeSessions(String operator) {
+    return jdbc.query(
+        "SELECT left(token_hash, 10) AS prefix, created_at, expires_at FROM app_auth_session"
+            + " WHERE operator_name = ? AND revoked_at IS NULL AND expires_at > now()"
+            + " ORDER BY created_at",
+        (rs, i) -> new SessionInfo(rs.getString("prefix"),
+            rs.getTimestamp("created_at").toInstant(),
+            rs.getTimestamp("expires_at").toInstant()),
         operator);
   }
 

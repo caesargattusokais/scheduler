@@ -1843,6 +1843,36 @@ class ApiIntegrationTest {
         .andExpect(status().isUnauthorized());
   }
 
+  // ---- 会话管理:活动会话视图 + 强制登出(ADMIN) ----
+
+  /** 会话管理整体 ADMIN:ADMIN 可列/强制登出,OPERATOR 连读都 403;强制登出撤销活动会话并留 operator.sessions.revoke 审计。 */
+  @Test
+  void sessionManagement_isAdminOnly_listsAndRevokes() throws Exception {
+    // bob 的 BOB_TOKEN 活动会话由 resetDb 播种 → 活动会话列表中应含其截断前缀。
+    String bobPrefix = AuthHashing.sha256(BOB_TOKEN).substring(0, 10);
+    mvc.perform(get("/api/v1/operators/bob/sessions").cookie(session(ALICE_TOKEN)))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$[*].tokenPrefix", hasItem(bobPrefix)))
+        .andExpect(jsonPath("$[*].createdAt").isNotEmpty());
+    // 非 ADMIN(OPERATOR bob)→ 列表/强制登出均 403。
+    mvc.perform(get("/api/v1/operators/alice/sessions").cookie(session(BOB_TOKEN)))
+        .andExpect(status().isForbidden());
+    mvc.perform(post("/api/v1/operators/alice/sessions/revoke").cookie(session(BOB_TOKEN)))
+        .andExpect(status().isForbidden());
+    // ADMIN 强制登出 bob → 撤销其活动会话并记审计(归属 ADMIN)。
+    mvc.perform(post("/api/v1/operators/bob/sessions/revoke").cookie(session(ALICE_TOKEN)))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.revoked").value(org.hamcrest.Matchers.greaterThanOrEqualTo(1)));
+    // bob 原 cookie 会话已撤 → 再写 → 401。
+    String body = "{\"name\":\"post-sess-revoke\",\"kind\":\"cron\",\"handlerRef\":\"demo\",\"cron\":\"" + CRON + "\"}";
+    mvc.perform(post("/api/v1/tasks").cookie(session(BOB_TOKEN))
+            .contentType(MediaType.APPLICATION_JSON).content(body))
+        .andExpect(status().isUnauthorized());
+    assertEquals(1L, jdbc.queryForObject(
+        "SELECT count(*) FROM app_audit WHERE action='operator.sessions.revoke' AND operator='alice'",
+        Long.class));
+  }
+
   // ---- 强认证:操作者口令管理 + 默认口令引导 ----
 
   /** 默认口令引导:上下文启动时(application runner)对无密操作者 alice/bob 应用 boot-pass → password_hash 非空且为 BCrypt。 */

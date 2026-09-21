@@ -68,7 +68,9 @@ class OperatorPasswordServiceTest {
 
     @Override public void revoke(String rawToken) { }
 
-    @Override public void revokeAllForOperator(String operator) { revokedAll.add(operator); }
+    @Override public int revokeAllForOperator(String operator) { revokedAll.add(operator); return 1; }
+
+    @Override public List<AuthRepository.SessionInfo> activeSessions(String operator) { return List.of(); }
 
     @Override public Optional<Instant> lockedUntil(String name) { return Optional.empty(); }
 

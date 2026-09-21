@@ -2,12 +2,16 @@ package dev.scheduler.persistence;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.List;
 import java.util.Optional;
 
 /** 强认证持久层:会话令牌 + 登录失败退避。口令哈希见 {@link OperatorRepository}。 */
 public interface AuthRepository {
   /** 会话解析结果:操作者 + 创建/过期时刻(均由 DB 时钟回填)。 */
   record Session(String operator, Instant created, Instant expires) {}
+
+  /** 活动会话展示行:tokenPrefix = token_hash 前 10 位(非秘密的稳定展示键;令牌明文与全量哈希均不面向用户)。 */
+  record SessionInfo(String tokenPrefix, Instant createdAt, Instant expiresAt) {}
 
   /** DB 时钟 now():会话 create/expire/resolve 与 AuthService 轮换判定同源,避免应用/DB 时区漂移。 */
   Instant now();
@@ -26,8 +30,11 @@ public interface AuthRepository {
   /** 撤销指定 token 会话(登出/轮换旧);不存在则 no-op。 */
   void revoke(String rawToken);
 
-  /** 撤销该操作者全部活动会话(改密/deactivate)。 */
-  void revokeAllForOperator(String operator);
+  /** 撤销该操作者全部活动会话(改密/deactivate/强制登出);返回本次实际置 revoked 的活动会话数。 */
+  int revokeAllForOperator(String operator);
+
+  /** 列该操作者未撤销且未过期的活动会话(按建立时刻升序);供 ADMIN 会话管理视图。 */
+  List<SessionInfo> activeSessions(String operator);
 
   /** name 当前锁定截止时刻;仅当已锁定(> DB now())才返回。 */
   Optional<Instant> lockedUntil(String name);

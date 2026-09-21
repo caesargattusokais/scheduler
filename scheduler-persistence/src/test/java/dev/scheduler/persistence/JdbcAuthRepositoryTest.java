@@ -109,6 +109,36 @@ class JdbcAuthRepositoryTest extends AbstractPostgresTest {
   }
 
   @Test
+  void activeSessions_listsOnlyLiveOrdered_byCreated() {
+    auth.create(TOKEN, "alice", Duration.ofHours(8));   // 活动
+    auth.create(TOKEN2, "alice", Duration.ofHours(8));  // 将被撤销
+    auth.create(TOKEN3, "alice", Duration.ofHours(8));  // 将被过期
+    auth.revoke(TOKEN2);
+    jdbc.update("UPDATE app_auth_session SET expires_at = now() - interval '1 minute' WHERE token_hash = ?",
+        AuthHashing.sha256(TOKEN3));
+
+    var rows = auth.activeSessions("alice");
+    assertEquals(1, rows.size(), "只应列出未撤销且未过期的活动会话");
+    assertEquals(AuthHashing.sha256(TOKEN).substring(0, 10), rows.get(0).tokenPrefix(),
+        "tokenPrefix = token_hash 前 10 位(非秘密展示键)");
+    assertTrue(rows.get(0).createdAt().isBefore(rows.get(0).expiresAt()), "created < expires");
+    assertEquals(0, auth.activeSessions("bob").size(), "无会话 → 空");
+  }
+
+  @Test
+  void revokeAllForOperator_returnsAffectedActiveCount() {
+    auth.create(TOKEN, "alice", Duration.ofHours(1));
+    auth.create(TOKEN2, "alice", Duration.ofHours(1));
+    auth.create(TOKEN3, "bob", Duration.ofHours(1));
+    auth.revoke(TOKEN2); // 已撤销的不计入返回
+    assertEquals(1, auth.revokeAllForOperator("alice"), "应返回本次实际置 revoked 的活动会话数");
+    assertTrue(auth.resolve(TOKEN).isEmpty());
+    assertTrue(auth.resolve(TOKEN2).isEmpty(), "本已撤销的仍不可解析");
+    var bob = auth.resolve(TOKEN3);
+    assertTrue(bob.isPresent(), "bob 会话不受影响");
+  }
+
+  @Test
   void recordFailure_backoffEscalates_cappedAt30s() {
     auth.recordFailure("alice", 30);
     Instant one = auth.lockedUntil("alice").get();

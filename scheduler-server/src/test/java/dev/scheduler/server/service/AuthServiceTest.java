@@ -253,7 +253,8 @@ class AuthServiceTest {
       createdAts.add(createdAt); // 轮换应传原 created_at;登录传 null
     }
     @Override public void revoke(String rawToken) { revoked.add(rawToken); }
-    @Override public void revokeAllForOperator(String operator) { revokedAll.add(operator); }
+    @Override public int revokeAllForOperator(String operator) { revokedAll.add(operator); return 1; }
+    @Override public List<SessionInfo> activeSessions(String operator) { return List.of(); }
     @Override public Optional<Instant> lockedUntil(String name) { return locked; }
     @Override public void recordFailure(String name, int maxLockSeconds) { failures.add(name); }
     @Override public void resetLockout(String name) { resets.add(name); }
