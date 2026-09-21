@@ -56,17 +56,45 @@ public class AuthController {
     Map<String, Object> body2 = new LinkedHashMap<>();
     body2.put("operator", entry);
     body2.put("expiresAt", lr.expiresAt().toString());
+    body2.put("mustChangePassword", operators.mustChangePassword(lr.operator()).orElse(false));
     return ResponseEntity.ok(body2);
   }
 
-  /** GET /me → 200 {operator} 当有已解析会话;无 cookie/无效 → 401。 */
+  /** GET /me → 200 {operator, mustChangePassword} 当有已解析会话;无 cookie/无效 → 401。 */
   @GetMapping("/me")
   public ResponseEntity<?> me() {
     String who = current.get();
     if (who == null) {
       throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "not authenticated");
     }
-    return ResponseEntity.ok(Map.of("operator", entryOf(who)));
+    Map<String, Object> body = new LinkedHashMap<>();
+    body.put("operator", entryOf(who));
+    body.put("mustChangePassword", operators.mustChangePassword(who).orElse(false));
+    return ResponseEntity.ok(body);
+  }
+
+  /**
+   * POST /change-password {currentPassword,newPassword} → 自助改密:验当前密 → 落新密 + 清强制改密标 + 撤销全部旧会话
+   * + 无缝签发新会话(Set-Cookie)。当前密不符 → 401;新密过短 → 400;须已登录(current.get() 非空)。
+   */
+  @PostMapping("/change-password")
+  public ResponseEntity<?> changePassword(@RequestBody Map<String, String> body, HttpServletResponse res) {
+    String who = current.get();
+    if (who == null) {
+      throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "not authenticated");
+    }
+    String currentRaw = body == null ? null : body.get("currentPassword");
+    String newRaw = body == null ? null : body.get("newPassword");
+    Optional<LoginResult> r = auth.changePassword(who, currentRaw, newRaw);
+    if (r.isEmpty()) {
+      throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "current password is incorrect");
+    }
+    LoginResult lr = r.get();
+    setCookie(res, lr.token(), secureCookies); // 无缝续期:新会话写回,前端无需重登
+    Map<String, Object> body2 = new LinkedHashMap<>();
+    body2.put("operator", entryOf(lr.operator()));
+    body2.put("expiresAt", lr.expiresAt().toString());
+    return ResponseEntity.ok(body2);
   }
 
   /** POST /logout → 撤销当前 cookie 会话并清 cookie(幂等;无会话也 200)。 */

@@ -38,6 +38,7 @@ public class OperatorPasswordService {
     requireRegistered(name);
     operators.setPassword(name, enc.encode(raw));
     auth.revokeAllForOperator(name);
+    operators.setMustChangePassword(name, false); // 人类选定口径 → 不强制首登改密
   }
 
   /** 停用操作者并撤销其全部会话(把 deactivate 的会话副作用收口到 service)。 */
@@ -46,11 +47,13 @@ public class OperatorPasswordService {
     auth.revokeAllForOperator(name);
   }
 
-  /** 引导默认口令:仅对当前无口令的操作者应用(不覆盖管理员已设口令);仍走长度校验 + 编码落库。 */
+  /** 引导默认口令:仅对当前无口令的操作者应用(不覆盖管理员已设口令);仍走长度校验 + 编码落库。
+   *  该口令为共享默认 → 置 must_change_password=true,操作者须在首登改密。 */
   public void bootstrap(String name, String raw) {
     requireLength(raw);
     if (!operators.namesWithoutPassword().contains(name)) return; // 已有口令 → 跳过,不覆盖
     operators.setPassword(name, enc.encode(raw));
     auth.revokeAllForOperator(name);
+    operators.setMustChangePassword(name, true); // 共享默认 → 强制首登改密
   }
 }

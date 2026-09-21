@@ -3,6 +3,7 @@ package dev.scheduler.server.service;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -164,6 +165,62 @@ class AuthServiceTest {
     assertEquals(List.of("tok"), auth.revoked);
   }
 
+  // ---- changePassword ----
+
+  /** 当前口令不符 → empty + access.denied,不改密、不撤会话、不建新会话。 */
+  @Test
+  void changePassword_wrongCurrent_emptyAndDenied() {
+    svc = new AuthService(auth, withHash(enc.encode("right-secret")), auditor);
+    var r = svc.changePassword("alice", "wrong-pass", "brand-new-pass");
+    assertTrue(r.isEmpty());
+    assertTrue(auditor.denied.contains("alice"), "当前密不符应记 access.denied");
+    assertTrue(auth.revokedAll.isEmpty(), "验密失败不得撤销会话");
+    assertTrue(auth.created.isEmpty(), "验密失败不得签发新会话");
+  }
+
+  /** 无口令(未引导)→ 视同当前密不符 → empty + denied。 */
+  @Test
+  void changePassword_noHash_treatedAsWrongCurrent() {
+    var r = svc.changePassword("alice", "whatever", "brand-new-pass"); // FakeOperators 默认无哈希
+    assertTrue(r.isEmpty());
+    assertTrue(auditor.denied.contains("alice"));
+  }
+
+  /** 新密过短 → IAE(不得落库/撤会话)。 */
+  @Test
+  void changePassword_shortNew_rejected() {
+    svc = new AuthService(auth, withHash(enc.encode("right-secret")), auditor);
+    var exception = assertThrows(IllegalArgumentException.class,
+        () -> svc.changePassword("alice", "right-secret", "short"));
+    assertTrue(exception.getMessage().contains("8"), exception.getMessage());
+    assertTrue(auth.revokedAll.isEmpty(), "过短新密不得撤销会话");
+    assertTrue(auth.created.isEmpty(), "过短新密不得签发新会话");
+  }
+
+  /** 成功 → BCrypt 新密落库 + 清 must_change + 撤旧会话 + 签发新会话(created_at=now,重计绝对寿命) + 返回 LoginResult。 */
+  @Test
+  void changePassword_success_encodesClearsFlagRevokesAndIssuesFreshSession() {
+    FakeOperators ops = new FakeOperators();
+    ops.passwordHash = Optional.of(enc.encode("right-secret"));
+    ops.mustChange = true; // 首登强制改密场景:旧标为 true
+    svc = new AuthService(auth, ops, auditor);
+
+    var r = svc.changePassword("alice", "right-secret", "brand-new-pass");
+
+    assertTrue(r.isPresent());
+    assertEquals("alice", r.get().operator());
+    assertEquals(1, ops.passwordSet.size(), "应写入新密");
+    String stored = ops.passwordSet.get(0);
+    assertTrue(stored.startsWith("alice=$2"), "新密应 BCrypt 编码,got: " + stored);
+    assertEquals(List.of("alice"), ops.mustChangeCleared, "自助改密应清除 must_change 标");
+    assertEquals(List.of("alice"), auth.revokedAll, "自助改密应撤销该操作者全部旧会话");
+    assertEquals(1, auth.created.size());
+    assertNull(auth.createdAts.get(0), "改密走 3-arg 登录式创建,created_at 交 DB now(),不承继旧血缘(≠轮换的显式原 created_at)");
+    assertEquals(64, r.get().token().length(), "新令牌为 64-char hex");
+    assertEquals(auth.now.plus(AuthService.TOKEN_TTL), r.get().expiresAt(), "新会话到期=now+8h");
+    assertTrue(auditor.denied.isEmpty(), "成功不记 denied");
+  }
+
   // ---- fakes ----
 
   private FakeOperators withHash(String hash) {
@@ -179,6 +236,7 @@ class AuthServiceTest {
     Optional<Session> resolved = Optional.empty();
     final List<String> created = new ArrayList<>();
     final List<String> revoked = new ArrayList<>();
+    final List<String> revokedAll = new ArrayList<>();
     final List<String> failures = new ArrayList<>();
     final List<String> resets = new ArrayList<>();
     final List<Instant> createdAts = new ArrayList<>();
@@ -195,7 +253,7 @@ class AuthServiceTest {
       createdAts.add(createdAt); // 轮换应传原 created_at;登录传 null
     }
     @Override public void revoke(String rawToken) { revoked.add(rawToken); }
-    @Override public void revokeAllForOperator(String operator) { }
+    @Override public void revokeAllForOperator(String operator) { revokedAll.add(operator); }
     @Override public Optional<Instant> lockedUntil(String name) { return locked; }
     @Override public void recordFailure(String name, int maxLockSeconds) { failures.add(name); }
     @Override public void resetLockout(String name) { resets.add(name); }
@@ -204,13 +262,22 @@ class AuthServiceTest {
   /** 可控口令哈希的假 OperatorRepository(仅需 activePasswordHash)。 */
   private static final class FakeOperators implements OperatorRepository {
     Optional<String> passwordHash = Optional.empty();
+    final List<String> passwordSet = new ArrayList<>();
+    final List<String> mustChangeSet = new ArrayList<>();
+    final List<String> mustChangeCleared = new ArrayList<>();
+    Boolean mustChange = false;
 
     @Override public Optional<dev.scheduler.core.OperatorRole> roleOf(String name) { return Optional.empty(); }
     @Override public List<dev.scheduler.core.OperatorEntry> list() { return List.of(); }
     @Override public Optional<String> activePasswordHash(String name) { return passwordHash; }
     @Override public void upsert(String name, dev.scheduler.core.OperatorRole role, boolean active) { }
     @Override public void deactivate(String name) { }
-    @Override public void setPassword(String name, String bcryptHash) { }
+    @Override public void setPassword(String name, String bcryptHash) { passwordSet.add(name + "=" + bcryptHash); }
+    @Override public void setMustChangePassword(String name, boolean v) {
+      (v ? mustChangeSet : mustChangeCleared).add(name);
+      mustChange = v;
+    }
+    @Override public Optional<Boolean> mustChangePassword(String name) { return Optional.ofNullable(mustChange); }
     @Override public List<String> namesWithoutPassword() { return List.of(); }
   }
 

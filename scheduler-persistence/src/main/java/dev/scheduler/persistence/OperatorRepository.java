@@ -27,4 +27,10 @@ public interface OperatorRepository {
 
   /** 尚未设口令(password_hash IS NULL)的操作者 name 列表(按 name 升序);供默认口令引导。 */
   List<String> namesWithoutPassword();
+
+  /** 该操作者的强制改密标(默认口令引导置位/人类选定清除);未登记 → empty。 */
+  Optional<Boolean> mustChangePassword(String name);
+
+  /** 置位/清除强制改密标:true=口令仍为共享默认须首登改密;false=已有妥善口令。 */
+  void setMustChangePassword(String name, boolean v);
 }

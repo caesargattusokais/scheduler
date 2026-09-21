@@ -87,4 +87,16 @@ class JdbcOperatorRepositoryTest extends AbstractPostgresTest {
     operators.setPassword("alice", "bcrypt-hash");
     assertEquals(List.of("bob", "carol"), operators.namesWithoutPassword());
   }
+
+  @Test
+  void mustChangePassword_defaultFalse_thenSetGet() {
+    operators.upsert("alice", OperatorRole.ADMIN, true);
+    assertEquals(false, operators.mustChangePassword("alice").orElseThrow(), "默认(迁移常量)false");
+
+    operators.setMustChangePassword("alice", true); // 共享默认引导置位
+    assertTrue(operators.mustChangePassword("alice").orElse(false), "置位应可回读");
+
+    operators.setMustChangePassword("alice", false); // 人类选定口令清除
+    assertFalse(operators.mustChangePassword("alice").orElse(true), "清除应可回读");
+  }
 }

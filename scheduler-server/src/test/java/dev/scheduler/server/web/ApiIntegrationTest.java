@@ -46,6 +46,7 @@ import org.springframework.context.annotation.Primary;
 import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
+import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.boot.test.autoconfigure.web.servlet.MockMvcBuilderCustomizer;
@@ -2070,6 +2071,105 @@ class ApiIntegrationTest {
     mvc.perform(post("/api/v1/tasks").cookie(session(ALICE_TOKEN))
             .contentType(MediaType.APPLICATION_JSON).content(body))
         .andExpect(status().isUnauthorized());
+  }
+
+  // ---- 自助改密 + 首登强制改密(必须改密标) ----
+
+  /** app_operator 不在 resetDb truncate 之列(passwd/flag 跨用例保留),故每用例先用 jdbc 直接钉死要断言的口令/标。 */
+  private void pinOperatorPassword(String name, String raw, boolean mustChange) {
+    jdbc.update("UPDATE app_operator SET password_hash=?, must_change_password=? WHERE name=?",
+        new BCryptPasswordEncoder().encode(raw), mustChange, name);
+  }
+
+  /** login 与 me 响应均带 mustChangePassword:引导置位(true:共享默认口令,须首登改密)可读到。 */
+  @Test
+  void loginAndMe_echoMustChangePasswordFlag() throws Exception {
+    pinOperatorPassword("alice", "boot-pass", true); // 镜像 bootstrap 后状态
+    mvc.perform(post("/api/v1/auth/login").contentType(MediaType.APPLICATION_JSON)
+            .content("{\"name\":\"alice\",\"password\":\"boot-pass\"}"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.mustChangePassword").value(true));
+    mvc.perform(get("/api/v1/auth/me").cookie(session(ALICE_TOKEN)))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.mustChangePassword").value(true));
+  }
+
+  /** 自助改密全生命周期:正确当前密 → 200 + 无缝新 Set-Cookie + 清 must_change + 撤旧会话(alice 原 cookie → 401)
+   *  + 新会话可解析(mustChangePassword=false);新密可登录、旧密失效(该失败登录置于末尾以免触发退避影响成功断言)。 */
+  @Test
+  void selfChangePassword_fullLifecycle_newSessionOldRevokedFlagCleared() throws Exception {
+    pinOperatorPassword("alice", "old-pass", true);
+    MvcResult r = mvc.perform(post("/api/v1/auth/change-password").cookie(session(ALICE_TOKEN))
+            .contentType(MediaType.APPLICATION_JSON)
+            .content("{\"currentPassword\":\"old-pass\",\"newPassword\":\"brand-new-1\"}"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.operator.name").value("alice"))
+        .andExpect(jsonPath("$.expiresAt").isNotEmpty())
+        .andReturn();
+    String newToken = rotationToken(r); // 无缝续期:响应回写新会话 Set-Cookie,前端无需重登
+
+    // 旧会话被撤销 → alice 原 cookie 不再可解析
+    assertNull(authService.resolve(ALICE_TOKEN), "自助改密应撤销该操作者全部旧会话");
+    mvc.perform(get("/api/v1/auth/me").cookie(session(ALICE_TOKEN)))
+        .andExpect(status().isUnauthorized());
+    // 新会话可解析且须改密标已清
+    assertNotNull(authService.resolve(newToken));
+    mvc.perform(get("/api/v1/auth/me").cookie(session(newToken)))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.mustChangePassword").value(false));
+    // 口令已更替:新密可登录(成功后清零退避),旧密失效(置于末尾避免退避影响)
+    mvc.perform(post("/api/v1/auth/login").contentType(MediaType.APPLICATION_JSON)
+            .content("{\"name\":\"alice\",\"password\":\"brand-new-1\"}"))
+        .andExpect(status().isOk());
+    mvc.perform(post("/api/v1/auth/login").contentType(MediaType.APPLICATION_JSON)
+            .content("{\"name\":\"alice\",\"password\":\"old-pass\"}"))
+        .andExpect(status().isUnauthorized());
+  }
+
+  /** 当前密不符 → 401 + 记 access.denied,口令不变(原密仍可登录)。 */
+  @Test
+  void selfChangePassword_wrongCurrent_401_andAuditsDenied() throws Exception {
+    pinOperatorPassword("alice", "right-pass", false);
+    mvc.perform(post("/api/v1/auth/change-password").cookie(session(ALICE_TOKEN))
+            .contentType(MediaType.APPLICATION_JSON)
+            .content("{\"currentPassword\":\"wrong-pass\",\"newPassword\":\"brand-new-1\"}"))
+        .andExpect(status().isUnauthorized());
+    assertEquals(1L, jdbc.queryForObject(
+        "SELECT count(*) FROM app_audit WHERE action='access.denied' AND operator='alice'", Long.class));
+    // 口令未被改动(change-password 验密失败不累计 login 退避,故此处可直接登录验证)
+    mvc.perform(post("/api/v1/auth/login").contentType(MediaType.APPLICATION_JSON)
+            .content("{\"name\":\"alice\",\"password\":\"right-pass\"}"))
+        .andExpect(status().isOk());
+  }
+
+  /** 新密过短 → 400(at least 8);无会话 → 401。 */
+  @Test
+  void selfChangePassword_shortOrAnonymous_400_401() throws Exception {
+    pinOperatorPassword("alice", "right-pass", false);
+    mvc.perform(post("/api/v1/auth/change-password").cookie(session(ALICE_TOKEN))
+            .contentType(MediaType.APPLICATION_JSON)
+            .content("{\"currentPassword\":\"right-pass\",\"newPassword\":\"short\"}"))
+        .andExpect(status().isBadRequest())
+        .andExpect(jsonPath("$.message").value(
+            org.hamcrest.Matchers.containsString("at least 8")));
+    // 匿名(mallory 无会话)→ 401,即使携带口令
+    mvc.perform(post("/api/v1/auth/change-password").cookie(session(MALLORY_TOKEN))
+            .contentType(MediaType.APPLICATION_JSON)
+            .content("{\"currentPassword\":\"right-pass\",\"newPassword\":\"brand-new-1\"}"))
+        .andExpect(status().isUnauthorized());
+  }
+
+  /** ADMIN 设密(人类选定口令)→ 清 must_change 标(强制首登改密解除)。 */
+  @Test
+  void adminSetPassword_clearsMustChangeFlag() throws Exception {
+    jdbc.update("UPDATE app_operator SET must_change_password=true WHERE name='bob'");
+    mvc.perform(post("/api/v1/operators/bob/password").cookie(session(ALICE_TOKEN))
+            .contentType(MediaType.APPLICATION_JSON)
+            .content("{\"password\":\"new-secret-1\"}"))
+        .andExpect(status().isOk());
+    assertEquals(Boolean.FALSE, jdbc.queryForObject(
+        "SELECT must_change_password FROM app_operator WHERE name='bob'", Boolean.class),
+        "ADMIN 设密后应清除必须改密标");
   }
 
   /** 可复写的皮时钟:instant 由测试控制,getZone 固定 UTC。 */

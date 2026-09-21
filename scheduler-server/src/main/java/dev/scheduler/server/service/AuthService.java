@@ -55,14 +55,14 @@ public class AuthService {
   public Optional<LoginResult> login(String name, String password) {
     Optional<Instant> locked = auth.lockedUntil(name);
     if (locked.isPresent()) {
-      auditor.record(name, "access.denied", TargetType.NONE, 0L, deniedMeta("account locked (backoff)"));
+      auditor.record(name, "access.denied", TargetType.NONE, 0L, deniedMeta("/api/v1/auth/login", "account locked (backoff)"));
       return Optional.empty();
     }
     Optional<String> hash = operators.activePasswordHash(name);
     if (hash.isEmpty() || !enc.matches(password, hash.get())) {
       auth.recordFailure(name, BACKOFF_CAP);
       auditor.record(name, "access.denied", TargetType.NONE, 0L,
-          deniedMeta(hash.isEmpty() ? "no active password" : "bad credentials"));
+          deniedMeta("/api/v1/auth/login", hash.isEmpty() ? "no active password" : "bad credentials"));
       return Optional.empty();
     }
     auth.resetLockout(name);
@@ -107,6 +107,31 @@ public class AuthService {
     auth.revoke(rawToken);
   }
 
+  /**
+   * 自助改密(已登录上下文):复查当前口令(不匹配 → empty,记 access.denied)→ 长度校验(过短 → IAE)→
+   * 落新 BCrypt + 清除强制改密标 + 撤销该操作者全部旧会话 + 签发全新会话(created_at=now():新会话绝对寿命
+   * 自改密重计——每一次改密都要求持有口令,是更强的重认证,非纯失窃令牌可续杯)。返回新 LoginResult,
+   * 调用方须把新 token 写回 cookie 实现无缝续期。
+   */
+  public Optional<LoginResult> changePassword(String operator, String currentRaw, String newRaw) {
+    Optional<String> hash = operators.activePasswordHash(operator);
+    if (hash.isEmpty() || !enc.matches(currentRaw, hash.get())) {
+      auditor.record(operator, "access.denied", TargetType.NONE, 0L,
+          deniedMeta("/api/v1/auth/change-password", "bad current password on self password change"));
+      return Optional.empty();
+    }
+    if (newRaw == null || newRaw.length() < OperatorPasswordService.MIN_PASSWORD) {
+      throw new IllegalArgumentException("password must be at least " + OperatorPasswordService.MIN_PASSWORD + " chars");
+    }
+    operators.setPassword(operator, enc.encode(newRaw));
+    operators.setMustChangePassword(operator, false); // 人类选定口径 → 不再强制首登改密
+    auth.revokeAllForOperator(operator); // 旧/其他会话全作废
+    String token = randomToken();
+    auth.create(token, operator, TOKEN_TTL); // 新会话自改密重计绝对寿命
+    Instant expiresAt = auth.now().plus(TOKEN_TTL);
+    return Optional.of(new LoginResult(operator, token, expiresAt));
+  }
+
   /** 服务端强随机令牌:32 字节 → 64-char lowercase hex(与持久层测试种子同形)。 */
   private String randomToken() {
     byte[] b = new byte[32];
@@ -114,7 +139,7 @@ public class AuthService {
     return HexFormat.of().formatHex(b);
   }
 
-  private static Map<String, Object> deniedMeta(String reason) {
-    return Map.of("path", "/api/v1/auth/login", "method", "POST", "reason", reason, "required", "OPERATOR");
+  private static Map<String, Object> deniedMeta(String path, String reason) {
+    return Map.of("path", path, "method", "POST", "reason", reason, "required", "OPERATOR");
   }
 }

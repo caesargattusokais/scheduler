@@ -57,4 +57,17 @@ public class JdbcOperatorRepository implements OperatorRepository {
     return jdbc.query("SELECT name FROM app_operator WHERE password_hash IS NULL ORDER BY name",
         (rs, i) -> rs.getString("name"));
   }
+
+  @Override
+  public Optional<Boolean> mustChangePassword(String name) {
+    List<Boolean> flags = jdbc.query(
+        "SELECT must_change_password FROM app_operator WHERE name = ?",
+        (rs, i) -> rs.getBoolean(1), name);
+    return flags.isEmpty() ? Optional.empty() : Optional.of(flags.get(0));
+  }
+
+  @Override
+  public void setMustChangePassword(String name, boolean v) {
+    jdbc.update("UPDATE app_operator SET must_change_password = ? WHERE name = ?", v, name);
+  }
 }

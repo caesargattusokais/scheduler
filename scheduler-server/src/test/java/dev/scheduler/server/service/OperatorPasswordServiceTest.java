@@ -21,6 +21,9 @@ class OperatorPasswordServiceTest {
   private static final class FakeOperators implements OperatorRepository {
     final List<OperatorEntry> entries = new ArrayList<>();
     final List<String> hashed = new ArrayList<>();
+    final List<String> mustChangeSet = new ArrayList<>();
+    final List<String> mustChangeCleared = new ArrayList<>();
+    Boolean mustChange = false;
     List<String> passwordless = new ArrayList<>();
 
     @Override public Optional<OperatorRole> roleOf(String name) {
@@ -40,6 +43,13 @@ class OperatorPasswordServiceTest {
     @Override public Optional<String> activePasswordHash(String name) { return Optional.empty(); }
 
     @Override public void setPassword(String name, String bcryptHash) { hashed.add(name + "=" + bcryptHash); }
+
+    @Override public void setMustChangePassword(String name, boolean v) {
+      (v ? mustChangeSet : mustChangeCleared).add(name);
+      mustChange = v;
+    }
+
+    @Override public Optional<Boolean> mustChangePassword(String name) { return Optional.ofNullable(mustChange); }
 
     @Override public List<String> namesWithoutPassword() { return passwordless; }
   }
@@ -121,9 +131,23 @@ class OperatorPasswordServiceTest {
 
     assertEquals(1, ops.hashed.size());
     assertTrue(ops.hashed.get(0).startsWith("bob=$2"), "bootstrap 也应编码为 BCrypt,got: " + ops.hashed.get(0));
+    assertEquals(List.of("bob"), ops.mustChangeSet, "共享默认口令 bootstrap 应置 must_change_password=true");
     // 已有口令的操作者(alice 不在 passwordless)走 bootstrap 应 no-op
     svc.bootstrap("alice", "boot-pass");
     assertEquals(1, ops.hashed.size(), "已有口令的操作者 bootstrap 应跳过");
+  }
+
+  /** ADMIN 设密(人类选定口令)→ 清除必须改密标。 */
+  @Test
+  void setPassword_clearsMustChangeFlag() {
+    FakeOperators ops = new FakeOperators();
+    ops.upsert("alice", OperatorRole.ADMIN, true);
+    FakeAuth auth = new FakeAuth();
+    OperatorPasswordService svc = new OperatorPasswordService(ops, auth);
+
+    svc.setPassword("alice", "secret-pass");
+
+    assertEquals(List.of("alice"), ops.mustChangeCleared, "人类选定口令后应清除必须改密标");
   }
 
   @Test
