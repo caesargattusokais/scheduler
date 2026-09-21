@@ -1,9 +1,11 @@
 package dev.scheduler.server.web;
 
 import dev.scheduler.core.OperatorEntry;
+import dev.scheduler.core.TargetType;
 import dev.scheduler.persistence.OperatorRepository;
 import dev.scheduler.server.security.CurrentOperator;
 import dev.scheduler.server.service.AuthService;
+import dev.scheduler.server.service.AuditRecorder;
 import dev.scheduler.server.service.AuthService.LoginResult;
 import jakarta.servlet.http.Cookie;
 import jakarta.servlet.http.HttpServletRequest;
@@ -28,13 +30,16 @@ public class AuthController {
   private final AuthService auth;
   private final OperatorRepository operators;
   private final CurrentOperator current;
+  private final AuditRecorder auditor;
   private final boolean secureCookies;
 
   public AuthController(AuthService auth, OperatorRepository operators, CurrentOperator current,
+                        AuditRecorder auditor,
                         @Value("${scheduler.auth.secure-cookies:false}") boolean secureCookies) {
     this.auth = auth;
     this.operators = operators;
     this.current = current;
+    this.auditor = auditor;
     this.secureCookies = secureCookies;
   }
 
@@ -97,14 +102,18 @@ public class AuthController {
     return ResponseEntity.ok(body2);
   }
 
-  /** POST /logout → 撤销当前 cookie 会话并清 cookie(幂等;无会话也 200)。 */
+  /** POST /logout → 撤销当前 cookie 会话并清 cookie(幂等;无会话也 200)。仅当确有已解析会话时记 auth.logout。 */
   @PostMapping("/logout")
   public ResponseEntity<?> logout(HttpServletRequest req, HttpServletResponse res) {
+    String who = current.get(); // 拦截器已 resolve cookie → CurrentOperator;无有效会话 → null(匿名,登出无意义)
     Cookie c = cookie(req, "session");
     if (c == null || c.getValue() == null || c.getValue().isBlank()) {
       return ResponseEntity.ok(Map.of());
     }
     auth.logout(c.getValue());
+    if (who != null) {
+      auditor.record(who, "auth.logout", TargetType.NONE, 0L, Map.of());
+    }
     // 清除 cookie 须按 secure 分支对齐登录 cookie:Secure 属性开启时浏览器要求删除 cookie 也为 Secure 才覆盖。
     res.addHeader("Set-Cookie", "session=; Path=/api; Max-Age=0; HttpOnly; SameSite=Strict"
         + (secureCookies ? "; Secure" : ""));

@@ -2103,6 +2103,63 @@ class ApiIntegrationTest {
         .andExpect(status().isUnauthorized());
   }
 
+  /**
+   * 登录/认证全量审计:成功登录(auth.login,+meta.expiresAt)、自助改密(auth.change_password)、登出(auth.logout)
+   * 均入 app_audit;失败侧维持 access.denied(坏凭据)。各事件用不同操作者承载,避免改密撤会话干扰登出/登录;
+   * 全部行走 append-only 取证链 → integrity 仍 verified,且可按动作过滤。
+   */
+  @Test
+  void authFullAudit_loginChangeLogoutDenied_allChainedAndFilterable() throws Exception {
+    // app_operator.password_hash 跨用例保留(不被 resetDb 重置),故先钉死 alice/bob 口令为已知值(镜像 loginAndMe 惯例)。
+    pinOperatorPassword("alice", "boot-pass", false);
+    // 1. 成功登录 → auth.login(operator=提交名 + meta 带 expiresAt)
+    mvc.perform(post("/api/v1/auth/login").contentType(MediaType.APPLICATION_JSON)
+            .content("{\"name\":\"alice\",\"password\":\"boot-pass\"}"))
+        .andExpect(status().isOk());
+    mvc.perform(get("/api/v1/audits").param("action", "auth.login"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.total").value(1))
+        .andExpect(jsonPath("$.items[0].operator").value("alice"))
+        .andExpect(jsonPath("$.items[0].targetType").value("none"));
+    assertEquals(1L, jdbc.queryForObject(
+        "SELECT count(*) FROM app_audit WHERE action='auth.login' AND operator='alice' AND meta ? 'expiresAt'",
+        Long.class), "auth.login 的 meta 应带 expiresAt 观察窗口");
+
+    // 2. 自助改密(bob 会话)→ auth.change_password(operator=bob)
+    pinOperatorPassword("bob", "old-pass", true);
+    mvc.perform(post("/api/v1/auth/change-password").cookie(session(BOB_TOKEN))
+            .contentType(MediaType.APPLICATION_JSON)
+            .content("{\"currentPassword\":\"old-pass\",\"newPassword\":\"brand-new-1\"}"))
+        .andExpect(status().isOk());
+    mvc.perform(get("/api/v1/audits").param("action", "auth.change_password"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.total").value(1))
+        .andExpect(jsonPath("$.items[0].operator").value("bob"));
+
+    // 3. 登出(carol 会话)→ auth.logout(operator=carol)
+    mvc.perform(post("/api/v1/auth/logout").cookie(session(CAROL_TOKEN)))
+        .andExpect(status().isOk());
+    mvc.perform(get("/api/v1/audits").param("action", "auth.logout"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.total").value(1))
+        .andExpect(jsonPath("$.items[0].operator").value("carol"));
+
+    // 4. 失败侧维持 access.denied(坏凭据登录)
+    mvc.perform(post("/api/v1/auth/login").contentType(MediaType.APPLICATION_JSON)
+            .content("{\"name\":\"alice\",\"password\":\"wrong-pass\"}"))
+        .andExpect(status().isUnauthorized());
+    mvc.perform(get("/api/v1/audits").param("action", "access.denied"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.total").value(1))
+        .andExpect(jsonPath("$.items[0].operator").value("alice"));
+
+    // 5. 上述行均经 AuditRecorder 落 append-only 取证链 → 完整性 verified
+    mvc.perform(get("/api/v1/audits/integrity"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.verified").value(true))
+        .andExpect(jsonPath("$.totalRecords").value(4));
+  }
+
   // ---- 自助改密 + 首登强制改密(必须改密标) ----
 
   /** app_operator 不在 resetDb truncate 之列(passwd/flag 跨用例保留),故每用例先用 jdbc 直接钉死要断言的口令/标。 */

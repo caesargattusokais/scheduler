@@ -79,6 +79,7 @@ class AuthServiceTest {
     assertEquals(64, r.get().token().length(), "令牌为 64-char hex(服务端生成)");
     assertEquals(auth.now.plus(AuthService.TOKEN_TTL), r.get().expiresAt(), "expiresAt 取 DB 时钟");
     assertTrue(auditor.denied.isEmpty(), "成功不记 denied");
+    assertEquals(List.of("auth.login"), auditor.audited, "成功登录记 auth.login 审计");
   }
 
   /** 缺哈希(未登记/停用)→ 与验密失败同路径:denied + 退避。 */
@@ -219,6 +220,7 @@ class AuthServiceTest {
     assertEquals(64, r.get().token().length(), "新令牌为 64-char hex");
     assertEquals(auth.now.plus(AuthService.TOKEN_TTL), r.get().expiresAt(), "新会话到期=now+8h");
     assertTrue(auditor.denied.isEmpty(), "成功不记 denied");
+    assertTrue(auditor.audited.contains("auth.change_password"), "自助改密记 auth.change_password 审计");
   }
 
   // ---- fakes ----
@@ -282,8 +284,9 @@ class AuthServiceTest {
     @Override public List<String> namesWithoutPassword() { return List.of(); }
   }
 
-  /** 捕获 access.denied 的假审计(覆写 5-arg record,不经序列化)。 */
+  /** 捕获全部动作名的假审计(覆写 5-arg record,不经序列化):auth.* 成功侧 + access.denied 失败侧。 */
   private static final class FakeAuditor extends AuditRecorder {
+    final List<String> audited = new ArrayList<>();
     final List<String> denied = new ArrayList<>();
 
     FakeAuditor() { super((AuditRepository) null, new ObjectMapper()); }
@@ -291,6 +294,7 @@ class AuthServiceTest {
     @Override
     public void record(String operator, String action, TargetType target, long targetId,
                        Map<String, Object> meta) {
+      audited.add(action);
       if ("access.denied".equals(action)) denied.add(operator);
     }
   }

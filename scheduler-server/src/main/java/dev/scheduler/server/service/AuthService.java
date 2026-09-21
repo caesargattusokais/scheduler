@@ -69,6 +69,7 @@ public class AuthService {
     String token = randomToken();
     auth.create(token, name, TOKEN_TTL);
     Instant expiresAt = auth.now().plus(TOKEN_TTL);
+    auditor.record(name, "auth.login", TargetType.NONE, 0L, Map.of("expiresAt", expiresAt.toString()));
     return Optional.of(new LoginResult(name, token, expiresAt));
   }
 
@@ -129,6 +130,7 @@ public class AuthService {
     String token = randomToken();
     auth.create(token, operator, TOKEN_TTL); // 新会话自改密重计绝对寿命
     Instant expiresAt = auth.now().plus(TOKEN_TTL);
+    auditor.record(operator, "auth.change_password", TargetType.NONE, 0L, Map.of());
     return Optional.of(new LoginResult(operator, token, expiresAt));
   }
 
