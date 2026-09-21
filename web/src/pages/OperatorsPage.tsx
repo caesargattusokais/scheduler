@@ -1,7 +1,7 @@
 // web/src/pages/OperatorsPage.tsx
-import { useEffect, useState } from 'react';
-import { deactivateOperator, listOperators, setPassword, upsertOperator } from '../api/client';
-import { OperatorEntry } from '../api/types';
+import { Fragment, useEffect, useState } from 'react';
+import { deactivateOperator, listOperators, listSessions, revokeSessions, setPassword, upsertOperator } from '../api/client';
+import { ActiveSession, OperatorEntry } from '../api/types';
 
 const ROLE_OPTS = ['OPERATOR', 'ADMIN'] as const;
 
@@ -12,6 +12,33 @@ export default function OperatorsPage() {
   const [name, setName] = useState('');
   const [role, setRole] = useState<'OPERATOR' | 'ADMIN'>('OPERATOR');
   const [active, setActive] = useState(true);
+  // 会话管理:仅展开一个操作者的活动会话(会话视图),加载中标记,便于强制登出。
+  const [sessionsFor, setSessionsFor] = useState<string | null>(null);
+  const [sessions, setSessions] = useState<ActiveSession[]>([]);
+  const [sessLoading, setSessLoading] = useState(false);
+
+  /** 展开/收起指定操作者的活动会话视图。 */
+  const toggleSessions = async (n: string) => {
+    if (sessionsFor === n) { setSessionsFor(null); setSessions([]); return; }
+    setSessionsFor(n); setSessLoading(true); setErr(null);
+    try {
+      setSessions(await listSessions(n));
+    } catch (e) {
+      setSessions([]); setErr(String(e));
+    } finally {
+      setSessLoading(false);
+    }
+  };
+
+  /** 强制登出:撤销该操作者全部活动会话(ADMIN;疑似受攻陷时当下中止其会话)。 */
+  const revoke = async (n: string) => {
+    if (!window.confirm(`强制登出操作者「${n}」的所有活动会话?(其被攻陷会话将立即失效)`)) return;
+    try {
+      const r = await revokeSessions(n);
+      setSessions(await listSessions(n)); // 刷新视图(撤销后应为空或减少)
+      setNotice(`已强制登出「${n}」的 ${r.revoked} 个活动会话`); setErr(null);
+    } catch (e) { setErr(String(e)); }
+  };
 
   const load = async () => {
     try { setRows(await listOperators()); setErr(null); }
@@ -92,21 +119,49 @@ export default function OperatorsPage() {
             </thead>
             <tbody>
               {rows.map((r) => (
-                <tr key={r.name}>
-                  <td className="font-mono text-sm">{r.name}</td>
-                  <td><span className={badge(r.role)}>{r.role}</span></td>
-                  <td>{r.active
-                    ? <span className="rounded bg-emerald-100 px-1.5 py-0.5 text-xs font-medium text-emerald-700">启用</span>
-                    : <span className="rounded bg-slate-200 px-1.5 py-0.5 text-xs font-medium text-slate-600">已停用</span>}</td>
-                  <td className="text-right">
-                    <button className="btn btn-secondary" title="设置该操作者的登录密码(ADMIN;成功后其会话被撤销,需重新登录)"
-                      onClick={() => setPwd(r.name)}>设密码</button>
-                    {r.active && (
-                      <button className="btn btn-secondary" title="停用后该操作者不再能执行写操作"
-                        onClick={() => deactivate(r.name)}>停用</button>
-                    )}
-                  </td>
-                </tr>
+                <Fragment key={r.name}>
+                  <tr>
+                    <td className="font-mono text-sm">{r.name}</td>
+                    <td><span className={badge(r.role)}>{r.role}</span></td>
+                    <td>{r.active
+                      ? <span className="rounded bg-emerald-100 px-1.5 py-0.5 text-xs font-medium text-emerald-700">启用</span>
+                      : <span className="rounded bg-slate-200 px-1.5 py-0.5 text-xs font-medium text-slate-600">已停用</span>}</td>
+                    <td className="text-right">
+                      <button className="btn btn-secondary" title="查看并管理该操作者的活动会话(ADMIN;可强制登出)"
+                        onClick={() => toggleSessions(r.name)}>{sessionsFor === r.name ? '收起' : '会话'}</button>
+                      <button className="btn btn-secondary" title="设置该操作者的登录密码(ADMIN;成功后其会话被撤销,需重新登录)"
+                        onClick={() => setPwd(r.name)}>设密码</button>
+                      {r.active && (
+                        <button className="btn btn-secondary" title="停用后该操作者不再能执行写操作"
+                          onClick={() => deactivate(r.name)}>停用</button>
+                      )}
+                    </td>
+                  </tr>
+                  {sessionsFor === r.name && (
+                    <tr>
+                      <td colSpan={4} className="bg-slate-50">
+                        <div className="flex items-center justify-between gap-4 px-4 py-3">
+                          <div className="flex-1 text-sm">
+                            <span className="label mr-3">活动会话 {sessLoading ? '(加载中…)' : `(${sessions.length})`}</span>
+                            {!sessLoading && sessions.length === 0 && (
+                              <span className="text-slate-400">无活动会话</span>
+                            )}
+                            {!sessLoading && sessions.map((s) => (
+                              <span key={s.tokenPrefix} className="mr-3 inline-block rounded bg-white px-2 py-1 font-mono text-xs text-slate-600"
+                                title={`token 前缀 ${s.tokenPrefix}`}>
+                                {new Date(s.createdAt).toLocaleString()} 建立 · {new Date(s.expiresAt).toLocaleString()} 到期
+                              </span>
+                            ))}
+                          </div>
+                          {!sessLoading && sessions.length > 0 && (
+                            <button className="btn btn-secondary" title="立即撤销该操作者全部活动会话"
+                              onClick={() => revoke(r.name)}>强制登出</button>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+                </Fragment>
               ))}
             </tbody>
           </table>

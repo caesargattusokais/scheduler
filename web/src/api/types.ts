@@ -163,5 +163,13 @@ export interface UpsertOperatorRequest {
   role: 'OPERATOR' | 'ADMIN';
   active: boolean;
 }
+/** 操作者活动会话行(ADMIN 会话管理):tokenPrefix 为 token_hash 前 10 位展示键(非秘密),createdAt/expiresAt 由 DB 时钟。 */
+export interface ActiveSession {
+  tokenPrefix: string;
+  createdAt: string;
+  expiresAt: string;
+}
+/** POST /api/v1/operators/{name}/sessions/revoke 响应:本次撤销的活动会话数。 */
+export interface SessionsRevokeResult { revoked: number; }
 /** POST /api/v1/audits/archive 响应:{archived: 本次归档行数, olderThan: 截止时刻 ISO}。 */
 export interface AuditArchiveResult { archived: number; olderThan: string; }

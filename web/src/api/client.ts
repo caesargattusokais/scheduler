@@ -1,4 +1,5 @@
 import type {
+  ActiveSession,
   AuditArchiveResult,
   AuditEntry,
   AuditIntegrity,
@@ -17,6 +18,7 @@ import type {
   Page,
   ParsedMetric,
   RunDetail,
+  SessionsRevokeResult,
   Shard,
   Task,
   UpdateTaskRequest,
@@ -231,3 +233,9 @@ export const upsertOperator = (b: UpsertOperatorRequest) =>
   req<OperatorEntry>('/api/v1/operators', { method: 'POST', body: JSON.stringify(b) });
 export const deactivateOperator = (name: string) =>
   req<void>(`/api/v1/operators/${encodeURIComponent(name)}/deactivate`, { method: 'POST' });
+/** 列操作者活动会话(ADMIN):未撤销且未过期;每条含截断哈希展示键 + 建立/到期时刻。 */
+export const listSessions = (name: string) =>
+  req<ActiveSession[]>(`/api/v1/operators/${encodeURIComponent(name)}/sessions`);
+/** 强制登出(ADMIN):撤销该操作者全部活动会话(疑似受攻陷时当下中止),返回本次撤销数并留审计。 */
+export const revokeSessions = (name: string) =>
+  req<SessionsRevokeResult>(`/api/v1/operators/${encodeURIComponent(name)}/sessions/revoke`, { method: 'POST' });
