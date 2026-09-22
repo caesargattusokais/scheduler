@@ -127,6 +127,13 @@ class DagEngineTest {
         shardCount, 300, 0, 1000, null, 5, true, false)).id();
   }
 
+  /** 建一个可配置成功策略的节点任务(3c):shardCount 分片 + success policy,供 PARTIAL_SUCCESS→下游放行测试。 */
+  private long newPolicyTask(int shardCount, String policyType, Integer policyValue) {
+    return tasks.create(new Task(null, "t", "cron", "demo", null,
+        shardCount, 300, 0, 1000, null, 5, true, false, null, null, null,
+        "UTC", null, List.of(), policyType, policyValue)).id();
+  }
+
   private DagEngine engine(AdvisoryLockLeaderElection leader) {
     return new DagEngine(dags, tasks, shards, leader, CLOCK, 200);
   }
@@ -147,6 +154,14 @@ class DagEngineTest {
             + " WHERE execution_id=(SELECT execution_id FROM dag_run_node"
             + " WHERE dag_run_id=? AND node_key=?)",
         status, runId, nodeKey);
+  }
+
+  /** 把某节点执行的第 index 个 shard(0..shardCount-1)置为终态,供分片级终态混排(3c:同节点不同 shard 各异终态)。 */
+  private void setShardStatusAt(long runId, String nodeKey, int index, String status) {
+    jdbc.update("UPDATE execution_shard SET status=?, finished_at=now()"
+            + " WHERE execution_id=(SELECT execution_id FROM dag_run_node"
+            + " WHERE dag_run_id=? AND node_key=?) AND shard_index=?",
+        status, runId, nodeKey, index);
   }
 
   private long runOutcomeCount(long runId, String status) {
@@ -454,6 +469,37 @@ class DagEngineTest {
       assertEquals(DagRunNodeStatus.FAILED, node(run.id(), "A").status(),
           "maxRetries=0 → 失败直接终态失败,无重试");
       assertEquals(DagRunStatus.FAILED, dags.findRun(run.id()).orElseThrow().status());
+    } finally { leader.close(); }
+  }
+
+  /** 3c:节点任务 MIN_SUCCESS=1、2 分片 1 成 1 败 → 节点聚合 PARTIAL_SUCCESS;按「达标=成功」标节点 SUCCESS
+   *  (不触发重试),all_success 下游 B 照常 spawn;全节点终态后 run SUCCESS。 */
+  @Test void nodePartialSuccess_passesDownstreamAllSuccess() {
+    long aTask = newPolicyTask(2, "MIN_SUCCESS", 1);
+    long bTask = newTask(1);
+    Dag dag = newDag(null, Map.of("A", aTask, "B", bTask), edges(new String[]{"A", "B"}));
+    var leader = new AdvisoryLockLeaderElection(jdbc);
+    try {
+      var engine = engine(leader);
+      DagRun run = dags.createManualRun(dag.id());
+      engine.scanOnce(); // S1:A 根节点 spawn RUNNING;B PENDING
+      assertEquals(DagRunNodeStatus.RUNNING, node(run.id(), "A").status());
+      assertEquals(DagRunNodeStatus.PENDING, node(run.id(), "B").status());
+
+      setShardStatusAt(run.id(), "A", 0, "SUCCESS");
+      setShardStatusAt(run.id(), "A", 1, "FAILED");
+      engine.scanOnce(); // S2:仅 A shards 全终态;MIN_SUCCESS=1 达标 → A 节点 SUCCESS;B 跨周期 PENDING
+      assertEquals(DagRunNodeStatus.SUCCESS, node(run.id(), "A").status(),
+          "PARTIAL_SUCCESS(达标但部分失败)聚合为节点 SUCCESS,不触发重试");
+      assertEquals(DagRunNodeStatus.PENDING, node(run.id(), "B").status());
+
+      engine.scanOnce(); // S3:all_success 见上游 SUCCESS → B spawn(即 PARTIAL_SUCCESS 放行下游)
+      assertEquals(DagRunNodeStatus.RUNNING, node(run.id(), "B").status());
+
+      setShardStatus(run.id(), "B", "SUCCESS");
+      engine.scanOnce(); // S4:B SUCCESS;全节点终态(A 计 SUCCESS)→ run SUCCESS
+      assertEquals(DagRunStatus.SUCCESS, dags.findRun(run.id()).orElseThrow().status(),
+          "PARTIAL_SUCCESS 上游被计为节点成功,下游完成 → run SUCCESS");
     } finally { leader.close(); }
   }
 

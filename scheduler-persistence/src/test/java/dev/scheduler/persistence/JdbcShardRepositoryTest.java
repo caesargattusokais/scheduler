@@ -600,7 +600,7 @@ class JdbcShardRepositoryTest extends AbstractPostgresTest {
     }
 
     // 全部终态已就位、父仍 DUE → 列在待汇聚
-    assertTrue(shardRepo.parentsNeedingAggregation().contains(parentId),
+    assertTrue(shardRepo.parentsNeedingAggregation().stream().anyMatch(p -> p.executionId() == parentId),
         "parent 仍 DUE 且 ≥1 终态 shard → 待汇聚");
     assertEquals(ExecutionStatus.DUE, ExecutionStatus.valueOf(parentStatus(parentId)));
 
@@ -608,7 +608,7 @@ class JdbcShardRepositoryTest extends AbstractPostgresTest {
     assertEquals(ExecutionStatus.SUCCESS, ExecutionStatus.valueOf(parentStatus(parentId)));
     assertNotNull(shardRepo.findParent(parentId).get().finishedAt(), "父终态必须写 finished_at");
     assertEquals(1, parentOutcomes(parentId, "SUCCESS"), "恰一条父 SUCCESS outcome");
-    assertFalse(shardRepo.parentsNeedingAggregation().contains(parentId),
+    assertFalse(shardRepo.parentsNeedingAggregation().stream().anyMatch(p -> p.executionId() == parentId),
         "父已终态 → 不再待汇聚");
     assertTrue(shardRepo.parentsNeedingAggregation().isEmpty());
   }
@@ -624,7 +624,7 @@ class JdbcShardRepositoryTest extends AbstractPostgresTest {
       shardRepo.markStatus(sid, ExecutionStatus.SUCCESS, "w"+i, "done");
     }
 
-    assertTrue(shardRepo.parentsNeedingAggregation().contains(parentId));
+    assertTrue(shardRepo.parentsNeedingAggregation().stream().anyMatch(p -> p.executionId() == parentId));
     assertTrue(shardRepo.finalizeParent(parentId, ExecutionStatus.FAILED, "boom"));
     assertEquals(ExecutionStatus.FAILED, ExecutionStatus.valueOf(parentStatus(parentId)));
     assertEquals(1, parentOutcomes(parentId, "FAILED"));

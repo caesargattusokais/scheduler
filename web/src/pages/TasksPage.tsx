@@ -13,6 +13,7 @@ const EMPTY: CreateTaskRequest = {
   name: '', handlerRef: '', cron: '0 */5 * * * *', shardCount: 1,
   timeoutSeconds: 300, maxRetries: 0, backoffMs: 1000, maxActiveConcurrent: 8,
   timezone: 'UTC',
+  successPolicyType: undefined, successPolicyValue: undefined,
 };
 
 type TrigType = 'cron' | 'interval' | 'event';
@@ -66,7 +67,8 @@ export default function TasksPage() {
     setForm({ name: t.name, handlerRef: t.handlerRef, cron: t.cron, shardCount: t.shardCount,
       timeoutSeconds: t.timeoutSeconds, maxRetries: t.maxRetries, backoffMs: t.backoffMs,
       retryableFailurePattern: t.retryableFailurePattern ?? undefined, maxActiveConcurrent: t.maxActiveConcurrent,
-      timezone: t.timezone, intervalSeconds: t.intervalSeconds, eventRoutes: t.eventRoutes ?? [] });
+      timezone: t.timezone, intervalSeconds: t.intervalSeconds, eventRoutes: t.eventRoutes ?? [],
+      successPolicyType: t.successPolicyType ?? undefined, successPolicyValue: t.successPolicyValue ?? undefined });
   }
   async function act(fn: () => Promise<unknown>) {
     try { await fn(); setErr(null); refresh(); } catch (x) { setErr(String(x)); }
@@ -144,6 +146,36 @@ export default function TasksPage() {
           {field('maxRetries', '重试次数', 'number')}
           {field('backoffMs', '退避 (ms)', 'number')}
           {field('maxActiveConcurrent', '最大并发', 'number')}
+        </div>
+        {/* 3c 部分成功策略:类型选择后出现阈值输入;空类型(null)=全部成功才算成功(旧全成/全败语义)。
+          RATIO_PERCENT 值∈[1,99]、MIN_SUCCESS≥1、MAX_FAILURES≥0,与后端 checkDefinition 白名单一致。 */}
+        <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-4">
+          <label className="field">
+            <span className="label">成功策略</span>
+            <select className="input" value={form.successPolicyType ?? ''}
+              onChange={(e) => setForm({
+                ...form, successPolicyType: e.target.value || undefined,
+                // 切换类型时重置阈值到该类型合法起点(避免留历史越界值被后端 400)。
+                successPolicyValue: e.target.value === 'MAX_FAILURES' ? 0
+                  : e.target.value === 'MIN_SUCCESS' ? 1
+                  : e.target.value === 'RATIO_PERCENT' ? 100 : undefined,
+              })}>
+              <option value="">全成/全败</option>
+              <option value="RATIO_PERCENT">成功占比 %</option>
+              <option value="MIN_SUCCESS">至少成功(分片)</option>
+              <option value="MAX_FAILURES">最多可失败(分片)</option>
+            </select>
+          </label>
+          {form.successPolicyType && (
+            <label className="field">
+              <span className="label">阈值</span>
+              <input className="input" type="number"
+                min={form.successPolicyType === 'MAX_FAILURES' ? 0 : 1}
+                max={form.successPolicyType === 'RATIO_PERCENT' ? 99 : undefined}
+                value={form.successPolicyValue ?? ''}
+                onChange={(e) => setForm({ ...form, successPolicyValue: e.target.value === '' ? undefined : +e.target.value })} />
+            </label>
+          )}
         </div>
         {/* 3a/3b 触发时钟:任务须恰具其一——cron、间隔秒、或事件路由(非空);时区仅解释 cron(默认 UTC) */}
           <div className="mt-3">

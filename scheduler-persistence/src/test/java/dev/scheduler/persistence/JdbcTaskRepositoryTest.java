@@ -152,7 +152,7 @@ class JdbcTaskRepositoryTest extends AbstractPostgresTest {
     var repo = new JdbcTaskRepository(jdbc);
     Task evt = repo.create(new Task(null, "evt-task", "event", "demo", null,
         1, 300, 0, 1000, null, 8, true, false, null, null, null, "UTC", null,
-        List.of("order.created", "order.updated")));
+        List.of("order.created", "order.updated"), "NONE", null));
     Task cur = repo.findById(evt.id()).orElseThrow();
     assertEquals(List.of("order.created", "order.updated"), cur.eventRoutes(), "event_routes 落库回读");
     assertEquals("event", cur.kind(), "kind 落库回读");
@@ -167,12 +167,12 @@ class JdbcTaskRepositoryTest extends AbstractPostgresTest {
   @Test void findEnabledByRoute_excludesPausedAnd_updateOverwritesRoutes() {
     var repo = new JdbcTaskRepository(jdbc);
     Task t = repo.create(new Task(null, "evt-t", "event", "demo", null,
-        1, 300, 0, 1000, null, 8, true, false, null, null, null, "UTC", null, List.of("r")));
+        1, 300, 0, 1000, null, 8, true, false, null, null, null, "UTC", null, List.of("r"), "NONE", null));
     repo.setPaused(t.id(), true);
     assertTrue(repo.findEnabledByRoute("r").isEmpty(), "暂停的事件任务不匹配路由");
 
     Task updated = new Task(t.id(), "evt-t", "event", "demo", null,
-        1, 300, 0, 1000, null, 8, true, false, null, null, null, "UTC", null, List.of("new.r"));
+        1, 300, 0, 1000, null, 8, true, false, null, null, null, "UTC", null, List.of("new.r"), "NONE", null);
     assertTrue(repo.update(updated.id(), updated));
     assertEquals(List.of("new.r"), repo.findById(t.id()).orElseThrow().eventRoutes(), "update 覆写 event_routes");
     assertTrue(repo.findEnabledByRoute("r").isEmpty());

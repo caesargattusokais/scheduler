@@ -92,9 +92,12 @@ public interface ShardRepository {
 
   // ---- Task 3:父汇聚 + FAIL_FAST + 父取消 + DLQ/requeue ----
 
-  /** 待汇聚的父 execution id 列表:父仍 DUE(未终态)且 ≥1 个 shard 已终态(SUCCESS/FAILED/CANCELED)。
-   *  由对账器扫描,依兄弟终态结果决定父级终态。 */
-  List<Long> parentsNeedingAggregation();
+  /** 待汇聚的父 execution id + 其 taskId:父仍 DUE(未终态)且 ≥1 个 shard 已终态(SUCCESS/FAILED/CANCELED)。
+   *  由对账器扫描,依兄弟终态结果 + 任务成功策略(经 taskId 取 Task)决定父级终态。 */
+  List<ParentAgg> parentsNeedingAggregation();
+
+  /** 一个待汇聚的父及其所属任务:tid 供对账器取任务成功策略(部分成功语义的判定输入)。 */
+  record ParentAgg(long executionId, long taskId) {}
 
   /** 父级终态汇聚:父 CAS on status='DUE'(父只 DUE→终态,从不存 RUNNING),成功后同事务落父 execution_outcome。
    *  0 行 CAS=父已被他方终态/已推进 → 幂等返回 false,不落误导性 outcome。 */

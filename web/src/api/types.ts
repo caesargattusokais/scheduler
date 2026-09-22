@@ -16,6 +16,9 @@ export interface Task {
   intervalSeconds: number | null;
   /** 事件触发时钟:非空数组 = 订阅这些路由 key,入站事件触发每事件一轮;与 cron/intervalSeconds 三选一互斥。 */
   eventRoutes: string[];
+  /** 3c 部分成功策略:null/NONE=全成或全败;RATIO_PERCENT=成功占比%达标;MIN_SUCCESS=成功分片数达标;MAX_FAILURES=容忍失败分片数。 */
+  successPolicyType: string | null;
+  successPolicyValue: number | null;
 }
 
 export interface Execution {
@@ -86,6 +89,9 @@ export interface CreateTaskRequest {
   intervalSeconds?: number | null;
   /** 事件触发时钟:非空数组 = 事件触发(与 cron/intervalSeconds 三选一互斥)。 */
   eventRoutes?: string[];
+  /** 3c 部分成功策略(缺省 NONE/null=全成或全败)。type 白名单四选一;RATIO_PERCENT 值∈[1,99]、MIN_SUCCESS≥1、MAX_FAILURES≥0。 */
+  successPolicyType?: string;
+  successPolicyValue?: number;
 }
 
 export interface UpdateTaskRequest extends CreateTaskRequest {

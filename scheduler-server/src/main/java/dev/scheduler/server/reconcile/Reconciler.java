@@ -2,6 +2,7 @@ package dev.scheduler.server.reconcile;
 
 import dev.scheduler.core.ExecutionStatus;
 import dev.scheduler.core.Shard;
+import dev.scheduler.core.SuccessPolicy;
 import dev.scheduler.core.Task;
 import dev.scheduler.persistence.ShardRepository;
 import dev.scheduler.persistence.ShardRepository.ExpiredShard;
@@ -78,19 +79,28 @@ public class Reconciler {
     return reclaimed;
   }
 
-  /** 父级汇聚:对每个有待汇聚的父,全部兄弟终态后才推导父终态并落库。finalizeParent CAS-0 → 已推进,幂等跳过。 */
+  /** 父级汇聚:对每个有待汇聚的父,全部兄弟终态后才推导父终态并落库。finalizeParent CAS-0 → 已推进,幂等跳过。
+   *  3c 部分成功:父终态由任务成功策略(经 ParentAgg.taskId 取 Task)推导——失败片可被容忍(达标)→ PARTIAL_SUCCESS。 */
   private void aggregateParents() {
-    for (long pid : shards.parentsNeedingAggregation()) {
+    for (var agg : shards.parentsNeedingAggregation()) {
+      long pid = agg.executionId();
       List<Shard> parent = shards.findShards(pid);
       if (parent.isEmpty() || !parent.stream().allMatch(s -> s.status().isTerminal())) {
         continue; // 仍有兄弟未终态 → 父保持 DUE,待下趟。
       }
-      boolean anyFailed = parent.stream().anyMatch(s -> s.status() == ExecutionStatus.FAILED);
-      ExecutionStatus parentTerminal = anyFailed ? ExecutionStatus.FAILED
-          : parent.stream().anyMatch(s -> s.status() == ExecutionStatus.CANCELED)
-              ? ExecutionStatus.CANCELED : ExecutionStatus.SUCCESS;
-      String detail = anyFailed ? "shard failed"
-          : (parentTerminal == ExecutionStatus.CANCELED ? "shard cancelled" : "all shards ok");
+      Task task = tasks.findById(agg.taskId()).orElse(null);
+      if (task == null) continue; // 任务已被物理删(Task 删除守卫不允许有执行,防御性分支)
+      long success = parent.stream().filter(s -> s.status() == ExecutionStatus.SUCCESS).count();
+      long failed = parent.stream().filter(s -> s.status() == ExecutionStatus.FAILED).count();
+      boolean anyCancelled = parent.stream().anyMatch(s -> s.status() == ExecutionStatus.CANCELED);
+      ExecutionStatus parentTerminal = SuccessPolicy.aggregateTerminal(
+          task.successPolicyType(), task.successPolicyValue(), success, failed, parent.size(), anyCancelled);
+      String detail = switch (parentTerminal) {
+        case PARTIAL_SUCCESS -> success + "/" + parent.size() + " shards ok (" + failed + " partial failed)";
+        case FAILED -> "shard failed";
+        case CANCELED -> "shard cancelled";
+        default -> "all shards ok";
+      };
       shards.finalizeParent(pid, parentTerminal, detail);
       // 事件点火(次序:先死信、再父终态;均在父收敛落库后,幂等由 key 保证只发一次)。
       for (Shard s : parent) {

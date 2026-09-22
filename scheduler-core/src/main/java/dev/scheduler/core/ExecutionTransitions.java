@@ -9,7 +9,7 @@ public final class ExecutionTransitions {
       case RUNNING   -> to == ExecutionStatus.SUCCESS || to == ExecutionStatus.FAILED || to == ExecutionStatus.CANCELED;
       case FAILED    -> to == ExecutionStatus.DUE; // 重试/人工重跑排回
       case CANCELED  -> to == ExecutionStatus.DUE; // 取消后可重排
-      case NOT_CREATED, SUCCESS, ORPHANED -> false;
+      case NOT_CREATED, SUCCESS, PARTIAL_SUCCESS, ORPHANED -> false;
     };
   }
 }

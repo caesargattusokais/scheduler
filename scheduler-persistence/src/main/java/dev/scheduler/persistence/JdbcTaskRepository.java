@@ -23,7 +23,8 @@ public class JdbcTaskRepository implements TaskRepository {
       rs.getString("retry_mode"), (Long) rs.getObject("retry_cap_ms"),
       (Long) rs.getObject("retry_budget_ms"),
       rs.getString("timezone"), (Integer) rs.getObject("interval_seconds"),
-      arrayToStrings(rs.getArray("event_routes")));
+      arrayToStrings(rs.getArray("event_routes")),
+      rs.getString("success_policy_type"), (Integer) rs.getObject("success_policy_value"));
 
   /** text[] 列 → List<String>(无参/null → 空列表);JDBC getArray 即 Spring 映射的 java.sql.Array。 */
   private static List<String> arrayToStrings(java.sql.Array arr) {
@@ -56,8 +57,8 @@ public class JdbcTaskRepository implements TaskRepository {
         INSERT INTO app_task (name, kind, handler_ref, cron, shard_count, timeout_seconds,
                               max_retries, backoff_ms, retryable_failure_pattern, max_active_concurrent,
                               retry_mode, retry_cap_ms, retry_budget_ms, timezone, interval_seconds,
-                              event_routes)
-        VALUES (?,?,?,?,?,?,?,?,?,?,COALESCE(?, 'exponential'),?,?,?,?,?)""",
+                              event_routes, success_policy_type, success_policy_value)
+        VALUES (?,?,?,?,?,?,?,?,?,?,COALESCE(?, 'exponential'),?,?,?,?,?,?,?)""",
           new String[]{"id"});
       ps.setString(1, t.name()); ps.setString(2, t.kind()); ps.setString(3, t.handlerRef());
       ps.setString(4, t.cron()); ps.setInt(5, t.shardCount()); ps.setInt(6, t.timeoutSeconds());
@@ -69,12 +70,15 @@ public class JdbcTaskRepository implements TaskRepository {
       ps.setString(14, t.timezone());
       ps.setObject(15, t.intervalSeconds(), java.sql.Types.INTEGER);
       ps.setArray(16, stringsToArray(con, t.eventRoutes()));
+      ps.setString(17, t.successPolicyType());
+      ps.setObject(18, t.successPolicyValue(), java.sql.Types.INTEGER);
       return ps;
     }, kh);
     return new Task(kh.getKey().longValue(), t.name(), t.kind(), t.handlerRef(), t.cron(),
         t.shardCount(), t.timeoutSeconds(), t.maxRetries(), t.backoffMs(),
         t.retryableFailurePattern(), t.maxActiveConcurrent(), true, false,
-        t.retryMode(), t.retryCapMs(), t.retryBudgetMs(), t.timezone(), t.intervalSeconds(), t.eventRoutes());
+        t.retryMode(), t.retryCapMs(), t.retryBudgetMs(), t.timezone(), t.intervalSeconds(),
+        t.eventRoutes(), t.successPolicyType(), t.successPolicyValue());
   }
 
   @Override public Optional<Task> findById(long id) {
@@ -121,7 +125,8 @@ public class JdbcTaskRepository implements TaskRepository {
                timeout_seconds=?, max_retries=?, backoff_ms=?,
                retryable_failure_pattern=?, max_active_concurrent=?, paused=?,
                retry_mode=COALESCE(?, 'exponential'), retry_cap_ms=?, retry_budget_ms=?,
-               timezone=?, interval_seconds=?, event_routes=?, updated_at=now()
+               timezone=?, interval_seconds=?, event_routes=?,
+               success_policy_type=?, success_policy_value=?, updated_at=now()
         WHERE id=?""");
       ps.setString(1, t.name()); ps.setString(2, t.kind()); ps.setString(3, t.handlerRef());
       ps.setString(4, t.cron()); ps.setInt(5, t.shardCount()); ps.setInt(6, t.timeoutSeconds());
@@ -133,7 +138,9 @@ public class JdbcTaskRepository implements TaskRepository {
       ps.setString(15, t.timezone());
       ps.setObject(16, t.intervalSeconds(), java.sql.Types.INTEGER);
       ps.setArray(17, stringsToArray(con, t.eventRoutes()));
-      ps.setLong(18, id);
+      ps.setString(18, t.successPolicyType());
+      ps.setObject(19, t.successPolicyValue(), java.sql.Types.INTEGER);
+      ps.setLong(20, id);
       return ps;
     });
     return rows > 0;

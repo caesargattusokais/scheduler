@@ -415,6 +415,39 @@ class ApiIntegrationTest {
         .andExpect(status().isBadRequest());
   }
 
+  /** 3c:成功策略校验——type 非白名单、RATIO_PERCENT 越界、MAX_FAILURES 负值 → 400;合法 MIN_SUCCESS 建成并回读。 */
+  @Test
+  void createTask_successPolicy_validationAndRoundTrip() throws Exception {
+    // 非白名单 type → 400
+    mvc.perform(post("/api/v1/tasks").contentType(MediaType.APPLICATION_JSON)
+            .content("{\"name\":\"bad-policy\",\"kind\":\"cron\",\"handlerRef\":\"demo\","
+                + "\"cron\":\"" + CRON + "\",\"shardCount\":2,\"successPolicyType\":\"BOGUS\",\"successPolicyValue\":1}"))
+        .andExpect(status().isBadRequest());
+    // RATIO_PERCENT 越界(>99)→ 400
+    mvc.perform(post("/api/v1/tasks").contentType(MediaType.APPLICATION_JSON)
+            .content("{\"name\":\"bad-ratio\",\"kind\":\"cron\",\"handlerRef\":\"demo\","
+                + "\"cron\":\"" + CRON + "\",\"shardCount\":2,\"successPolicyType\":\"RATIO_PERCENT\",\"successPolicyValue\":100}"))
+        .andExpect(status().isBadRequest());
+    // MAX_FAILURES 负值 → 400
+    mvc.perform(post("/api/v1/tasks").contentType(MediaType.APPLICATION_JSON)
+            .content("{\"name\":\"neg-fail\",\"kind\":\"cron\",\"handlerRef\":\"demo\","
+                + "\"cron\":\"" + CRON + "\",\"shardCount\":2,\"successPolicyType\":\"MAX_FAILURES\",\"successPolicyValue\":-1}"))
+        .andExpect(status().isBadRequest());
+    // 合法 MIN_SUCCESS=1 建成(201)并回读 policy 字段落库回显
+    MvcResult r = mvc.perform(post("/api/v1/tasks").contentType(MediaType.APPLICATION_JSON)
+            .content("{\"name\":\"ok-policy\",\"kind\":\"cron\",\"handlerRef\":\"demo\","
+                + "\"cron\":\"" + CRON + "\",\"shardCount\":2,\"successPolicyType\":\"MIN_SUCCESS\",\"successPolicyValue\":1}"))
+        .andExpect(status().isCreated())
+        .andExpect(jsonPath("$.successPolicyType").value("MIN_SUCCESS"))
+        .andExpect(jsonPath("$.successPolicyValue").value(1))
+        .andReturn();
+    long id = objectMapper.readTree(r.getResponse().getContentAsString()).get("id").asLong();
+    mvc.perform(get("/api/v1/tasks/" + id))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.successPolicyType").value("MIN_SUCCESS"))
+        .andExpect(jsonPath("$.successPolicyValue").value(1));
+  }
+
   /** M3 回归:shardCount=0 不得创建任务(否则扇出 0 个 shard → 恒 DUE、无法汇聚终态的父)。 */
   @Test
   void createTask_shardCountZero_returnsBadRequest() throws Exception {

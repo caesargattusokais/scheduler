@@ -52,13 +52,15 @@ public class TaskController {
       Integer shardCount, Integer timeoutSeconds, Integer maxRetries, Long backoffMs,
       String retryableFailurePattern, Integer maxActiveConcurrent,
       String retryMode, Long retryCapMs, Long retryBudgetMs,
-      String timezone, Integer intervalSeconds, List<String> eventRoutes) {}
+      String timezone, Integer intervalSeconds, List<String> eventRoutes,
+      String successPolicyType, Integer successPolicyValue) {}
 
   public record UpdateTaskRequest(String name, String kind, String handlerRef, String cron,
       Integer shardCount, Integer timeoutSeconds, Integer maxRetries, Long backoffMs,
       String retryableFailurePattern, Integer maxActiveConcurrent, Boolean paused,
       String retryMode, Long retryCapMs, Long retryBudgetMs,
-      String timezone, Integer intervalSeconds, List<String> eventRoutes) {}
+      String timezone, Integer intervalSeconds, List<String> eventRoutes,
+      String successPolicyType, Integer successPolicyValue) {}
 
   @PostMapping
   public ResponseEntity<Task> create(
@@ -73,7 +75,8 @@ public class TaskController {
     checkDefinition(req.name(), req.handlerRef(), req.cron(), req.shardCount(),
         req.timeoutSeconds(), req.maxRetries(), req.backoffMs(), req.maxActiveConcurrent(),
         req.retryMode(), req.retryCapMs(), req.retryBudgetMs(),
-        req.timezone(), req.intervalSeconds(), req.eventRoutes());
+        req.timezone(), req.intervalSeconds(), req.eventRoutes(),
+        req.successPolicyType(), req.successPolicyValue());
     Task created = tasks.create(new Task(
         null, req.name(), req.kind() == null ? (req.eventRoutes() == null || req.eventRoutes().isEmpty() ? "cron" : "event") : req.kind(),
         req.handlerRef(), req.cron(),
@@ -84,7 +87,8 @@ public class TaskController {
         req.retryableFailurePattern(), req.maxActiveConcurrent() == null ? 8 : req.maxActiveConcurrent(),
         true, false, req.retryMode(), req.retryCapMs(), req.retryBudgetMs(),
         req.timezone() == null ? "UTC" : req.timezone(), req.intervalSeconds(),
-        req.eventRoutes() == null ? List.of() : req.eventRoutes()));
+        req.eventRoutes() == null ? List.of() : req.eventRoutes(),
+        req.successPolicyType(), req.successPolicyValue()));
     auditor.record(current.get(), "task.create", TargetType.TASK, created.id(), taskMeta(created));
     return ResponseEntity.status(HttpStatus.CREATED).body(created);
   }
@@ -102,7 +106,8 @@ public class TaskController {
     checkDefinition(req.name(), req.handlerRef(), req.cron(), req.shardCount(),
         req.timeoutSeconds(), req.maxRetries(), req.backoffMs(), req.maxActiveConcurrent(),
         req.retryMode(), req.retryCapMs(), req.retryBudgetMs(),
-        req.timezone(), req.intervalSeconds(), req.eventRoutes());
+        req.timezone(), req.intervalSeconds(), req.eventRoutes(),
+        req.successPolicyType(), req.successPolicyValue());
     Task updated = new Task(id, req.name(), req.kind() == null ? existing.kind() : req.kind(),
         req.handlerRef(), req.cron(),
         req.shardCount() == null ? existing.shardCount() : req.shardCount(),
@@ -118,7 +123,9 @@ public class TaskController {
         req.retryBudgetMs() == null ? existing.retryBudgetMs() : req.retryBudgetMs(),
         req.timezone() == null ? existing.timezone() : req.timezone(),
         req.intervalSeconds() == null ? existing.intervalSeconds() : req.intervalSeconds(),
-        req.eventRoutes() == null ? existing.eventRoutes() : req.eventRoutes());
+        req.eventRoutes() == null ? existing.eventRoutes() : req.eventRoutes(),
+        req.successPolicyType() == null ? existing.successPolicyType() : req.successPolicyType(),
+        req.successPolicyValue() == null ? existing.successPolicyValue() : req.successPolicyValue());
     if (!tasks.update(id, updated)) {
       throw notFound("task " + id);
     }
@@ -220,6 +227,8 @@ public class TaskController {
     m.put("retryMode", t.retryMode());
     m.put("retryCapMs", t.retryCapMs());
     m.put("retryBudgetMs", t.retryBudgetMs());
+    m.put("successPolicyType", t.successPolicyType());
+    m.put("successPolicyValue", t.successPolicyValue());
     m.put("enabled", t.enabled());
     m.put("paused", t.paused());
     return m;
@@ -244,6 +253,8 @@ public class TaskController {
     b.put("retryMode", t.retryMode());
     b.put("retryCapMs", t.retryCapMs());
     b.put("retryBudgetMs", t.retryBudgetMs());
+    b.put("successPolicyType", t.successPolicyType());
+    b.put("successPolicyValue", t.successPolicyValue());
     return b;
   }
 
@@ -268,6 +279,8 @@ public class TaskController {
     putDiff(d, "timezone", before.timezone(), after.timezone());
     putDiff(d, "intervalSeconds", before.intervalSeconds(), after.intervalSeconds());
     putDiff(d, "eventRoutes", before.eventRoutes(), after.eventRoutes());
+    putDiff(d, "successPolicyType", before.successPolicyType(), after.successPolicyType());
+    putDiff(d, "successPolicyValue", before.successPolicyValue(), after.successPolicyValue());
     return d;
   }
 
@@ -291,7 +304,8 @@ public class TaskController {
   static void checkDefinition(String name, String handlerRef, String cron,
       Integer shardCount, Integer timeoutSeconds, Integer maxRetries, Long backoffMs,
       Integer maxActiveConcurrent, String retryMode, Long retryCapMs, Long retryBudgetMs,
-      String timezone, Integer intervalSeconds, List<String> eventRoutes) {
+      String timezone, Integer intervalSeconds, List<String> eventRoutes,
+      String successPolicyType, Integer successPolicyValue) {
     boolean hasCron = cron != null && !cron.isBlank();
     boolean hasInterval = intervalSeconds != null;
     boolean hasEvents = eventRoutes != null && !eventRoutes.isEmpty();
@@ -328,6 +342,22 @@ public class TaskController {
     if (shardCount != null && shardCount < 1) throw new IllegalArgumentException("shardCount must be >= 1");
     if (maxActiveConcurrent != null && maxActiveConcurrent < 1) {
       throw new IllegalArgumentException("maxActiveConcurrent must be >= 1");
+    }
+    // 3c 部分成功策略:类型白名单四选一;RATIO_PERCENT 值∈[1,99],MIN_SUCCESS ≥ 1,MAX_FAILURES ≥ 0。
+    if (successPolicyType != null && !successPolicyType.isBlank()
+        && !successPolicyType.equals("NONE") && !successPolicyType.equals("RATIO_PERCENT")
+        && !successPolicyType.equals("MIN_SUCCESS") && !successPolicyType.equals("MAX_FAILURES")) {
+      throw new IllegalArgumentException("successPolicyType must be one of NONE|RATIO_PERCENT|MIN_SUCCESS|MAX_FAILURES");
+    }
+    if ("RATIO_PERCENT".equals(successPolicyType)
+        && (successPolicyValue == null || successPolicyValue < 1 || successPolicyValue > 99)) {
+      throw new IllegalArgumentException("successPolicyValue for RATIO_PERCENT must be in [1,99]");
+    }
+    if ("MIN_SUCCESS".equals(successPolicyType) && (successPolicyValue == null || successPolicyValue < 1)) {
+      throw new IllegalArgumentException("successPolicyValue for MIN_SUCCESS must be >= 1");
+    }
+    if ("MAX_FAILURES".equals(successPolicyType) && (successPolicyValue == null || successPolicyValue < 0)) {
+      throw new IllegalArgumentException("successPolicyValue for MAX_FAILURES must be >= 0");
     }
     if (hasCron) validateCron(cron); // 间隔触发任务(cron 空)不校验 cron
   }

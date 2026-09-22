@@ -65,6 +65,22 @@ class NotificationFirerTest {
     assertTrue(fired.isEmpty(), "CANCELED 不点火");
   }
 
+  /** 3c:父 PARTIAL_SUCCESS → execution.partial_completed,payload 统计失败分片数。 */
+  @Test
+  void parentTerminal_partialSuccess_firesPartialCompleted() {
+    List<Shard> shards = List.of(shard(1L, SUCCESS), shard(2L, SUCCESS), shard(3L, FAILED));
+    firer.parentTerminal(100L, ExecutionStatus.PARTIAL_SUCCESS, shards);
+
+    Fired e = only(fired);
+    assertEquals("execution.partial_completed", e.kind);
+    assertEquals("execution", e.targetType);
+    assertEquals(100L, e.targetId);
+    assertEquals("parent:execution.partial_completed:100", e.idempotencyKey);
+    assertEquals(3, e.payload.get("shardCount"));
+    assertEquals(1, e.payload.get("failedShards"));
+    assertEquals("PARTIAL_SUCCESS", e.payload.get("terminal"));
+  }
+
   /** DLQ 分片 → execution.dead_letter,target=分片 id,幂等你 dlq:shardId:attempt。 */
   @Test
   void shardDeadLettered_firesWithShardTarget() {

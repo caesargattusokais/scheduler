@@ -80,6 +80,13 @@ class ReconcilerTest {
     return shards.createParentWithShards(taskId, "p:" + System.nanoTime(), shardCount).id();
   }
 
+  /** 3c:带成功策略的任务(部分成功语义的判定输入)。 */
+  private long createPolicyTask(int shardCount, String successPolicyType, Integer successPolicyValue) {
+    return tasks.create(new Task(null, "t3c", "cron", "demo", "0 */5 * * * *",
+        shardCount, 300, 0, 1000, null, 5, true, false, null, null, null,
+        "UTC", null, List.of(), successPolicyType, successPolicyValue)).id();
+  }
+
   private Shard shard(long parentId, int idx) {
     return shards.findShards(parentId).get(idx);
   }
@@ -410,6 +417,84 @@ class ReconcilerTest {
 
     assertEquals(0, reconciler().scanOnce(), "owner 心跳新鲜 → 不回收");
     assertEquals(ExecutionStatus.RUNNING, shards.findShard(sid).orElseThrow().status());
+  }
+
+  // ==================== 3c 分片聚合/部分成功 ====================
+
+  private String parentOutcomeDetail(long parentId, String status) {
+    return jdbc.queryForObject(
+        "SELECT detail FROM execution_outcome WHERE execution_id=? AND status=?",
+        String.class, parentId, status);
+  }
+
+  /** 3c:RATIO_PERCENT 达标(3/4=75≥75)且 1 片失败 → 父 PARTIAL_SUCCESS + execution.partial_completed 点火。 */
+  @Test void aggregatePartial_ratioMet_parentPartialSuccess() {
+    long taskId = createPolicyTask(4, "RATIO_PERCENT", 75);
+    long parentId = seedParentWithShards(taskId, 4);
+    setShard(shard(parentId, 0), "SUCCESS", null);
+    setShard(shard(parentId, 1), "SUCCESS", null);
+    setShard(shard(parentId, 2), "SUCCESS", null);
+    setShard(shard(parentId, 3), "FAILED", null);
+
+    reconciler().scanOnce();
+
+    assertEquals(ExecutionStatus.PARTIAL_SUCCESS, shards.findParent(parentId).orElseThrow().status(),
+        "达标 + 有失败片 → PARTIAL_SUCCESS,而非 FAILED");
+    assertEquals(1L, parentOutcomeCount(parentId, "PARTIAL_SUCCESS"), "落 PARTIAL_SUCCESS outcome");
+    assertEquals("3/4 shards ok (1 partial failed)", parentOutcomeDetail(parentId, "PARTIAL_SUCCESS"));
+    assertTrue(fired.stream().anyMatch(f -> f.kind().equals("execution.partial_completed")
+        && f.targetId() == parentId), "达标部分失败 → 点火 partial_completed");
+  }
+
+  /** 3c:RATIO 不达标(75% < 90%)→ 父 FAILED。 */
+  @Test void aggregatePartial_ratioBelow_parentFailed() {
+    long taskId = createPolicyTask(4, "RATIO_PERCENT", 90);
+    long parentId = seedParentWithShards(taskId, 4);
+    setShard(shard(parentId, 0), "SUCCESS", null);
+    setShard(shard(parentId, 1), "SUCCESS", null);
+    setShard(shard(parentId, 2), "SUCCESS", null);
+    setShard(shard(parentId, 3), "FAILED", null);
+
+    reconciler().scanOnce();
+
+    assertEquals(ExecutionStatus.FAILED, shards.findParent(parentId).orElseThrow().status(),
+        "占比未达阈值 → 父 FAILED");
+  }
+
+  /** 3c:MIN_SUCCESS 达标(≥3 片成功)且 1 片失败 → PARTIAL_SUCCESS。 */
+  @Test void aggregatePartial_minSuccessMet_parentPartialSuccess() {
+    long taskId = createPolicyTask(4, "MIN_SUCCESS", 3);
+    long parentId = seedParentWithShards(taskId, 4);
+    setShard(shard(parentId, 0), "SUCCESS", null);
+    setShard(shard(parentId, 1), "SUCCESS", null);
+    setShard(shard(parentId, 2), "SUCCESS", null);
+    setShard(shard(parentId, 3), "FAILED", null);
+
+    reconciler().scanOnce();
+
+    assertEquals(ExecutionStatus.PARTIAL_SUCCESS, shards.findParent(parentId).orElseThrow().status());
+  }
+
+  /** 3c:MAX_FAILURES 容忍内(1 失败 ≤ 1)→ PARTIAL_SUCCESS;超限(2 失败 > 0)→ FAILED。 */
+  @Test void aggregatePartial_maxFailuresToleratedButExceeded() {
+    long ok = createPolicyTask(4, "MAX_FAILURES", 1);
+    long okParent = seedParentWithShards(ok, 4);
+    setShard(shard(okParent, 0), "SUCCESS", null);
+    setShard(shard(okParent, 1), "SUCCESS", null);
+    setShard(shard(okParent, 2), "SUCCESS", null);
+    setShard(shard(okParent, 3), "FAILED", null);
+    reconciler().scanOnce();
+    assertEquals(ExecutionStatus.PARTIAL_SUCCESS, shards.findParent(okParent).orElseThrow().status());
+
+    long ko = createPolicyTask(4, "MAX_FAILURES", 0);
+    long koParent = seedParentWithShards(ko, 4);
+    setShard(shard(koParent, 0), "SUCCESS", null);
+    setShard(shard(koParent, 1), "SUCCESS", null);
+    setShard(shard(koParent, 2), "FAILED", null);
+    setShard(shard(koParent, 3), "FAILED", null);
+    reconciler().scanOnce();
+    assertEquals(ExecutionStatus.FAILED, shards.findParent(koParent).orElseThrow().status(),
+        "容忍数超限 → 父 FAILED");
   }
 }
 

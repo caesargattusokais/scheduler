@@ -35,7 +35,7 @@ class EventEngineTest extends AbstractTriggerEngineTest {
 
   private long createEventTask(String... routes) {
     return tasks.create(new Task(null, "evt", "event", "demo", null,
-        1, 300, 0, 1000, null, 8, true, false, null, null, null, "UTC", null, List.of(routes))).id();
+        1, 300, 0, 1000, null, 8, true, false, null, null, null, "UTC", null, List.of(routes), "NONE", null)).id();
   }
 
   private long countExecutions(long taskId) {

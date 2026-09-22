@@ -21,6 +21,11 @@ import dev.scheduler.worker.handler.MapHandlerRegistry;
 import dev.scheduler.worker.registration.WorkerRegistrar;
 import dev.scheduler.persistence.retry.FailureResolver;
 import dev.scheduler.persistence.retry.RetryPolicy;
+import dev.scheduler.persistence.NotificationRepository;
+import dev.scheduler.persistence.OutboundNotification;
+import dev.scheduler.server.service.NotificationFirer;
+import dev.scheduler.server.service.NotificationHub;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneId;
@@ -64,6 +69,20 @@ class ExecutorWorkerTest extends AbstractExecutorWorkerTest {
   /** 固定时钟:重试测试据此断言 next_retry_at,避免依赖实时时钟。 */
   private static final Clock CLOCK =
       Clock.fixed(Instant.parse("2026-01-01T10:00:00Z"), ZoneOffset.UTC);
+
+  /** 本测试专注租赁回收/重试,不关心通知:fire 事件落进空 hub 即可,无需装配真实 outbox。 */
+  private static final class NoopNotificationRepo implements NotificationRepository {
+    @Override public long enqueue(String kind, String operator, String targetType, Long targetId,
+        String payload, String idempotencyKey) { return 1; }
+    @Override public List<OutboundNotification> due(int limit) { return List.of(); }
+    @Override public void markSent(long id) { }
+    @Override public void markRetry(long id, Instant at, String err) { }
+    @Override public void markFailed(long id, String err) { }
+  }
+
+  private NotificationFirer noopFirer() {
+    return new NotificationFirer(new NotificationHub(new NoopNotificationRepo(), new ObjectMapper()));
+  }
 
   @BeforeEach void clearTables() {
     jdbc.execute("TRUNCATE app_task, execution, execution_shard, execution_shard_outcome "
@@ -519,7 +538,7 @@ class ExecutorWorkerTest extends AbstractExecutorWorkerTest {
     try {
       // 主线程(线程 3):在 handler 仍阻塞、owner 心跳新鲜时跑 server Reconciler,stale 窗口极小(1s)。
       Reconciler rc = new Reconciler(tasks, shards,
-          new FailureResolver(shards, new RetryPolicy(), CLOCK), "reconciler", 1);
+          new FailureResolver(shards, new RetryPolicy(), CLOCK), noopFirer(), "reconciler", 1);
       int n = rc.scanOnce();
 
       assertEquals(0, n, "心跳新鲜的健康长运行分片不得被活性优先回收");
@@ -553,7 +572,7 @@ class ExecutorWorkerTest extends AbstractExecutorWorkerTest {
         + " VALUES (?, '', now() - interval '2 minutes', 'ALIVE')", owner);
 
     Reconciler rc = new Reconciler(tasks, shards,
-        new FailureResolver(shards, new RetryPolicy(), CLOCK), "reconciler", 1);
+        new FailureResolver(shards, new RetryPolicy(), CLOCK), noopFirer(), "reconciler", 1);
     int n = rc.scanOnce();
 
     assertEquals(1, n, "心跳失联 owner → 租约未到期前即被活性优先回收");

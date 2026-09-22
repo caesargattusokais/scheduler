@@ -81,10 +81,10 @@ public class ExecutionController {
     return queryService.getDetail(id).orElseThrow(() -> notFound("execution " + id));
   }
 
-  /** 可被重跑的源轮状态:终态(SUCCESS/FAILED/CANCELED)或 ORPHANED(已结束、不可复原地)轮。 */
+  /** 可被重跑的源轮状态:终态(SUCCESS/PARTIAL_SUCCESS/FAILED/CANCELED)或 ORPHANED(已结束、不可复原地)轮。 */
   private static final Set<ExecutionStatus> RERUNNABLE =
-      Set.of(ExecutionStatus.SUCCESS, ExecutionStatus.FAILED, ExecutionStatus.CANCELED,
-          ExecutionStatus.ORPHANED);
+      Set.of(ExecutionStatus.SUCCESS, ExecutionStatus.PARTIAL_SUCCESS, ExecutionStatus.FAILED,
+          ExecutionStatus.CANCELED, ExecutionStatus.ORPHANED);
 
   /**
    * 重跑指定一轮执行(M6.5 真重跑):引用该源轮,复制其 args 并落 rerun_of 溯源,新建一轮父 + 全部分片。

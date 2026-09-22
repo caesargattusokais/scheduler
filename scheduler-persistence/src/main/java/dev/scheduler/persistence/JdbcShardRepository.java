@@ -342,13 +342,13 @@ public class JdbcShardRepository implements ShardRepository {
 
   // ---- Task 3:父汇聚 + FAIL_FAST + 父取消 + DLQ/requeue ----
 
-  @Override public List<Long> parentsNeedingAggregation() {
+  @Override public List<ParentAgg> parentsNeedingAggregation() {
     return jdbc.query("""
-      SELECT e.id FROM execution e
+      SELECT e.id AS id, e.task_id AS task_id FROM execution e
        WHERE e.status='DUE'
          AND EXISTS (SELECT 1 FROM execution_shard s WHERE s.execution_id=e.id
                      AND s.status IN ('SUCCESS','FAILED','CANCELED'))
-       ORDER BY e.id""", (rs, i) -> rs.getLong("id"));
+       ORDER BY e.id""", (rs, i) -> new ParentAgg(rs.getLong("id"), rs.getLong("task_id")));
   }
 
   @Override public boolean finalizeParent(long parentId, ExecutionStatus terminal, String detail) {

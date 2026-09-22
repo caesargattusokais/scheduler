@@ -7,6 +7,8 @@ const COLORS: Record<string, string> = {
   PENDING: 'badge-amber',
   DUE: 'badge-amber',
   SUCCESS: 'badge-green',
+  /** 3c:部分成功——达标但存在失败,琥珀(介于成功绿与失败红之间)。 */
+  PARTIAL_SUCCESS: 'badge-amber',
   FAILED: 'badge-red',
   CANCELED: 'badge-slate',
   SKIPPED: 'badge-slate',

@@ -23,10 +23,11 @@ public class NotificationFirer {
     this.hub = hub;
   }
 
-  /** 父级终态:SUCCESS→execution.completed,FAILED→execution.failed;CANCELED 不点火。 */
+  /** 父级终态:SUCCESS→execution.completed,FAILED→execution.failed,PARTIAL_SUCCESS→execution.partial_completed;CANCELED 不点火。 */
   public void parentTerminal(long executionId, ExecutionStatus terminal, List<Shard> shards) {
     String kind = switch (terminal) {
       case SUCCESS -> "execution.completed";
+      case PARTIAL_SUCCESS -> "execution.partial_completed";
       case FAILED -> "execution.failed";
       default -> null;
     };

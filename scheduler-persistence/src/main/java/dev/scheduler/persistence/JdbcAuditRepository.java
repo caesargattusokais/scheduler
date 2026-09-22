@@ -68,7 +68,7 @@ public class JdbcAuditRepository implements AuditRepository {
     // (archived_at = 当前最大),避免并发归档误删彼此批次;随后 scheduler_audit_rechain() 重算剩余行,
     // 使删除不破坏取证链(integrity() 仍 verified)。LIMIT 按 id 升序截断单次删除行数,供预算控制。
     return tx.execute(status -> {
-      int copied = jdbc.update("""
+      long copied = jdbc.update("""
           INSERT INTO app_audit_archive (id, operator, action, target_type, target_id, meta, diff, before_meta,
                                          source, occurred_at, prev_hash, chunk_hash, archived_at)
           SELECT id, operator, action, target_type, target_id, meta, diff, before_meta,

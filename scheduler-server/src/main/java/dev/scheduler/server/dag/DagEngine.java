@@ -10,6 +10,7 @@ import dev.scheduler.core.Execution;
 import dev.scheduler.core.ExecutionStatus;
 import dev.scheduler.core.IdempotencyKeys;
 import dev.scheduler.core.Shard;
+import dev.scheduler.core.SuccessPolicy;
 import dev.scheduler.core.Task;
 import dev.scheduler.persistence.DagRepository;
 import dev.scheduler.persistence.ShardRepository;
@@ -203,19 +204,33 @@ public class DagEngine {
     if (n.executionId() == null) return;
     List<Shard> ss = shards.findShards(n.executionId());
     if (!ss.stream().allMatch(s -> s.status().isTerminal())) return; // 未全终态 → 保持 RUNNING,等 worker/对账
-    boolean anyFailed = ss.stream().anyMatch(s -> s.status() == ExecutionStatus.FAILED);
-    if (anyFailed && n.attempt() < n.nodeMaxRetries()) {
+    // 3c:节点终态改由执行的分片终态计数 + 任务成功策略推导(与 Reconciler 共用 SuccessPolicy),而非裸判 anyFailed。
+    // PARTIAL_SUCCESS(达标但部分失败)按「达标=成功」放行下游且不触发节点重试。
+    Task task = tasks.findById(n.taskId()).orElse(null);
+    long success = ss.stream().filter(s -> s.status() == ExecutionStatus.SUCCESS).count();
+    long failed = ss.stream().filter(s -> s.status() == ExecutionStatus.FAILED).count();
+    boolean anyCancelled = ss.stream().anyMatch(s -> s.status() == ExecutionStatus.CANCELED);
+    ExecutionStatus agg = task == null ? ExecutionStatus.FAILED
+        : SuccessPolicy.aggregateTerminal(task.successPolicyType(), task.successPolicyValue(),
+            success, failed, ss.size(), anyCancelled);
+    if (agg == ExecutionStatus.FAILED && n.attempt() < n.nodeMaxRetries()) {
       // 消费一次重试预算:回绕到 PENDING(execution_id 清空)+ attempt+1 + 退避到点;下游仍等;到点由
       // stepPendingNode 以新 idempotency key(:a{attempt})重 spawn 该节点(不复用已失败的父执行)。
       Instant retryAt = clock.instant().plusMillis(nodeRetryDelayMs(n));
       dags.scheduleNodeRetry(n.id(), retryAt, n.attempt() + 1, "shards failed; will retry");
       return;
     }
-    DagRunNodeStatus t = anyFailed ? DagRunNodeStatus.FAILED
-        : ss.stream().anyMatch(s -> s.status() == ExecutionStatus.CANCELED)
-            ? DagRunNodeStatus.CANCELED : DagRunNodeStatus.SUCCESS;
-    String detail = anyFailed ? "shards failed"
-        : (t == DagRunNodeStatus.CANCELED ? "shards cancelled" : "all shards ok");
+    DagRunNodeStatus t = switch (agg) {
+      case SUCCESS, PARTIAL_SUCCESS -> DagRunNodeStatus.SUCCESS;
+      case CANCELED -> DagRunNodeStatus.CANCELED;
+      default -> DagRunNodeStatus.FAILED;
+    };
+    String detail = switch (agg) {
+      case PARTIAL_SUCCESS -> success + "/" + ss.size() + " shards ok (" + failed + " partial failed)";
+      case SUCCESS -> "all shards ok";
+      case CANCELED -> "shards cancelled";
+      default -> "shards failed";
+    };
     dags.markNodeStatus(n.id(), t, detail);
   }
 
