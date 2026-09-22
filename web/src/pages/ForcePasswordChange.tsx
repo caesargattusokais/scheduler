@@ -46,7 +46,7 @@ export default function ForcePasswordChange({ onDone }: { onDone?: () => void })
         </label>
         <label className="field">
           <span className="label">新密码</span>
-          <input className="input" type="password" placeholder="至少 8 位" value={next}
+          <input className="input" type="password" placeholder="至少 8 位且含数字" value={next}
             onChange={(e) => setNext(e.target.value)} />
         </label>
         <label className="field">
@@ -55,7 +55,7 @@ export default function ForcePasswordChange({ onDone }: { onDone?: () => void })
             onChange={(e) => setConfirm(e.target.value)} />
         </label>
         {next.length > 0 && next.length < 8 &&
-          <p className="text-xs text-slate-500">新密码至少 8 位。</p>}
+          <p className="text-xs text-slate-500">新密码至少 8 位且含数字,不得与最近 5 次相同。</p>}
         {confirm.length > 0 && next !== confirm &&
           <p className="text-xs text-red-600">两次输入的新密码不一致。</p>}
         <button className="btn btn-primary mt-4 w-full" type="submit" disabled={busy || !valid}>

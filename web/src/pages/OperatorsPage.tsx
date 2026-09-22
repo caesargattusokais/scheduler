@@ -61,7 +61,7 @@ export default function OperatorsPage() {
 
   // 「设密码」:ADMIN 专属;成功后该操作者的既有会话被服务端撤销,需重新登录。
   const setPwd = async (n: string) => {
-    const pwd = window.prompt(`为操作者「${n}」设置新密码(成功后其现有会话将被撤销):`);
+    const pwd = window.prompt(`为操作者「${n}」设置新密码(至少 8 位且含数字,不得与最近 5 次相同;成功后其现有会话将被撤销):`);
     if (pwd === null || pwd === '') return;
     try {
       await setPassword(n, pwd);
