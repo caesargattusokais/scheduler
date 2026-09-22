@@ -1604,6 +1604,32 @@ class ApiIntegrationTest {
         "scheduler_worker_active 应等于存活 worker 数(2)");
   }
 
+  /** SLI(2b):近 1h 完成/失败量 + 失败率 + 近 24h 完成延迟 p95;seed 一条 SUCCESS + 一条 FAILED(均在窗口内)。 */
+  @Test
+  void prometheus_sliMetrics() throws Exception {
+    jdbc.update("INSERT INTO app_task (id, name, kind, handler_ref, cron, shard_count, enabled, paused)"
+        + " VALUES (?, 'sli-seed-task', 'cron', 'demo', ?, 1, false, false)",
+        METRICS_TASK_ID, "0 */5 * * * *");
+    jdbc.update("INSERT INTO execution (task_id, status, idempotency_key, shard_count, started_at, finished_at)"
+        + " VALUES (?, 'SUCCESS', 'sli:done', 1, now() - interval '5 minutes', now() - interval '1 minute')",
+        METRICS_TASK_ID);
+    jdbc.update("INSERT INTO execution (task_id, status, idempotency_key, shard_count, started_at, finished_at)"
+        + " VALUES (?, 'FAILED', 'sli:fail', 1, now() - interval '10 minutes', now() - interval '2 minutes')",
+        METRICS_TASK_ID);
+
+    String prom = mvc.perform(get("/actuator/prometheus"))
+        .andExpect(status().isOk()).andReturn().getResponse().getContentAsString();
+    assertTrue(prom.contains("scheduler_execution_completed_1h "), "missing completed SLI gauge");
+    assertTrue(prom.contains("scheduler_execution_failed_1h "), "missing failed SLI gauge");
+    assertTrue(prom.contains("scheduler_execution_failure_rate_1h "), "missing failure-rate SLI gauge");
+    assertTrue(prom.contains("scheduler_execution_latency_p95_ms "), "missing p95-latency SLI gauge");
+    assertEquals(1.0, promGauge(prom, "scheduler_execution_completed_1h"), 1e-9, "1h 内 1 条 SUCCESS");
+    assertEquals(1.0, promGauge(prom, "scheduler_execution_failed_1h"), 1e-9, "1h 内 1 条 FAILED");
+    assertEquals(0.5, promGauge(prom, "scheduler_execution_failure_rate_1h"), 1e-9,
+        "失败率 = 1 / (1+1) = 0.5");
+    assertTrue(promGauge(prom, "scheduler_execution_latency_p95_ms") > 0, "有完成延迟样本 → p95 > 0");
+  }
+
   /** 取 prometheus 文本中无标签 gauge 的数值(单 series)。 */
   private double promGauge(String prom, String name) {
     for (String line : prom.split("\n")) {

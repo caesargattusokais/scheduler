@@ -43,4 +43,11 @@ public interface ExecutionRepository {
 
   /** 某任务下租约已过期(lease_until <= DB now)且仍 RUNNING 的孤儿执行;由 Reconciler 逐任务回收。 */
   List<ExpiredRun> findExpiredRunning(long taskId);
+
+  /** SLI 聚合快照(单一 SQL,从父表 execution 一次算出):
+   *  {@code completed1h}/{@code failed1h} = 近 1h finished 的 SUCCESS+CANCELED / FAILED 数;
+   *  {@code p95LatencyMs} = 近 24h finished 的执行完成延迟( finished_at - started_at )p95,不足或无样本为 0。 */
+  record ExecutionSli(long completed1h, long failed1h, double p95LatencyMs) {}
+
+  ExecutionSli sli();
 }

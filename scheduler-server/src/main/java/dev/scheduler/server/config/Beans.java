@@ -227,6 +227,25 @@ public class Beans {
     };
   }
 
+  /** SLI(2b):执行服务水平指标——近 1h 完成/失败量、失败率、近 24h 完成延迟 p95。全部 lazy 查 DB(scrape 时求值),
+   *  与 {@link #schedulerMetrics} 同款惰性 gauge;失败率在已完成总量(完成+失败)上算,无样本→0。 */
+  @Bean
+  MeterBinder schedulerSliMetrics(ExecutionRepository executions) {
+    return registry -> {
+      Gauge.builder("scheduler_execution_completed_1h",
+          () -> (double) executions.sli().completed1h()).register(registry);
+      Gauge.builder("scheduler_execution_failed_1h",
+          () -> (double) executions.sli().failed1h()).register(registry);
+      Gauge.builder("scheduler_execution_latency_p95_ms",
+          () -> executions.sli().p95LatencyMs()).register(registry);
+      Gauge.builder("scheduler_execution_failure_rate_1h", () -> {
+        var sli = executions.sli();
+        double done = sli.completed1h() + sli.failed1h();
+        return done == 0 ? 0.0 : sli.failed1h() / done;
+      }).register(registry);
+    };
+  }
+
   /** worker 存活判定窗口:last_seen 距今 ≤ 30s 视为存活(与 AvailableHandlerRefs 同窗)。 */
   private static final java.time.Duration WORKER_LIVE_WINDOW = java.time.Duration.ofSeconds(30);
 

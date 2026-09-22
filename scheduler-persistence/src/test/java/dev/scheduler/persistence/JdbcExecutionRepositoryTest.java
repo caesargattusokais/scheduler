@@ -334,4 +334,51 @@ class JdbcExecutionRepositoryTest extends AbstractPostgresTest {
     assertEquals(0, execRepo.findById(id).get().attempt());
     assertEquals(outcomesBefore, outcomes(id), "CAS 0 rows: no extra outcome");
   }
+
+  @Test void sli_emptyTable_returnsZeros() {
+    var sli = execRepo.sli();
+    assertEquals(0, sli.completed1h());
+    assertEquals(0, sli.failed1h());
+    assertEquals(0.0, sli.p95LatencyMs(), 0.0, "无终态样本 → p95 兜 0");
+  }
+
+  /** SLI 吞吐按近 1h finished_at 切:终态(SUCCESS/CANCELED)计入 completed,FAILED 计入 failed;更早的终态不入窗。 */
+  @Test void sli_countsCompletedAndFailedWithinOneHourWindow() {
+    long taskId = newTask(8);
+    // 1h 内 finished → 计入
+    jdbc.update("INSERT INTO execution (task_id,status,idempotency_key,shard_count,started_at,finished_at)"
+        + " VALUES (?, 'SUCCESS', ?, 1, now() - interval '1 hour', now())", taskId, "sli:s1");
+    jdbc.update("INSERT INTO execution (task_id,status,idempotency_key,shard_count,started_at,finished_at)"
+        + " VALUES (?, 'FAILED', ?, 1, now() - interval '30 minutes', now() - interval '10 minutes')",
+        taskId, "sli:s2");
+    // 2h 前 finished → 不入 1h 窗
+    jdbc.update("INSERT INTO execution (task_id,status,idempotency_key,shard_count,started_at,finished_at)"
+        + " VALUES (?, 'SUCCESS', ?, 1, now() - interval '3 hours', now() - interval '2 hours')",
+        taskId, "sli:old-success");
+    jdbc.update("INSERT INTO execution (task_id,status,idempotency_key,shard_count,started_at,finished_at)"
+        + " VALUES (?, 'FAILED', ?, 1, now() - interval '3 hours', now() - interval '2 hours')",
+        taskId, "sli:old-fail");
+    // 非终态 → 不入窗
+    long running = execRepo.createDue(ofDue(taskId, "sli:running"));
+    execRepo.claim(running, taskId, "w1", Instant.now().plusSeconds(60), 8);
+
+    var sli = execRepo.sli();
+    assertEquals(1, sli.completed1h(), "1h 内恰 1 条 SUCCESS");
+    assertEquals(1, sli.failed1h(), "1h 内恰 1 条 FAILED");
+  }
+
+  /** p95 完成延迟取近 24h finished 的 (finished_at - started_at),percentile_cont 线性插值。 */
+  @Test void sli_computesP95LatencyOverRecent24h() {
+    long taskId = newTask(8);
+    // 两条终态,完成延迟 100ms 与 900ms(均在窗口)→ p95 = 100 + 0.95*(900-100) = 860ms
+    jdbc.update("INSERT INTO execution (task_id,status,idempotency_key,shard_count,started_at,finished_at)"
+        + " VALUES (?, 'SUCCESS', ?, 1, now() - interval '5 minutes', now() - interval '5 minutes' + interval '100 milliseconds')",
+        taskId, "sli:p1");
+    jdbc.update("INSERT INTO execution (task_id,status,idempotency_key,shard_count,started_at,finished_at)"
+        + " VALUES (?, 'SUCCESS', ?, 1, now() - interval '5 minutes', now() - interval '5 minutes' + interval '900 milliseconds')",
+        taskId, "sli:p2");
+
+    var sli = execRepo.sli();
+    assertEquals(860.0, sli.p95LatencyMs(), 1e-6, "两条延迟 [100,900] 的 p95 线性插值应为 860ms");
+  }
 }

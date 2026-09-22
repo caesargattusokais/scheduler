@@ -191,6 +191,26 @@ public class JdbcExecutionRepository implements ExecutionRepository {
         "SELECT * FROM execution WHERE status='FAILED' AND dead_letter ORDER BY id", MAP);
   }
 
+  @Override public ExecutionSli sli() {
+    // 单查询一次算齐三项:1h/24h 窗口按 finished_at 切(终态必写 finished_at)。p95 用 percentile_cont(0.95)
+    // 对 (finished_at - started_at) 完成延迟(epoch 秒 × 1000 → ms),无样本(24h 内无终态)为 NULL → 兜 0。
+    String sql = """
+      SELECT
+        count(*) FILTER (WHERE status IN ('SUCCESS','CANCELED') AND finished_at >= now() - interval '1 hour') AS completed1h,
+        count(*) FILTER (WHERE status = 'FAILED' AND finished_at >= now() - interval '1 hour') AS failed1h,
+        percentile_cont(0.95) WITHIN GROUP (ORDER BY extract(epoch FROM (finished_at - started_at)) * 1000.0)
+          FILTER (WHERE finished_at >= now() - interval '24 hours') AS p95_ms
+      FROM execution
+      WHERE status IN ('SUCCESS','CANCELED','FAILED')""";
+    return jdbc.query(sql, rs -> {
+      if (!rs.next()) return new ExecutionSli(0, 0, 0.0);
+      long completed = rs.getLong("completed1h");
+      long failed = rs.getLong("failed1h");
+      double p95 = rs.getObject("p95_ms") == null ? 0.0 : rs.getDouble("p95_ms");
+      return new ExecutionSli(completed, failed, p95);
+    });
+  }
+
   @Override public boolean requeue(long id) {
     // 手动重新入队:FAILD → DUE,复位 attempt/next_retry_at/dead_letter。dead_letter 仅是标记非闸门,
     // CAS 只 on status='FAILED':0 行=已非 FAILED(竞态/终态)时视为丢失,静默返回 false,不落误导性 outcome。
