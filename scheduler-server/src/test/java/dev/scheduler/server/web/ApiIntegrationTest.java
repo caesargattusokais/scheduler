@@ -19,6 +19,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.scheduler.core.ExecutionStatus;
+import dev.scheduler.core.IdempotencyKeys;
 import dev.scheduler.core.Shard;
 import dev.scheduler.persistence.AuthHashing;
 import dev.scheduler.persistence.ShardRepository;
@@ -1513,6 +1514,71 @@ class ApiIntegrationTest {
         .andExpect(status().isBadRequest());
   }
 
+  /** 1d:cron 与 dependsOnDagId 恰其一——都缺(无触发源)或都给 → 400。 */
+  @Test
+  void dag_dependency_requiresExactlyOneOfCronOrDependsOn() throws Exception {
+    long t = postTask("oneof-task");
+    long up = postDag("oneof-up", new long[]{t}, new String[]{"A"}, null);
+    // 都缺:
+    mvc.perform(post("/api/v1/dags").contentType(MediaType.APPLICATION_JSON)
+        .content("{\"name\":\"no-trig\",\"nodes\":[{\"nodeKey\":\"A\",\"taskId\":" + t + "}],\"edges\":[]}"))
+        .andExpect(status().isBadRequest());
+    // 都给:
+    mvc.perform(post("/api/v1/dags").contentType(MediaType.APPLICATION_JSON)
+        .content("{\"name\":\"both-trig\",\"cron\":\"" + CRON + "\",\"dependsOnDagId\":" + up
+            + ",\"nodes\":[{\"nodeKey\":\"A\",\"taskId\":" + t + "}],\"edges\":[]}"))
+        .andExpect(status().isBadRequest());
+  }
+
+  /** 1d:dependsOnDagId 引用不存在的 DAG → 400。 */
+  @Test
+  void dag_dependency_nonexistentUpstream_rejected400() throws Exception {
+    long t = postTask("dep-missing-task");
+    mvc.perform(post("/api/v1/dags").contentType(MediaType.APPLICATION_JSON)
+        .content(dagDepBody("dep-missing", 999999L, new long[]{t}, new String[]{"A"})))
+        .andExpect(status().isBadRequest());
+  }
+
+  /** 1d:建依赖型 DAG(dependsOn 上游、cron null)→ 201,响应回读 dependsOnDagId、cron 为 null。 */
+  @Test
+  void dag_dependency_createsWithDependsOnAndNullCron() throws Exception {
+    long t = postTask("dep-create-task");
+    long up = postDag("dep-create-up", new long[]{t}, new String[]{"A"}, null);
+    mvc.perform(post("/api/v1/dags").contentType(MediaType.APPLICATION_JSON)
+        .content(dagDepBody("dep-create-down", up, new long[]{t}, new String[]{"X"})))
+        .andExpect(status().isCreated())
+        .andExpect(jsonPath("$.dependsOnDagId").value(up))
+        .andExpect(jsonPath("$.cron").value(org.hamcrest.Matchers.nullValue()));
+  }
+
+  /** 1d E2E:上游 run 全节点 SUCCESS → 引擎为下游客 幂等建一条 run(reason=dag:{上游runId});下游 run 回读可见。 */
+  @Test
+  void dagDependency_e2e_upstreamSuccess_createsDownstreamRun() throws Exception {
+    long t = postTask("dep-e2e-task"); // demo handler, shardCount 1
+    long up = postDag("dep-e2e-up", new long[]{t}, new String[]{"A"}, null);
+    MvcResult r = mvc.perform(post("/api/v1/dags").contentType(MediaType.APPLICATION_JSON)
+        .content(dagDepBody("dep-e2e-down", up, new long[]{t}, new String[]{"X"})))
+        .andExpect(status().isCreated()).andReturn();
+    long down = objectMapper.readTree(r.getResponse().getContentAsString()).get("id").asLong();
+    pauseDag(up); // 剥除 cron 触发,只用手动 run(CLOCK 钉在 10:05 tick,勿让 scanOnce 再建调度 run)
+
+    long upRun = triggerDag(up);
+    dagEngine.scanOnce();          // A 根节点 → spawn RUNNING
+    completeNodeShards(upRun, "A", "SUCCESS");
+    reconciler.scanOnce();         // 汇聚 A 的父 execution → SUCCESS
+    dagEngine.scanOnce();          // A 派生 SUCCESS → spawnDependents(down) + 上游 run SUCCESS
+
+    // 下游恰一条 run,reason = dag:{上游run},幂等键 = dep:{上游run}
+    String body = mvc.perform(get("/api/v1/dags/runs").param("dagId", String.valueOf(down)))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$['items']", hasSize(1)))
+        .andExpect(jsonPath("$.total").value(1))
+        .andReturn().getResponse().getContentAsString();
+    JsonNode downRun = objectMapper.readTree(body).get("items").get(0);
+    assertEquals("dag:" + upRun, downRun.get("triggerReason").asText());
+    assertEquals(IdempotencyKeys.forDagDep(upRun), downRun.get("idempotencyKey").asText());
+  }
+
   /** M4:线性 A→B 全成功端到端。真实触发 + 同步驱动(dagEngine.scanOnce → completeNodeShards → reconciler.scanOnce)。
    *  跨周期收敛:节点只在"其上游 SUCCESS 之后的下一次 scan"才 spawn,故 A 终态后需多一次 scan 才生成 B。 */
   @Test
@@ -1820,6 +1886,17 @@ class ApiIntegrationTest {
       }
     }
     return "{\"name\":\"" + name + "\",\"cron\":\"" + CRON + "\",\"nodes\":[" + nodes + "],\"edges\":[" + eb + "]}";
+  }
+
+  /** POST /dags 请求体(1d 依赖型):dependsOnDagId 取代 cron(互斥,无 cron 字段)。 */
+  private String dagDepBody(String name, long dependsOnDagId, long[] taskIds, String[] nodeKeys) {
+    StringBuilder nodes = new StringBuilder();
+    for (int i = 0; i < nodeKeys.length; i++) {
+      if (i > 0) nodes.append(",");
+      nodes.append("{\"nodeKey\":\"").append(nodeKeys[i]).append("\",\"taskId\":").append(taskIds[i]).append("}");
+    }
+    return "{\"name\":\"" + name + "\",\"dependsOnDagId\":" + dependsOnDagId
+        + ",\"nodes\":[" + nodes + "],\"edges\":[]}";
   }
 
   /** 确定性预置一条死信 shard:建父 + 1 DUE shard(经 createParentWithShards 单事务),再直改 FAILED + dead_letter。

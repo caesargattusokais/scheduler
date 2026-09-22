@@ -54,24 +54,27 @@ public class DagController {
     this.current = current;
   }
 
-  public record CreateDagRequest(String name, String description, String cron,
+  public record CreateDagRequest(String name, String description, String cron, Long dependsOnDagId,
       List<NodeReq> nodes, List<EdgeReq> edges) {}
   public record NodeReq(String nodeKey, Long taskId, Integer sortOrder,
     Integer nodeMaxRetries, Long nodeBackoffMs, String runIf) {}
   public record EdgeReq(String from, String to) {}
   public record DagDetail(Dag dag, List<DagNode> nodes, List<DagEdge> edges) {}
 
-  /** 建 DAG:name/cron 合法 + task 存在 + 无自环 + DFS 无环 + 键/边唯一(仓库校验,违规 → IllegalArgumentException → 400)。 */
+  /** 建 DAG:name+cron/dependsOnDagId 恰其一 + task 存在 + 无自环 + DFS 无环 + 键/边唯一(仓库校验,违规 → IllegalArgumentException → 400)。 */
   @PostMapping
   public ResponseEntity<Dag> create(
       @RequestBody CreateDagRequest req) {
     if (req == null || req.name() == null || req.name().isBlank()) {
       throw new IllegalArgumentException("name is required");
     }
-    if (req.cron() == null || req.cron().isBlank()) {
-      throw new IllegalArgumentException("cron is required");
+    // 1d:触发源恰其一——cron(定时)或 dependsOnDagId(跨 DAG 依赖);两者都缺/都给 → 400。
+    boolean hasCron = req.cron() != null && !req.cron().isBlank();
+    boolean hasDep = req.dependsOnDagId() != null;
+    if (hasCron == hasDep) {
+      throw new IllegalArgumentException("exactly one of cron or dependsOnDagId is required");
     }
-    TaskController.validateCron(req.cron());
+    if (hasCron) TaskController.validateCron(req.cron());
     if (req.nodes() == null || req.nodes().isEmpty()) {
       throw new IllegalArgumentException("nodes must not be empty");
     }
@@ -83,7 +86,9 @@ public class DagController {
         .toList();
     List<EdgeInput> edges = req.edges() == null ? List.of()
         : req.edges().stream().map(e -> new EdgeInput(e.from(), e.to())).toList();
-    Dag created = dags.createDag(req.name(), req.description(), req.cron(), nodes, edges);
+    Dag created = hasDep
+        ? dags.createDag(req.name(), req.description(), null, req.dependsOnDagId(), nodes, edges)
+        : dags.createDag(req.name(), req.description(), req.cron(), nodes, edges);
     auditor.record(current.get(), "dag.create", TargetType.DAG, created.id(), Map.of("name", created.name()));
     return ResponseEntity.status(HttpStatus.CREATED).body(created);
   }
@@ -190,13 +195,14 @@ public class DagController {
   private Dag byId(long id) { return dags.findDag(id).orElseThrow(() -> notFound("dag " + id)); }
   private Dag requireDag(long id) { return byId(id); }
 
-  /** 审计 before = 操作前全量 DAG 定义(8 组件):供取证溯源;Instant 收敛为 ISO-8601 文本(恒定可序列化)。 */
+  /** 审计 before = 操作前全量 DAG 定义(9 组件):供取证溯源;Instant 收敛为 ISO-8601 文本(恒定可序列化)。 */
   private Map<String, Object> dagBefore(Dag d) {
     Map<String, Object> b = new LinkedHashMap<>();
     b.put("id", d.id());
     b.put("name", d.name());
     b.put("description", d.description());
     b.put("cron", d.cron());
+    b.put("dependsOnDagId", d.dependsOnDagId());
     b.put("enabled", d.enabled());
     b.put("paused", d.paused());
     b.put("createdAt", ts(d.createdAt()));

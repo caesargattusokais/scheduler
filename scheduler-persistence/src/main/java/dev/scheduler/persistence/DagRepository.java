@@ -28,9 +28,14 @@ public interface DagRepository {
   }
   record EdgeInput(String from, String to) {}
 
-  /** 建 DAG:dag + 节点 + 边同事务。校验:引用的 task 存在、nodeKey 唯一、边引用已有 nodeKey、无自环、
-   *  DFS 无有向环、边唯一。任一违反抛 IllegalArgumentException(400)且整事务回滚。返回建出的 dag 头。 */
+  /** 建 DAG(无跨 DAG 依赖):dag + 节点 + 边同事务。校验:引用的 task 存在、nodeKey 唯一、边引用已有 nodeKey、
+   *  无自环、DFS 无有向环、边唯一。任一违反抛 IllegalArgumentException(400)且整事务回滚。返回建出的 dag 头。 */
   Dag createDag(String name, String description, String cron,
+                List<NodeInput> nodes, List<EdgeInput> edges);
+
+  /** 建 DAG(可带跨 DAG 依赖 dependsOnDagId,1d):复用上方校验,另加依赖校验——被依赖 DAG 存在、非自身、
+   *  经 depends_on_dag_id 链 DFS 无环(dependsOnDagId 不能(直接/间接)依赖自己)。dependsOnDagId 非空时 cron 写 NULL。 */
+  Dag createDag(String name, String description, String cron, Long dependsOnDagId,
                 List<NodeInput> nodes, List<EdgeInput> edges);
 
   Optional<Dag> findDag(long id);
@@ -41,6 +46,8 @@ public interface DagRepository {
   long countDags(String name);
   /** 游标分批:返回 id>afterId 的 enabled cron DAG,至多 limit 行;afterId=0 从头。 */
   List<Dag> findCronEnabledDagsPage(long afterId, int limit);
+  /** 1d:返回 depends_on_dag_id=upstreamDagId 且 enabled、非 paused 的下游 DAG(上游成功 → 逐一下游派发一次)。 */
+  List<Dag> findEnabledDependents(long upstreamDagId);
   List<DagNode> findNodes(long dagId);
   List<DagEdge> findEdges(long dagId);
   void setPaused(long dagId, boolean paused);
@@ -50,6 +57,9 @@ public interface DagRepository {
   DagRun createScheduledRun(long dagId, Instant triggerAt);
   /** 手动触发:同 createScheduledRun,幂等键 = manual:{uuid}。 */
   DagRun createManualRun(long dagId);
+  /** 1d:上游 run 成功 → 下游幂等新建一次 run。键 = dep:{upstreamRunId}(IdempotencyKeys.forDagDep),
+   *  trigger_reason = dag:{upstreamRunId};同一上游 run 重复派生 → 幂等复用(崩溃重放自愈)。 */
+  DagRun createDependencyRun(long downstreamDagId, long upstreamRunId);
   Optional<DagRun> findRun(long runId);
   Optional<DagRunNode> findNode(long nodeId);
   /** run 列表;dagId 空则全部,ORDER BY id DESC。 */

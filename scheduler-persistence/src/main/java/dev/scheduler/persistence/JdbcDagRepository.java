@@ -12,10 +12,12 @@ import dev.scheduler.core.IdempotencyKeys;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
@@ -30,11 +32,15 @@ public class JdbcDagRepository implements DagRepository {
     this.tx = new TransactionTemplate(new DataSourceTransactionManager(jdbc.getDataSource()));
   }
 
-  private static final RowMapper<Dag> DAG_MAP = (rs, i) -> new Dag(
-      rs.getLong("id"), rs.getString("name"), rs.getString("description"), rs.getString("cron"),
-      rs.getBoolean("enabled"), rs.getBoolean("paused"),
-      rs.getTimestamp("created_at") != null ? rs.getTimestamp("created_at").toInstant() : null,
-      rs.getTimestamp("updated_at") != null ? rs.getTimestamp("updated_at").toInstant() : null);
+  private static final RowMapper<Dag> DAG_MAP = (rs, i) -> {
+    long did = rs.getLong("depends_on_dag_id");
+    Long dep = rs.wasNull() ? null : did;
+    return new Dag(
+        rs.getLong("id"), rs.getString("name"), rs.getString("description"), rs.getString("cron"), dep,
+        rs.getBoolean("enabled"), rs.getBoolean("paused"),
+        rs.getTimestamp("created_at") != null ? rs.getTimestamp("created_at").toInstant() : null,
+        rs.getTimestamp("updated_at") != null ? rs.getTimestamp("updated_at").toInstant() : null);
+  };
   private static final RowMapper<DagNode> NODE_MAP = (rs, i) -> new DagNode(
       rs.getLong("id"), rs.getLong("dag_id"), rs.getString("node_key"), rs.getLong("task_id"),
       rs.getInt("sort_order"), rs.getInt("node_max_retries"), rs.getLong("node_backoff_ms"),
@@ -65,11 +71,30 @@ public class JdbcDagRepository implements DagRepository {
 
   @Override public Dag createDag(String name, String description, String cron,
                                  List<NodeInput> nodes, List<EdgeInput> edges) {
+    return createDag(name, description, cron, null, nodes, edges);
+  }
+
+  @Override public Dag createDag(String name, String description, String cron, Long dependsOnDagId,
+                                 List<NodeInput> nodes, List<EdgeInput> edges) {
+    // 1d 依赖预校验(在写事务外读,失败抛 IllegalArgumentException(400)不建任何行):
+    // 被依赖 DAG 存在;沿 depends_on 链 DFS 无既有环(建出的新 DAG 尚被引用者不可达,故只须保证所连链条本身无环)。
+    if (dependsOnDagId != null) {
+      findDag(dependsOnDagId).orElseThrow(
+          () -> new IllegalArgumentException("depends_on_dag " + dependsOnDagId + " does not exist"));
+      assertNoDependencyCycle(dependsOnDagId);
+    };
     Long[] dagId = new Long[1];
     tx.executeWithoutResult(s -> {
-      Long did = jdbc.queryForObject(
-          "INSERT INTO app_dag (name, description, cron) VALUES (?,?,?) RETURNING id",
-          Long.class, name, description, cron);
+      Long did;
+      if (dependsOnDagId != null) { // 依赖取代 cron:depends 非空则 cron 写 NULL(互斥已由上层 controller 校验)
+        did = jdbc.queryForObject(
+            "INSERT INTO app_dag (name, description, cron, depends_on_dag_id) VALUES (?,?,NULL,?) RETURNING id",
+            Long.class, name, description, dependsOnDagId);
+      } else {
+        did = jdbc.queryForObject(
+            "INSERT INTO app_dag (name, description, cron) VALUES (?,?,?) RETURNING id",
+            Long.class, name, description, cron);
+      }
       dagId[0] = did;
       Map<String, Long> byKey = new LinkedHashMap<>();
       for (NodeInput n : nodes) {
@@ -129,6 +154,20 @@ public class JdbcDagRepository implements DagRepository {
     return false;
   }
 
+  /** 1d:沿 depends_on 链上行 DFS,任一 DAG 已访问过即存在既有环 → 抛 IllegalArgumentException(400)。 */
+  private void assertNoDependencyCycle(long dagId) {
+    Set<Long> seen = new HashSet<>();
+    long cur = dagId;
+    while (cur != 0) {
+      if (!seen.add(cur)) throw new IllegalArgumentException(
+          "dependency cycle detected among dags (via depends_on_dag_id)");
+      Long next = jdbc.queryForObject(
+          "SELECT depends_on_dag_id FROM app_dag WHERE id=?", Long.class, cur);
+      if (next == null) break;
+      cur = next;
+    }
+  }
+
   @Override public Optional<Dag> findDag(long id) {
     return jdbc.query("SELECT * FROM app_dag WHERE id=?", DAG_MAP, id).stream().findFirst();
   }
@@ -157,6 +196,11 @@ public class JdbcDagRepository implements DagRepository {
         "SELECT * FROM app_dag WHERE enabled AND NOT paused AND cron IS NOT NULL AND id > ?"
             + " ORDER BY id LIMIT ?", DAG_MAP, afterId, limit);
   }
+  @Override public List<Dag> findEnabledDependents(long upstreamDagId) {
+    return jdbc.query(
+        "SELECT * FROM app_dag WHERE enabled AND NOT paused AND depends_on_dag_id = ? ORDER BY id",
+        DAG_MAP, upstreamDagId);
+  }
   @Override public List<DagNode> findNodes(long dagId) {
     return jdbc.query("SELECT * FROM app_dag_node WHERE dag_id=? ORDER BY sort_order, id", NODE_MAP, dagId);
   }
@@ -174,6 +218,10 @@ public class JdbcDagRepository implements DagRepository {
   }
   @Override public DagRun createManualRun(long dagId) {
     return createRun(dagId, IdempotencyKeys.forManualDagRun(dagId), "manual");
+  }
+  @Override public DagRun createDependencyRun(long downstreamDagId, long upstreamRunId) {
+    return createRun(downstreamDagId, IdempotencyKeys.forDagDep(upstreamRunId),
+        "dag:" + upstreamRunId);
   }
   private DagRun createRun(long dagId, String key, String reason) {
     long[] runId = new long[1];

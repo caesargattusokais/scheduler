@@ -156,6 +156,7 @@ public class DagEngine {
               ? DagRunStatus.CANCELED : DagRunStatus.SUCCESS;
       String detail = anyFailSkip ? "node failed"
           : (terminal == DagRunStatus.CANCELED ? "node cancelled" : "all nodes ok");
+      if (terminal == DagRunStatus.SUCCESS) spawnDependents(run); // 1d:上游成功 → 下游各幂等跑一次(事件链)
       dags.finalizeRun(run.id(), terminal, detail);
     }
   }
@@ -218,6 +219,15 @@ public class DagEngine {
     String detail = anyFailed ? "shards failed"
         : (t == DagRunNodeStatus.CANCELED ? "shards cancelled" : "all shards ok");
     dags.markNodeStatus(n.id(), t, detail);
+  }
+
+  /** 1d:上游 run 达成 SUCCESS → 对每个启用、非暂停的下游 DAG 幂等建一次 run(键 dep:{上游runId});下游 run
+   *  由随后的普通传播周期推进。derived 之前的崩溃重放:下游 run 键幂等(同一上游 run 重复派生 → 复用既有行)。
+   *  本调用放在 finalizeRun 之前:即便 finalize 后崩溃,上游已终态离开活跃集;重放时本块整体重跑并幂等重派生/重终结。 */
+  private void spawnDependents(DagRun run) {
+    for (Dag d : dags.findEnabledDependents(run.dagId())) {
+      dags.createDependencyRun(d.id(), run.id());
+    }
   }
 
   /** 节点级退避:指数(attempt 0 起)×backoff,封顶 1h;镜像 RetryPolicy 的 exponential 语义但用节点自持 backoff。 */

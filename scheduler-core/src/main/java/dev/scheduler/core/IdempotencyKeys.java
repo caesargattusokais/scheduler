@@ -29,4 +29,10 @@ public final class IdempotencyKeys {
   public static String forEvent(String dedupeKey) {
     return "event:" + dedupeKey;
   }
+
+  /** 1d 跨 DAG 依赖:上游 dag_run(成功)→ 下游 dag_run 全局幂等键。上游每次都从尾部派生新 run,键 = dep:{上游runId},
+   *  上游不同 run 各生成一个下游 run(事件链语义);重复派生同一下游 → 幂等复用(崩溃重放自愈)。 */
+  public static String forDagDep(long upstreamRunId) {
+    return "dep:" + upstreamRunId;
+  }
 }

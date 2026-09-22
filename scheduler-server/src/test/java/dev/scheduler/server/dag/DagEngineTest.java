@@ -543,4 +543,80 @@ class DagEngineTest {
       assertNotNull(node(run.id(), "C").executionId());
     } finally { leader.close(); }
   }
+
+  /** 1d:上游 run 全节点 SUCCESS → DagEngine 为启用且未暂停的下游幂等建一条 run(键 dep:{上游runId},
+   *  reason dag:{上游runId})。上游已终态离开活跃集 → 后续扫描不重复派生。 */
+  @Test void crossDagDependency_upstreamSuccess_spawnsDownstream_oncePerUpstreamRun() {
+    long t1 = newTask(1), t2 = newTask(1);
+    Dag up = newDag(null, Map.of("A", t1), List.of());
+    long down = dags.createDag("down", null, null, up.id(),
+        List.of(new NodeInput("X", t2, 0)), List.of()).id();
+    var leader = new AdvisoryLockLeaderElection(jdbc);
+    try {
+      var engine = engine(leader);
+      DagRun run = dags.createManualRun(up.id());
+
+      engine.scanOnce(); // S1:A 根节点 spawn
+      assertEquals(DagRunNodeStatus.RUNNING, node(run.id(), "A").status());
+      setShardStatus(run.id(), "A", "SUCCESS");
+      engine.scanOnce(); // S2:A 派生 SUCCESS;++ 全节点终态 → spawnDependents + run SUCCESS
+      assertEquals(DagRunStatus.SUCCESS, dags.findRun(run.id()).orElseThrow().status());
+
+      List<DagRun> downs = dags.findRuns(down);
+      assertEquals(1, downs.size());
+      assertEquals(IdempotencyKeys.forDagDep(run.id()), downs.get(0).idempotencyKey(),
+          "下游 run 幂等键 = dep:{上游runId}");
+      assertEquals("dag:" + run.id(), downs.get(0).triggerReason(),
+          "下游 run trigger_reason = dag:{上游runId}");
+      assertEquals(DagRunStatus.PENDING, downs.get(0).status(),
+          "下游 run 初始 PENDING,由随后普通传播周期推进");
+      assertEquals(1, dags.findNodesOfRun(downs.get(0).id()).size(),
+          "下游 run 已按定义快照节点(同 scan 内不抢跑 spawn,留给下一周期)");
+
+      engine.scanOnce(); // S3:上游已终态离开活跃集 → 下游不重复派生
+      assertEquals(1, dags.findRuns(down).size(), "幂等——上游不再被扫,下游只一条");
+    } finally { leader.close(); }
+  }
+
+  /** 1d:上游 run FAILED → 不派生任何下游 run(事件链只在成功时触发)。 */
+  @Test void crossDagDependency_upstreamFailed_doesNotSpawnDownstream() {
+    long t1 = newTask(1), t2 = newTask(1);
+    Dag up = newDag(null, Map.of("A", t1), List.of());
+    long down = dags.createDag("down", null, null, up.id(),
+        List.of(new NodeInput("X", t2, 0)), List.of()).id();
+    var leader = new AdvisoryLockLeaderElection(jdbc);
+    try {
+      var engine = engine(leader);
+      DagRun run = dags.createManualRun(up.id());
+      engine.scanOnce();
+      setShardStatus(run.id(), "A", "FAILED");
+      engine.scanOnce(); // A FAILED → run FAILED,不派生
+
+      assertEquals(DagRunStatus.FAILED, dags.findRun(run.id()).orElseThrow().status());
+      assertEquals(0, dags.findRuns(down).size(), "上游失败 → 下游 0 条 run");
+    } finally { leader.close(); }
+  }
+
+  /** 1d:下游被暂停(paused)→ 即便上游成功也不为其派生 run;未暂停的下游照派。 */
+  @Test void crossDagDependency_pausedDependent_isNotSpawned() {
+    long t1 = newTask(1), t2 = newTask(1);
+    Dag up = newDag(null, Map.of("A", t1), List.of());
+    long pausedDown = dags.createDag("paused", null, null, up.id(),
+        List.of(new NodeInput("X", t2, 0)), List.of()).id();
+    long liveDown = dags.createDag("live", null, null, up.id(),
+        List.of(new NodeInput("Y", t2, 0)), List.of()).id();
+    dags.setPaused(pausedDown, true);
+
+    var leader = new AdvisoryLockLeaderElection(jdbc);
+    try {
+      var engine = engine(leader);
+      DagRun run = dags.createManualRun(up.id());
+      engine.scanOnce();
+      setShardStatus(run.id(), "A", "SUCCESS");
+      engine.scanOnce(); // 上游成功 → 只派生启用且非暂停的下游
+
+      assertEquals(1, dags.findRuns(liveDown).size(), "未暂停下游 → 派生一次");
+      assertEquals(0, dags.findRuns(pausedDown).size(), "暂停下游 → 不派生");
+    } finally { leader.close(); }
+  }
 }

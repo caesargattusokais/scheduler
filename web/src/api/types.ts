@@ -94,7 +94,9 @@ export interface UpdateTaskRequest extends CreateTaskRequest {
 
 export interface Dag {
   id: number; name: string;
-  description: string | null; cron: string;
+  description: string | null; cron: string | null;
+  /** 1d 跨 DAG 依赖:依赖的上游 DAG id(非空时 cron 为 null,上游每成功一次 → 下游跑一次,事件链)。 */
+  dependsOnDagId: number | null;
   enabled: boolean; paused: boolean;
   createdAt: string | null; updatedAt: string | null;
 }
@@ -106,7 +108,9 @@ export interface DagEdge { id: number; dagId: number; fromNodeId: number; toNode
 export interface CreateDagNode { nodeKey: string; taskId: number; sortOrder: number; nodeMaxRetries: number; nodeBackoffMs: number; runIf: string; }
 export interface CreateDagEdge { from: string; to: string; }
 export interface CreateDagRequest {
-  name: string; description: string | null; cron: string;
+  name: string; description: string | null; cron: string | null;
+  /** 1d 跨 DAG 依赖:cron 与 dependsOnDagId 恰其一(依赖取代定时,互斥)。 */
+  dependsOnDagId?: number | null;
   nodes: CreateDagNode[]; edges: CreateDagEdge[];
 }
 export interface DagRun {

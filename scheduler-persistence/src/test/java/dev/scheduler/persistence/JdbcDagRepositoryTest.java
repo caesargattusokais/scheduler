@@ -6,6 +6,7 @@ import dev.scheduler.core.DagRun;
 import dev.scheduler.core.DagRunNode;
 import dev.scheduler.core.DagRunNodeStatus;
 import dev.scheduler.core.DagRunStatus;
+import dev.scheduler.core.IdempotencyKeys;
 import dev.scheduler.core.Task;
 import java.time.Instant;
 import java.util.List;
@@ -301,6 +302,76 @@ class JdbcDagRepositoryTest extends AbstractPostgresTest {
     assertEquals(eid2, respawned.executionId(), "重 spawn 覆写新 execution");
     assertNull(respawned.nextRetryAt(), "重 spawn 清空退避门");
     assertEquals(2, respawned.attempt(), "attempt 保留不重置(继续计预算)");
+  }
+
+  /** operator 重跑重置 attempt/退避门(1a):重跑即重获完整重试预算。 */
+  /** 1d:建 DAG 带跨 DAG 依赖 → depends_on_dag_id 落库回读、cron 写 NULL(依赖取代 cron)。 */
+  @Test void createDag_withDep_persistsDependsOnDagId_nullCron() {
+    long t = newTask("0 */5 * * * *");
+    long up = dagRepo.createDag("up", "desc", "0 */5 * * * *",
+        List.of(new DagRepository.NodeInput("A", t, 0)), List.of()).id();
+    var down = dagRepo.createDag("down", "desc", null, up,
+        List.of(new DagRepository.NodeInput("X", t, 0)), List.of());
+    assertNull(down.cron(), "依赖取代 cron → cron 写 NULL");
+    assertEquals(up, down.dependsOnDagId(), "depends_on_dag_id 落库回读");
+    assertEquals(up, dagRepo.findDag(down.id()).orElseThrow().dependsOnDagId());
+  }
+
+  /** 1d:被依赖 DAG 不存在 → IllegalArgumentException(400),整事务回滚(不含任何 DAG 残留)。 */
+  @Test void createDag_depNonexistentDag_rejects400() {
+    long t = newTask("0 */5 * * * *");
+    assertThrows(IllegalArgumentException.class, () -> dagRepo.createDag("down", "desc", null, 999999L,
+        List.of(new DagRepository.NodeInput("X", t, 0)), List.of()));
+    assertEquals(0, dagRepo.findAllDags().size(), "rollback — no dag persists");
+  }
+
+  /** 1d:依赖链 A←B←C 无环 → 接受(A,B,C 各自成立,非自身、非环)。 */
+  @Test void createDag_dependencyChain_acceptsAcyclicChain() {
+    long t = newTask("0 */5 * * * *");
+    List<DagRepository.NodeInput> nodes = List.of(new DagRepository.NodeInput("A", t, 0));
+    long a = dagRepo.createDag("a", "desc", "0 */5 * * * *", nodes, List.of()).id();
+    long b = dagRepo.createDag("b", "desc", null, a, nodes, List.of()).id();
+    long c = dagRepo.createDag("c", "desc", null, b, nodes, List.of()).id();
+    assertEquals(b, dagRepo.findDag(c).orElseThrow().dependsOnDagId());
+    assertEquals(a, dagRepo.findDag(b).orElseThrow().dependsOnDagId());
+  }
+
+  /** 1d:findEnabledDependents 只列启用且非暂停的下游;暂停的被排除;与上游无关的 DAG 不列。 */
+  @Test void findEnabledDependents_listsEnabledNotPausedOnly() {
+    long t = newTask("0 */5 * * * *");
+    List<DagRepository.NodeInput> nodes = List.of(new DagRepository.NodeInput("A", t, 0));
+    long up = dagRepo.createDag("up", "desc", "0 */5 * * * *", nodes, List.of()).id();
+    long d1 = dagRepo.createDag("d1", "desc", null, up, nodes, List.of()).id();
+    long d2 = dagRepo.createDag("d2", "desc", null, up, nodes, List.of()).id();
+    dagRepo.setPaused(d2, true); // 暂停 → 排除
+    long unrelated = dagRepo.createDag("other", "desc", "0 */5 * * * *", nodes, List.of()).id();
+    jdbc.update("UPDATE app_dag SET enabled=false WHERE id=?", d1); // 停用 → 排除(无 API,直接 SQL)
+
+    var deps = dagRepo.findEnabledDependents(up);
+    assertEquals(0, deps.size(), "两个下游一暂停一停用 → 无启用且非暂停的依赖项");
+    assertEquals(0, dagRepo.findEnabledDependents(unrelated).size(), "无下游的 DAG → 空");
+  }
+
+  /** 1d:createDependencyRun 幂等 by key dep:{上游runId};重放同一上游 run → 复用同一下游 run,不重复建节点。 */
+  @Test void createDependencyRun_idempotentByDepKey_materializesDownstreamNodes() {
+    long t = newTask("0 */5 * * * *");
+    long up = dagRepo.createDag("up", "desc", "0 */5 * * * *",
+        List.of(new DagRepository.NodeInput("A", t, 0)), List.of()).id();
+    long down = dagRepo.createDag("down", "desc", null, up,
+        List.of(new DagRepository.NodeInput("X", t, 0), new DagRepository.NodeInput("Y", t, 1)),
+        List.of()).id();
+    long upstreamRun = dagRepo.createManualRun(up).id();
+
+    DagRun r1 = dagRepo.createDependencyRun(down, upstreamRun);
+    DagRun r2 = dagRepo.createDependencyRun(down, upstreamRun); // 重放(崩溃自愈)
+    assertEquals(r1.id(), r2.id(), "同一上游 run 重复派生 → 幂等复用同一下游 run");
+    assertEquals(IdempotencyKeys.forDagDep(upstreamRun), r1.idempotencyKey(),
+        "idempotency key = dep:{上游runId}");
+    assertEquals("dag:" + upstreamRun, r1.triggerReason(), "trigger_reason = dag:{上游runId}");
+    assertEquals(1, dagRepo.findRuns(down).size());
+    assertEquals(2, dagRepo.findNodesOfRun(r1.id()).size(), "下游 run 按定义快照全部 PENDING 节点");
+    DagRun back = dagRepo.findRun(r1.id()).orElseThrow();
+    assertEquals(DagRunStatus.PENDING, back.status(), "下游 run 初始 PENDING,待引擎推进");
   }
 
   /** operator 重跑重置 attempt/退避门(1a):重跑即重获完整重试预算。 */

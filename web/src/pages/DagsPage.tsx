@@ -19,6 +19,9 @@ const ZH_STATUS: Record<string, string> = {
   SKIPPED: '被跳过',
 };
 const ZH_TRIGGER: Record<string, string> = { manual: '手动触发', scheduled: '定时调度' };
+/** 触发方式人话:cron→定时,scheduled→定时;1d 跨 DAG(trigger_reason='dag:{上游runId}')→依赖上游批次。 */
+const trig = (r: string | null | undefined) =>
+  (r?.startsWith('dag:') ? `依赖上游批次 #${r.slice(4)}` : ZH_TRIGGER[r ?? ''] ?? r ?? '');
 /** 状态 → 徽章色类(复用全局 badge-* 语义色)。 */
 const STAT_COLOR: Record<string, string> = {
   PENDING: 'badge-amber', DUE: 'badge-amber', RUNNING: 'badge-blue',
@@ -76,6 +79,9 @@ export default function DagsPage() {
   const [bName, setBName] = useState('');
   const [bDesc, setBDesc] = useState('');
   const [bCron, setBCron] = useState('0 */5 * * * *');
+  /** 1d 触发源:cron 定时(cron 非空)或跨 DAG 依赖(上游成功一次 → 本工作流跑一次),互斥。 */
+  const [bTrig, setBTrig] = useState<'cron' | 'dep'>('cron');
+  const [bDep, setBDep] = useState(0);
   const [bSteps, setBSteps] = useState<{ nodeKey: string; taskId: number | null; maxRetries: number; backoffMs: number; runIf: string }[]>([]);
   /** deps[i] = 第 i 步的上游步骤下标(只允许 j < i) */
   const [bDeps, setBDeps] = useState<number[][]>([]);
@@ -85,7 +91,7 @@ export default function DagsPage() {
   const taskById = useMemo(() => new Map(tasks.map((t) => [t.id, t])), [tasks]);
 
   const openBuilder = () => {
-    setBName(''); setBDesc(''); setBCron('0 */5 * * * *'); setBErr(null); setBBusy(false);
+    setBName(''); setBDesc(''); setBCron('0 */5 * * * *'); setBTrig('cron'); setBDep(0); setBErr(null); setBBusy(false);
     setBSteps([{ nodeKey: 'step1', taskId: null, maxRetries: 0, backoffMs: 5000, runIf: 'all_success' }, { nodeKey: 'step2', taskId: null, maxRetries: 0, backoffMs: 5000, runIf: 'all_success' }]);
     setBDeps([[], [0]]); // 第 2 步默认依赖第 1 步 = 线性
     setBuilder(true); // 关键:打开弹窗(此前漏掉,导致点了无反应)
@@ -120,7 +126,9 @@ export default function DagsPage() {
     setBErr(null); setBBusy(true);
     try {
       if (!bName.trim()) throw new Error('请填写工作流名称');
-      if (!bCron.trim()) throw new Error('请填写 cron 调度');
+      const depMode = bTrig === 'dep';
+      if (!depMode && !bCron.trim()) throw new Error('请填写 cron 调度');
+      if (depMode && !bDep) throw new Error('请选择要依赖的上游工作流');
       if (bSteps.length === 0) throw new Error('至少需要一个步骤');
       if (bSteps.some((s) => s.taskId == null)) throw new Error('每个步骤都要选一个任务');
       const nodes = bSteps.map((s, i) => ({ nodeKey: s.nodeKey.trim() || `step${i + 1}`, taskId: s.taskId!, sortOrder: i + 1, nodeMaxRetries: s.maxRetries, nodeBackoffMs: s.backoffMs, runIf: s.runIf }));
@@ -130,7 +138,9 @@ export default function DagsPage() {
       for (let i = 0; i < bSteps.length; i++) for (const j of bDeps[i] ?? []) {
         edges.push({ from: keyOf(j), to: keyOf(i) });
       }
-      const req: CreateDagRequest = { name: bName.trim(), description: bDesc.trim() || null, cron: bCron.trim(), nodes, edges };
+      const req: CreateDagRequest = depMode
+        ? { name: bName.trim(), description: bDesc.trim() || null, cron: null, dependsOnDagId: bDep, nodes, edges }
+        : { name: bName.trim(), description: bDesc.trim() || null, cron: bCron.trim(), nodes, edges };
       const created = await createDag(req);
       setBuilder(false);
       setWfOffset(0);
@@ -271,7 +281,11 @@ export default function DagsPage() {
                     <div className="text-xs text-slate-400">id={d.id}</div>
                   </td>
                   <td className="text-xs text-slate-500 max-w-xs">{d.description || '—'}</td>
-                  <td><code className="rounded bg-slate-100 px-1 font-mono text-xs">{d.cron}</code></td>
+                  <td>
+                    {d.dependsOnDagId != null
+                      ? <span className="text-xs text-slate-600">依赖上游 #<span className="font-mono">{d.dependsOnDagId}</span></span>
+                      : <code className="rounded bg-slate-100 px-1 font-mono text-xs">{d.cron}</code>}
+                  </td>
                   <td>
                     <div className="flex items-center gap-2">
                       <span className={`badge ${live ? 'badge-green' : d.paused ? 'badge-amber' : 'badge-slate'}`}>
@@ -309,7 +323,7 @@ export default function DagsPage() {
             {runs.map((r) => (
               <tr key={r.id} className={detail?.run?.id === r.id ? 'bg-slate-50' : ''}>
                 <td className="num font-medium text-slate-900">#{r.id}</td>
-                <td className="text-xs text-slate-500">{ZH_TRIGGER[r.triggerReason] ?? r.triggerReason}</td>
+                <td className="text-xs text-slate-500">{trig(r.triggerReason)}</td>
                 <td><Chip status={r.status} /></td>
                 <td className="text-xs text-slate-500">{fmt(r.createdAt)}</td>
                 <td className="text-right whitespace-nowrap">
@@ -340,7 +354,7 @@ export default function DagsPage() {
               <Chip status={detail.status} />
             </div>
             <div className="flex items-center gap-2 text-xs text-slate-500">
-              <span>{ZH_TRIGGER[detail.run.triggerReason] ?? detail.run.triggerReason}</span>
+              <span>{trig(detail.run.triggerReason)}</span>
               <span>·</span>
               <span>{orderedNodes.length} 个步骤</span>
               <span>·</span>
@@ -428,18 +442,44 @@ export default function DagsPage() {
                   <input className="input" value={bName} onChange={(e) => setBName(e.target.value)} placeholder="如:每日报表流水线" />
                 </label>
                 <label className="field">
-                  <span className="label">cron 调度 *</span>
-                  <input className="input font-mono" value={bCron} onChange={(e) => setBCron(e.target.value)} />
+                  <span className="label">描述</span>
+                  <input className="input" value={bDesc} onChange={(e) => setBDesc(e.target.value)} placeholder="这个流水线做什么" />
                 </label>
               </div>
-              <label className="field">
-                <span className="label">描述</span>
-                <input className="input" value={bDesc} onChange={(e) => setBDesc(e.target.value)} placeholder="这个流水线做什么" />
-              </label>
-              <p className="text-xs text-slate-400">
-                cron 需要 6 段(秒 分 时 日 月 周)。例:{' '}
-                <code className="rounded bg-slate-100 px-1">0 */5 * * * *</code> 表示每 5 分钟触发一次。
-              </p>
+
+              {/* 1d 触发源:cron(定时)或跨 DAG 依赖(上游成功 → 本工作流跑一次),互斥 */}
+              <div>
+                <div className="mb-1.5 flex flex-wrap items-center gap-3 text-xs text-slate-600">
+                  <span className="shrink-0 text-slate-400">触发方式</span>
+                  <label className="inline-flex cursor-pointer items-center gap-1">
+                    <input type="radio" checked={bTrig === 'cron'} onChange={() => setBTrig('cron')} />
+                    cron 定时
+                  </label>
+                  <label className="inline-flex cursor-pointer items-center gap-1">
+                    <input type="radio" checked={bTrig === 'dep'} onChange={() => setBTrig('dep')} />
+                    依赖上游工作流
+                  </label>
+                </div>
+                {bTrig === 'cron' ? (<>
+                  <label className="field">
+                    <span className="label">cron 调度 *</span>
+                    <input className="input font-mono" value={bCron} onChange={(e) => setBCron(e.target.value)} />
+                  </label>
+                  <p className="text-xs text-slate-400">
+                    cron 需要 6 段(秒 分 时 日 月 周)。例:{' '}
+                    <code className="rounded bg-slate-100 px-1">0 */5 * * * *</code> 表示每 5 分钟触发一次。
+                  </p>
+                </>) : (
+                  <label className="field">
+                    <span className="label">上游工作流 *</span>
+                    <select className="input" value={bDep || ''} onChange={(e) => setBDep(Number(e.target.value))}>
+                      <option value="">选择上游工作流…</option>
+                      {(dags.length ? dags : []).map((d) => <option key={d.id} value={d.id}>#{d.id} {d.name}</option>)}
+                    </select>
+                    <p className="mt-1 text-xs text-slate-400">上游每成功跑完一次,本工作流就自动跑一次(事件链);不用配 cron。</p>
+                  </label>
+                )}
+              </div>
 
               {/* 步骤 + 依赖 */}
               <div>
