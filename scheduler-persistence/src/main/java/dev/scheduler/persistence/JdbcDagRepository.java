@@ -37,7 +37,7 @@ public class JdbcDagRepository implements DagRepository {
       rs.getTimestamp("updated_at") != null ? rs.getTimestamp("updated_at").toInstant() : null);
   private static final RowMapper<DagNode> NODE_MAP = (rs, i) -> new DagNode(
       rs.getLong("id"), rs.getLong("dag_id"), rs.getString("node_key"), rs.getLong("task_id"),
-      rs.getInt("sort_order"));
+      rs.getInt("sort_order"), rs.getInt("node_max_retries"), rs.getLong("node_backoff_ms"));
   private static final RowMapper<DagEdge> EDGE_MAP = (rs, i) -> new DagEdge(
       rs.getLong("id"), rs.getLong("dag_id"), rs.getLong("from_node_id"), rs.getLong("to_node_id"));
   private static final RowMapper<DagRun> RUN_MAP = (rs, i) -> new DagRun(
@@ -55,7 +55,9 @@ public class JdbcDagRepository implements DagRepository {
         DagRunNodeStatus.valueOf(rs.getString("status")), rs.getInt("sort_order"),
         rs.getString("detail"),
         rs.getTimestamp("created_at") != null ? rs.getTimestamp("created_at").toInstant() : null,
-        rs.getTimestamp("finished_at") != null ? rs.getTimestamp("finished_at").toInstant() : null);
+        rs.getTimestamp("finished_at") != null ? rs.getTimestamp("finished_at").toInstant() : null,
+        rs.getInt("attempt"),
+        rs.getTimestamp("next_retry_at") != null ? rs.getTimestamp("next_retry_at").toInstant() : null);
   };
 
   // ---- 定义 ----
@@ -77,8 +79,9 @@ public class JdbcDagRepository implements DagRepository {
         if (byKey.put(n.nodeKey(), -1L) != null) throw new IllegalArgumentException(
             "duplicate node key '" + n.nodeKey() + "'");
         Long nid = jdbc.queryForObject(
-            "INSERT INTO app_dag_node (dag_id, node_key, task_id, sort_order) VALUES (?,?,?,?) RETURNING id",
-            Long.class, did, n.nodeKey(), n.taskId(), n.sortOrder());
+            "INSERT INTO app_dag_node (dag_id, node_key, task_id, sort_order, node_max_retries, node_backoff_ms)"
+                + " VALUES (?,?,?,?,?,?) RETURNING id",
+            Long.class, did, n.nodeKey(), n.taskId(), n.sortOrder(), n.nodeMaxRetries(), n.nodeBackoffMs());
         byKey.put(n.nodeKey(), nid);
       }
       List<long[]> resolved = new ArrayList<>();
@@ -239,7 +242,8 @@ public class JdbcDagRepository implements DagRepository {
     final boolean[] ok = {false};
     tx.executeWithoutResult(s -> {
       int upd = jdbc.update(
-          "UPDATE dag_run_node SET status='RUNNING', execution_id=? WHERE id=? AND status='PENDING'",
+          "UPDATE dag_run_node SET status='RUNNING', execution_id=?, next_retry_at=NULL"
+              + " WHERE id=? AND status='PENDING'",
           executionId, nodeId);
       if (upd == 0) return; // 已非 PENDING(已被推进)→ 静默,不落误导性 outcome
       jdbc.update("INSERT INTO dag_run_node_outcome (node_id, status, detail) VALUES (?,?,?)",
@@ -285,7 +289,8 @@ public class JdbcDagRepository implements DagRepository {
     final boolean[] ok = {false};
     tx.executeWithoutResult(s -> {
       int upd = jdbc.update("""
-        UPDATE dag_run_node SET status='RUNNING', execution_id=?, finished_at=NULL
+        UPDATE dag_run_node SET status='RUNNING', execution_id=?, finished_at=NULL,
+          attempt=0, next_retry_at=NULL
         WHERE id=? AND status IN ('SUCCESS','FAILED','SKIPPED','CANCELED')""",
         newExecutionId, nodeId);
       if (upd == 0) return; // 节点非终态/竞态 → 静默
@@ -293,6 +298,22 @@ public class JdbcDagRepository implements DagRepository {
           runId); // 重开 run,引擎随后重扫重派生(幂等)
       jdbc.update("INSERT INTO dag_run_node_outcome (node_id, status, detail) VALUES (?,?,?)",
           nodeId, "RUNNING", "node rerun");
+      ok[0] = true;
+    });
+    return ok[0];
+  }
+
+  @Override public boolean scheduleNodeRetry(long nodeId, Instant retryAt, int newAttempt, String detail) {
+    final boolean[] ok = {false};
+    tx.executeWithoutResult(s -> {
+      int upd = jdbc.update("""
+        UPDATE dag_run_node SET status='PENDING', attempt=?, next_retry_at=?, execution_id=NULL,
+          finished_at=NULL, detail=?
+        WHERE id=? AND status='RUNNING'""",
+        newAttempt, java.sql.Timestamp.from(retryAt), detail, nodeId);
+      if (upd == 0) return; // 非 RUNNING/竞态 → 静默,不落误导性 outcome
+      jdbc.update("INSERT INTO dag_run_node_outcome (node_id, status, detail) VALUES (?,?,?)",
+          nodeId, "PENDING", detail);
       ok[0] = true;
     });
     return ok[0];

@@ -56,7 +56,8 @@ public class DagController {
 
   public record CreateDagRequest(String name, String description, String cron,
       List<NodeReq> nodes, List<EdgeReq> edges) {}
-  public record NodeReq(String nodeKey, Long taskId, Integer sortOrder) {}
+  public record NodeReq(String nodeKey, Long taskId, Integer sortOrder,
+    Integer nodeMaxRetries, Long nodeBackoffMs) {}
   public record EdgeReq(String from, String to) {}
   public record DagDetail(Dag dag, List<DagNode> nodes, List<DagEdge> edges) {}
 
@@ -75,7 +76,9 @@ public class DagController {
       throw new IllegalArgumentException("nodes must not be empty");
     }
     List<NodeInput> nodes = req.nodes().stream()
-        .map(n -> new NodeInput(n.nodeKey(), n.taskId(), n.sortOrder() == null ? 0 : n.sortOrder()))
+        .map(n -> new NodeInput(n.nodeKey(), n.taskId(), n.sortOrder() == null ? 0 : n.sortOrder(),
+            n.nodeMaxRetries() == null ? 0 : n.nodeMaxRetries(),
+            n.nodeBackoffMs() == null ? 5000 : n.nodeBackoffMs()))
         .toList();
     List<EdgeInput> edges = req.edges() == null ? List.of()
         : req.edges().stream().map(e -> new EdgeInput(e.from(), e.to())).toList();

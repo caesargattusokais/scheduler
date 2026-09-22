@@ -17,6 +17,7 @@ import dev.scheduler.persistence.ShardRepository;
 import dev.scheduler.persistence.TaskRepository;
 import dev.scheduler.server.leader.LeaderElection;
 import java.time.Clock;
+import java.time.Instant;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
 import java.util.ArrayList;
@@ -126,7 +127,11 @@ public class DagEngine {
   private void propagateRun(DagRun run, List<DagRunNode> nodes) {
     // nodeId → nodeKey(用 dag 定义节点映射边引用的 node id 到 run 内的 node_key)
     Map<Long, String> keyByNodeId = new HashMap<>();
-    for (DagNode dn : dags.findNodes(run.dagId())) keyByNodeId.put(dn.id(), dn.nodeKey());
+    Map<String, DagNode> defByKey = new HashMap<>(); // nodeKey → 定义节点(读节点级重试预算)
+    for (DagNode dn : dags.findNodes(run.dagId())) {
+      keyByNodeId.put(dn.id(), dn.nodeKey());
+      defByKey.put(dn.nodeKey(), dn);
+    }
     Map<String, DagRunNode> byKey = new HashMap<>();
     for (DagRunNode n : nodes) byKey.put(n.nodeKey(), n);
     Map<String, List<String>> upstream = upstreamMap(run.dagId(), keyByNodeId);
@@ -138,7 +143,7 @@ public class DagEngine {
       if (n.status() == DagRunNodeStatus.PENDING) {
         stepPendingNode(run, n, ups);
       } else if (n.status() == DagRunNodeStatus.RUNNING) {
-        stepRunningNode(n);
+        stepRunningNode(n, defByKey.get(n.nodeKey()));
       }
     }
 
@@ -155,8 +160,11 @@ public class DagEngine {
     }
   }
 
-  /** §3.1 PENDING 节点:上游失败→SKIPPED(绝不 spawn);上游取消→CANCELED;全 SUCCESS→惰性 spawn RUNNING;否则等。 */
+  /** §3.1 PENDING 节点:上游失败→SKIPPED(绝不 spawn);上游取消→CANCELED;全 SUCCESS→惰性 spawn RUNNING;否则等。
+   *  1a:重试退避门——next_retry_at 在未来(节点刚被 scheduleNodeRetry 回绕待重试)→ 本周期保持 PENDING 不动作,
+   *  到点才重 spawn(镜像 execution 层 DUE 的 next_retry_at 闸)。 */
   private void stepPendingNode(DagRun run, DagRunNode n, List<DagRunNode> ups) {
+    if (n.nextRetryAt() != null && clock.instant().isBefore(n.nextRetryAt())) return;
     boolean anyFailSkip = ups.stream()
         .anyMatch(u -> u.status() == DagRunNodeStatus.FAILED || u.status() == DagRunNodeStatus.SKIPPED);
     if (anyFailSkip) { dags.markNodeStatus(n.id(), DagRunNodeStatus.SKIPPED, "upstream failed"); return; }
@@ -171,22 +179,38 @@ public class DagEngine {
 
   private void spawnNode(DagRun run, DagRunNode n) {
     Task task = tasks.findById(n.taskId()).orElseThrow();
-    String key = "dag:" + run.dagId() + ":run:" + run.id() + ":node:" + n.nodeKey();
+    // key 带 attempt:重试重 spawn 必须换新 idempotency key,否则 createParentWithShards 幂等复用上一个
+    // 已失败的父+shard(1a 修正:同一节点不同 attempt 是不同执行)。首 spawn attempt=0 → :a0。
+    String key = "dag:" + run.dagId() + ":run:" + run.id() + ":node:" + n.nodeKey() + ":a" + n.attempt();
     Execution parent = shards.createParentWithShards(n.taskId(), key, task.shardCount());
     dags.markNodeSpawned(n.id(), parent.id()); // CAS on PENDING;崩溃重放时幂等(同一 key 复用既有父+shard)
   }
 
-  /** §3.2 RUNNING 节点:读其 execution 的全部 shard;全终态后派生节点终态(FAILED 先于 CANCELED 先于 SUCCESS)。 */
-  private void stepRunningNode(DagRunNode n) {
+  /** §3.2 RUNNING 节点:读其 execution 的全部 shard;全终态后派生节点终态(FAILED 先于 CANCELED 先于 SUCCESS)。
+   *  1a 重试劫持:若节点定义允许重试且 attempt 未超预算 → 失败时不标 FAILED,回绕 PENDING 待重试。 */
+  private void stepRunningNode(DagRunNode n, DagNode def) {
     if (n.executionId() == null) return;
     List<Shard> ss = shards.findShards(n.executionId());
     if (!ss.stream().allMatch(s -> s.status().isTerminal())) return; // 未全终态 → 保持 RUNNING,等 worker/对账
     boolean anyFailed = ss.stream().anyMatch(s -> s.status() == ExecutionStatus.FAILED);
+    if (anyFailed && def != null && n.attempt() < def.nodeMaxRetries()) {
+      // 消费一次重试预算:回绕到 PENDING(execution_id 清空)+ attempt+1 + 退避到点;下游仍等;到点由
+      // stepPendingNode 以新 idempotency key(:a{attempt})重 spawn 该节点(不复用已失败的父执行)。
+      Instant retryAt = clock.instant().plusMillis(nodeRetryDelayMs(def, n.attempt()));
+      dags.scheduleNodeRetry(n.id(), retryAt, n.attempt() + 1, "shards failed; will retry");
+      return;
+    }
     DagRunNodeStatus t = anyFailed ? DagRunNodeStatus.FAILED
         : ss.stream().anyMatch(s -> s.status() == ExecutionStatus.CANCELED)
             ? DagRunNodeStatus.CANCELED : DagRunNodeStatus.SUCCESS;
     String detail = anyFailed ? "shards failed"
         : (t == DagRunNodeStatus.CANCELED ? "shards cancelled" : "all shards ok");
     dags.markNodeStatus(n.id(), t, detail);
+  }
+
+  /** 节点级退避:指数(attempt 0 起)×backoff,封顶 1h;镜像 RetryPolicy 的 exponential 语义但用节点自持 backoff。 */
+  private static long nodeRetryDelayMs(DagNode def, int attempt) {
+    long backoff = Math.max(1L, def.nodeBackoffMs());
+    return Math.min(3_600_000L, backoff * (1L << Math.min(attempt, 30)));
   }
 }

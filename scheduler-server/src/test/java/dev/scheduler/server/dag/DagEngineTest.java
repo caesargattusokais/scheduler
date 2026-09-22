@@ -1,6 +1,7 @@
 package dev.scheduler.server.dag;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 
@@ -22,6 +23,7 @@ import dev.scheduler.persistence.TaskRepository;
 import dev.scheduler.server.leader.AdvisoryLockLeaderElection;
 import java.time.Clock;
 import java.time.Instant;
+import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -47,6 +49,16 @@ class DagEngineTest {
   private static final String CRON_EVERY_5 = "0 */5 * * * *";
   private static final Instant FIRED = Instant.parse("2026-01-01T10:05:00Z");
   private static final Clock CLOCK = Clock.fixed(FIRED, ZoneOffset.UTC);
+
+  /** 可推进的时钟:重试退避门测试用它推进越过 next_retry_at(固定 CLOCK 无法前移)。 */
+  private static final class MutableClock extends Clock {
+    private Instant now;
+    MutableClock(Instant now) { this.now = now; }
+    void advance(long ms) { this.now = now.plusMillis(ms); }
+    @Override public ZoneId getZone() { return ZoneOffset.UTC; }
+    @Override public Instant instant() { return now; }
+    @Override public Clock withZone(ZoneId zone) { throw new UnsupportedOperationException(); }
+  }
 
   private static JdbcTemplate jdbc;
   private TaskRepository tasks;
@@ -86,6 +98,16 @@ class DagEngineTest {
   /** 边列表助手:以 varargs 形式给出 String[] 形如 {from, to}(避免 List.of(String[][]) 的泛型收窄歧义)。 */
   private static List<String[]> edges(String[]... es) {
     return List.of(es);
+  }
+
+  /** 建一个每个节点都带统一 nodeMaxRetries/nodeBackoffMs 的 DAG(1a 重试场景)。 */
+  private Dag newDagRetry(String cron, Map<String, Long> byKey, List<String[]> edges,
+                          int maxRetries, long backoffMs) {
+    Map<String, Long> keys = new LinkedHashMap<>(byKey);
+    List<NodeInput> nodes = keys.entrySet().stream()
+        .map(e -> new NodeInput(e.getKey(), e.getValue(), 0, maxRetries, backoffMs)).toList();
+    List<EdgeInput> edgeInputs = edges.stream().map(e -> new EdgeInput(e[0], e[1])).toList();
+    return dags.createDag("d", null, cron, nodes, edgeInputs);
   }
 
   private long newTask(int shardCount) {
@@ -343,6 +365,83 @@ class DagEngineTest {
       assertEquals(3, runningNodeCount(), "三 tick 后三条 run 的根节点全部被 spawn(节点非 PENDING)");
       assertEquals(3, dags.findActiveRunsPage(0L, 100).size(),
           "节点 RUNNING 非终态 → 三条 run 均仍为活跃 PENDING,未被重复/漏处理");
+    } finally { leader.close(); }
+  }
+
+  /** 1a 节点级重试:失败节点(未超预算)→ 回绕 PENDING+退避;未到点被门阻住;到点重 spawn 新执行(不复用失败父);
+   *  预算耗尽 → 标 FAILED、run FAILED。全程下游(若有)保持等待,节点 NEVER 中途终态。 */
+  @Test void nodeRetry_rewindsThenRespawns_thenFailsWhenBudgetExhausted() {
+    long t = newTask(1);
+    MutableClock clock = new MutableClock(FIRED); // backoff=1000, maxRetries=2
+    Dag dag = newDagRetry(null, Map.of("A", t), List.of(), 2, 1000);
+    var leader = new AdvisoryLockLeaderElection(jdbc);
+    try {
+      var engine = new DagEngine(dags, tasks, shards, leader, clock, 200);
+      DagRun run = dags.createManualRun(dag.id());
+
+      engine.scanOnce(); // S1:首 spawn RUNNING,attempt=0
+      Long firstExec = node(run.id(), "A").executionId();
+      assertNotNull(firstExec);
+      assertEquals(0, node(run.id(), "A").attempt());
+
+      setShardStatus(run.id(), "A", "FAILED");
+      engine.scanOnce(); // S2:attempt(0)<2 → 回绕 PENDING,attempt=1,退避到点
+      DagRunNode n = node(run.id(), "A");
+      assertEquals(DagRunNodeStatus.PENDING, n.status(), "预算内失败不标 FAILED,回绕待重试");
+      assertEquals(1, n.attempt());
+      assertNotNull(n.nextRetryAt(), "落退避到点");
+      assertNull(n.executionId(), "回绕清 execution_id");
+
+      engine.scanOnce(); // S3:退避未到点 → 门阻住,仍 PENDING 未重 spawn
+      DagRunNode n2 = node(run.id(), "A");
+      assertEquals(DagRunNodeStatus.PENDING, n2.status());
+      assertNull(n2.executionId(), "未到点不重 spawn");
+      assertEquals(1, n2.attempt());
+
+      clock.advance(2000); // 越过首退避 backoff*2^0=1000
+      engine.scanOnce(); // S4:到点重 spawn,attempt=1,新执行
+      DagRunNode n3 = node(run.id(), "A");
+      assertEquals(DagRunNodeStatus.RUNNING, n3.status());
+      assertEquals(1, n3.attempt());
+      assertNotNull(n3.executionId());
+      assertNotEquals(firstExec, n3.executionId(), "重试是独立新执行(不复用已失败父:key 带 attempt)");
+      assertNull(n3.nextRetryAt(), "重 spawn 清退避门");
+
+      setShardStatus(run.id(), "A", "FAILED");
+      engine.scanOnce(); // S5:attempt(1)<2 → 二次回绕,attempt=2
+      DagRunNode n4 = node(run.id(), "A");
+      assertEquals(DagRunNodeStatus.PENDING, n4.status());
+      assertEquals(2, n4.attempt());
+
+      clock.advance(2000); // 二次退避 backoff*2^1=2000
+      engine.scanOnce(); // S6:二次重 spawn,attempt=2
+      assertEquals(DagRunNodeStatus.RUNNING, node(run.id(), "A").status());
+      assertEquals(2, node(run.id(), "A").attempt());
+      assertNotEquals(firstExec, node(run.id(), "A").executionId());
+
+      setShardStatus(run.id(), "A", "FAILED");
+      engine.scanOnce(); // S7:attempt(2) 不低于 maxRetries(2) → 标 FAILED;单节点 run FAILED
+      assertEquals(DagRunNodeStatus.FAILED, node(run.id(), "A").status());
+      assertEquals(DagRunStatus.FAILED, dags.findRun(run.id()).orElseThrow().status());
+    } finally { leader.close(); }
+  }
+
+  /** 1a 节点重试默认关闭(maxRetries=0):失败直接标 FAILED(旧行为,不引入重试)。 */
+  @Test void nodeRetry_defaultDisabled_failsImmediately() {
+    long t = newTask(1);
+    Dag dag = newDag(null, Map.of("A", t), List.of());
+    var leader = new AdvisoryLockLeaderElection(jdbc);
+    try {
+      var engine = engine(leader); // 固定 CLOCK,默认 3-arg NodeInput → maxRetries=0
+      DagRun run = dags.createManualRun(dag.id());
+      engine.scanOnce();
+
+      setShardStatus(run.id(), "A", "FAILED");
+      engine.scanOnce();
+
+      assertEquals(DagRunNodeStatus.FAILED, node(run.id(), "A").status(),
+          "maxRetries=0 → 失败直接终态失败,无重试");
+      assertEquals(DagRunStatus.FAILED, dags.findRun(run.id()).orElseThrow().status());
     } finally { leader.close(); }
   }
 }

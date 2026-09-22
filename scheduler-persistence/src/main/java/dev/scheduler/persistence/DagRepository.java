@@ -15,7 +15,12 @@ import java.util.Optional;
 public interface DagRepository {
 
   // ---- 定义 ----
-  record NodeInput(String nodeKey, long taskId, int sortOrder) {}
+  record NodeInput(String nodeKey, long taskId, int sortOrder, int nodeMaxRetries, long nodeBackoffMs) {
+    /** 便捷 3 参构造:不配置重试(默认 0/5000),供既有测试/调用方零改动。 */
+    public NodeInput(String nodeKey, long taskId, int sortOrder) {
+      this(nodeKey, taskId, sortOrder, 0, 5000);
+    }
+  }
   record EdgeInput(String from, String to) {}
 
   /** 建 DAG:dag + 节点 + 边同事务。校验:引用的 task 存在、nodeKey 唯一、边引用已有 nodeKey、无自环、
@@ -68,11 +73,18 @@ public interface DagRepository {
   boolean finalizeRun(long runId, DagRunStatus terminal, String detail);
 
   /** 单节点重跑(仅 operator):把终态节点回绕到新一轮运行——CAS on status IN (SUCCESS,FAILED,SKIPPED,CANCELED)
-   *  置 status='RUNNING'、execution_id 重挂新 execution、finished_at 清 NULL;并把 dag_run 重开为 'PENDING'
-   *  (finished_at=NULL)使 findActiveRunsPage 重新纳入、引擎随后重派生。同事务落 dag_run_node_outcome(RUNNING,'node rerun')。
+   *  置 status='RUNNING'、execution_id 重挂新 execution、finished_at 清 NULL、att attempt/next_retry_at 复位
+   *  (重跑重获完整重试预算);并把 dag_run 重开为 'PENDING' (finished_at=NULL)使 findActiveRunsPage 重新纳入、
+   *  引擎随后重派生。同事务落 dag_run_node_outcome(RUNNING,'node rerun')。
    *  CAS 0 行=节点已非终态/竞态 → false,不落 outcome。调用方必须是 DagEngine(引擎是运行表唯一写者)。
    */
   boolean rerunNodeToExecution(long runId, long nodeId, long newExecutionId);
+
+  /** 节点级重试退避(1a):把 RUNNING 节点回绕到 PENDING 待重试——CAS on status='RUNNING' 置 status='PENDING'、
+   *  attempt=newAttempt、next_retry_at=retryAt、execution_id 清空(供重 spawn 建新 execution)、finished_at 清 NULL。
+   *  同事务落 dag_run_node_outcome(PENDING,'node retry')。CAS 0 行=非 RUNNING/竞态 → false,不落 outcome。
+   *  注意:这是重试专用回绕(引擎在 stepRunningNode 拦截),不走正常状态迁移表。调用方必须是 DagEngine。 */
+  boolean scheduleNodeRetry(long nodeId, Instant retryAt, int newAttempt, String detail);
 
   /** 置 run 取消请求标志(cancel_requested=true);仅 PENDING run,静默跳过已终态。 */
   void requestCancelRun(long runId);

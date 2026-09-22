@@ -92,10 +92,10 @@ export interface Dag {
 }
 /** 镜像 DagController.DagDetail。 */
 export interface DagDetail { dag: Dag; nodes: DagNode[]; edges: DagEdge[]; }
-export interface DagNode { id: number; dagId: number; nodeKey: string; taskId: number; sortOrder: number; }
+export interface DagNode { id: number; dagId: number; nodeKey: string; taskId: number; sortOrder: number; nodeMaxRetries: number; nodeBackoffMs: number; }
 export interface DagEdge { id: number; dagId: number; fromNodeId: number; toNodeId: number; }
-/** 建工作流请求(镜像 DagController.CreateDagRequest)。 */
-export interface CreateDagNode { nodeKey: string; taskId: number; sortOrder: number; }
+/** 建工作流请求(镜像 DagController.CreateDagRequest)。nodeMaxRetries 缺省 0=不重试;nodeBackoffMs 缺省 5000。 */
+export interface CreateDagNode { nodeKey: string; taskId: number; sortOrder: number; nodeMaxRetries: number; nodeBackoffMs: number; }
 export interface CreateDagEdge { from: string; to: string; }
 export interface CreateDagRequest {
   name: string; description: string | null; cron: string;
@@ -110,6 +110,7 @@ export interface DagRunNode {
   id: number; dagRunId: number; nodeKey: string; taskId: number;
   executionId: number | null; status: string; sortOrder: number;
   detail: string | null; createdAt: string | null; finishedAt: string | null;
+  attempt: number; nextRetryAt: string | null;
 }
 export interface NodeDetail { node: DagRunNode; shards: Shard[]; }
 export interface RunDetail { run: DagRun; status: string; nodes: NodeDetail[]; }

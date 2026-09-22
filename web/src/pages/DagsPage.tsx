@@ -76,7 +76,7 @@ export default function DagsPage() {
   const [bName, setBName] = useState('');
   const [bDesc, setBDesc] = useState('');
   const [bCron, setBCron] = useState('0 */5 * * * *');
-  const [bSteps, setBSteps] = useState<{ nodeKey: string; taskId: number | null }[]>([]);
+  const [bSteps, setBSteps] = useState<{ nodeKey: string; taskId: number | null; maxRetries: number; backoffMs: number }[]>([]);
   /** deps[i] = 第 i 步的上游步骤下标(只允许 j < i) */
   const [bDeps, setBDeps] = useState<number[][]>([]);
   const [bErr, setBErr] = useState<string | null>(null);
@@ -86,14 +86,14 @@ export default function DagsPage() {
 
   const openBuilder = () => {
     setBName(''); setBDesc(''); setBCron('0 */5 * * * *'); setBErr(null); setBBusy(false);
-    setBSteps([{ nodeKey: 'step1', taskId: null }, { nodeKey: 'step2', taskId: null }]);
+    setBSteps([{ nodeKey: 'step1', taskId: null, maxRetries: 0, backoffMs: 5000 }, { nodeKey: 'step2', taskId: null, maxRetries: 0, backoffMs: 5000 }]);
     setBDeps([[], [0]]); // 第 2 步默认依赖第 1 步 = 线性
     setBuilder(true); // 关键:打开弹窗(此前漏掉,导致点了无反应)
   };
   const keyOf = (i: number) => bSteps[i].nodeKey.trim() || `step${i + 1}`;
 
   const addStep = () => {
-    setBSteps((p) => [...p, { nodeKey: `step${p.length + 1}`, taskId: null }]);
+    setBSteps((p) => [...p, { nodeKey: `step${p.length + 1}`, taskId: null, maxRetries: 0, backoffMs: 5000 }]);
     setBDeps((p) => [...p, []]); // 新步默认无上游,由用户勾选
   };
   const removeStep = (i: number) => {
@@ -123,7 +123,7 @@ export default function DagsPage() {
       if (!bCron.trim()) throw new Error('请填写 cron 调度');
       if (bSteps.length === 0) throw new Error('至少需要一个步骤');
       if (bSteps.some((s) => s.taskId == null)) throw new Error('每个步骤都要选一个任务');
-      const nodes = bSteps.map((s, i) => ({ nodeKey: s.nodeKey.trim() || `step${i + 1}`, taskId: s.taskId!, sortOrder: i + 1 }));
+      const nodes = bSteps.map((s, i) => ({ nodeKey: s.nodeKey.trim() || `step${i + 1}`, taskId: s.taskId!, sortOrder: i + 1, nodeMaxRetries: s.maxRetries, nodeBackoffMs: s.backoffMs }));
       const nodeKeys = new Set(nodes.map((n) => n.nodeKey));
       if (nodeKeys.size !== nodes.length) throw new Error('步骤名重复,请改名');
       const edges = [];
@@ -374,7 +374,7 @@ export default function DagsPage() {
                       <dl className="mt-1.5 space-y-0.5 text-xs text-slate-500">
                         <div><span className="text-slate-400">任务</span> {task?.name ?? `任务 #${n.node.taskId}`}</div>
                         <div><span className="text-slate-400">调度器</span> handler={task?.handlerRef ?? '—'} · {task?.shardCount ?? '—'} 分片</div>
-                        <div><span className="text-slate-400">执行批次</span> exec #{n.node.executionId ?? '—'}</div>
+                        <div><span className="text-slate-400">执行批次</span> exec #{n.node.executionId ?? '—'}{n.node.attempt > 0 && <span className="ml-1 text-indigo-500">· 重试 #{n.node.attempt}</span>}</div>
                         {n.node.detail && <div><span className="text-slate-400">结果</span> {n.node.detail}</div>}
                         <div><span className="text-slate-400">结束</span> {n.node.finishedAt ? fmt(n.node.finishedAt) : '—'}</div>
                       </dl>
@@ -467,6 +467,22 @@ export default function DagsPage() {
                           {tasks.map((t) => <option key={t.id} value={t.id}>{t.name} ({t.handlerRef})</option>)}
                         </select>
                         <button className="btn-danger" onClick={() => removeStep(i)} disabled={bSteps.length <= 1}>删除</button>
+                      </div>
+                      {/* 1a 节点重试:失败在预算内自动重跑该节点(次数/间隔),0 次=不重试 */}
+                      <div className="mt-2 flex items-center gap-3 text-xs text-slate-600">
+                        <span className="shrink-0 text-slate-400">节点重试</span>
+                        <label className="inline-flex items-center gap-1">
+                          <span className="text-slate-400">次数</span>
+                          <input type="number" min={0} className="input w-20"
+                            value={s.maxRetries}
+                            onChange={(e) => setBSteps((p) => p.map((x, k) => (k === i ? { ...x, maxRetries: Math.max(0, Number(e.target.value || 0)) } : x)))} />
+                        </label>
+                        <label className="inline-flex items-center gap-1">
+                          <span className="text-slate-400">间隔 ms</span>
+                          <input type="number" min={0} step={100} className="input w-24"
+                            value={s.backoffMs}
+                            onChange={(e) => setBSteps((p) => p.map((x, k) => (k === i ? { ...x, backoffMs: Math.max(0, Number(e.target.value || 0)) } : x)))} />
+                        </label>
                       </div>
                       {i >= 1 && (
                         <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-600">

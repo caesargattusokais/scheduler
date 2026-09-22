@@ -246,4 +246,70 @@ class JdbcDagRepositoryTest extends AbstractPostgresTest {
 
     assertEquals(2, dagRepo.countActiveRuns()); // A×2 非终态;rb 已终态不计
   }
+
+  /** 建 DAG 可配置每节点重试预算(1a);findNodes 回读新列。 */
+  @Test void createDag_persistsNodeRetryConfig() {
+    long t = newTask("0 */5 * * * *");
+    var dag = dagRepo.createDag("d", "desc", "0 */5 * * * *",
+        List.of(new DagRepository.NodeInput("A", t, 0, 3, 2500)),
+        List.of());
+    var node = dagRepo.findNodes(dag.id()).get(0);
+    assertEquals(3, node.nodeMaxRetries(), "node_max_retries 落库回读");
+    assertEquals(2500L, node.nodeBackoffMs(), "node_backoff_ms 落库回读");
+  }
+
+  /** 节点级重试回绕(1a):RUNNING → PENDING,attempt+1、next_retry_at 落库、execution_id 清空,落 PENDING outcome。
+   *  随后重 spawn:markNodeSpawned 覆写新 execution + 清退避门,attempt 继续保留(计预算)。 */
+  @Test void scheduleNodeRetry_rewindsRunningToPendingBackoff_clearsExecution_thenRespawns() {
+    long dagId = newDag();
+    long runId = dagRepo.createScheduledRun(dagId, Instant.now()).id();
+    var nodes = dagRepo.findNodesOfRun(runId);
+    long nodeA = nodes.get(0).id();
+    long taskId = nodes.get(0).taskId();
+    long eid = shardRepo.createParentWithShards(taskId, "seed-"+System.nanoTime(), 1).id();
+    dagRepo.markNodeSpawned(nodeA, eid); // → RUNNING, execution_id=eid
+
+    Instant retryAt = Instant.now().plusSeconds(30);
+    assertTrue(dagRepo.scheduleNodeRetry(nodeA, retryAt, 2, "shards failed; will retry"));
+
+    DagRunNode n = dagRepo.findNode(nodeA).get();
+    assertEquals(DagRunNodeStatus.PENDING, n.status(), "重试把 RUNNING 回绕到 PENDING");
+    assertEquals(2, n.attempt(), "attempt 写入新计数");
+    assertNotNull(n.nextRetryAt(), "next_retry_at 落库");
+    assertNull(n.executionId(), "待重试 → execution_id 清空(重 spawn 才建新执行)");
+    Integer outcome = jdbc.queryForObject(
+        "SELECT count(*) FROM dag_run_node_outcome WHERE node_id=? AND status='PENDING'",
+        Integer.class, nodeA);
+    assertEquals(1, outcome, "重试回绕落 PENDING outcome");
+
+    long eid2 = shardRepo.createParentWithShards(taskId, "seed2-"+System.nanoTime(), 1).id();
+    assertTrue(dagRepo.markNodeSpawned(nodeA, eid2));
+    DagRunNode respawned = dagRepo.findNode(nodeA).get();
+    assertEquals(eid2, respawned.executionId(), "重 spawn 覆写新 execution");
+    assertNull(respawned.nextRetryAt(), "重 spawn 清空退避门");
+    assertEquals(2, respawned.attempt(), "attempt 保留不重置(继续计预算)");
+  }
+
+  /** operator 重跑重置 attempt/退避门(1a):重跑即重获完整重试预算。 */
+  @Test void rerunNodeToExecution_resetsAttemptAndRetryGate() {
+    long dagId = newDag();
+    long runId = dagRepo.createScheduledRun(dagId, Instant.now()).id();
+    var nodes = dagRepo.findNodesOfRun(runId);
+    long nodeA = nodes.get(0).id();
+    long taskId = nodes.get(0).taskId();
+    long eid = shardRepo.createParentWithShards(taskId, "seed-"+System.nanoTime(), 1).id();
+    dagRepo.markNodeSpawned(nodeA, eid);
+    dagRepo.markNodeStatus(nodeA, DagRunNodeStatus.FAILED, "shards failed"); // 终态
+    jdbc.update("UPDATE dag_run_node SET attempt=3, next_retry_at=now() + interval '1 hour' WHERE id=?",
+        nodeA);
+
+    long eid2 = shardRepo.createParentWithShards(taskId, "rerun-"+System.nanoTime(), 1).id();
+    assertTrue(dagRepo.rerunNodeToExecution(runId, nodeA, eid2));
+
+    DagRunNode n = dagRepo.findNode(nodeA).get();
+    assertEquals(DagRunNodeStatus.RUNNING, n.status());
+    assertEquals(0, n.attempt(), "operator 重跑重置 attempt → 重获完整重试预算");
+    assertNull(n.nextRetryAt(), "operator 重跑清除重试退避门");
+    assertEquals(eid2, n.executionId());
+  }
 }
