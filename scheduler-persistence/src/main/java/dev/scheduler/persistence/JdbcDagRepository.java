@@ -37,7 +37,8 @@ public class JdbcDagRepository implements DagRepository {
       rs.getTimestamp("updated_at") != null ? rs.getTimestamp("updated_at").toInstant() : null);
   private static final RowMapper<DagNode> NODE_MAP = (rs, i) -> new DagNode(
       rs.getLong("id"), rs.getLong("dag_id"), rs.getString("node_key"), rs.getLong("task_id"),
-      rs.getInt("sort_order"), rs.getInt("node_max_retries"), rs.getLong("node_backoff_ms"));
+      rs.getInt("sort_order"), rs.getInt("node_max_retries"), rs.getLong("node_backoff_ms"),
+      rs.getString("run_if"));
   private static final RowMapper<DagEdge> EDGE_MAP = (rs, i) -> new DagEdge(
       rs.getLong("id"), rs.getLong("dag_id"), rs.getLong("from_node_id"), rs.getLong("to_node_id"));
   private static final RowMapper<DagRun> RUN_MAP = (rs, i) -> new DagRun(
@@ -79,9 +80,10 @@ public class JdbcDagRepository implements DagRepository {
         if (byKey.put(n.nodeKey(), -1L) != null) throw new IllegalArgumentException(
             "duplicate node key '" + n.nodeKey() + "'");
         Long nid = jdbc.queryForObject(
-            "INSERT INTO app_dag_node (dag_id, node_key, task_id, sort_order, node_max_retries, node_backoff_ms)"
-                + " VALUES (?,?,?,?,?,?) RETURNING id",
-            Long.class, did, n.nodeKey(), n.taskId(), n.sortOrder(), n.nodeMaxRetries(), n.nodeBackoffMs());
+            "INSERT INTO app_dag_node (dag_id, node_key, task_id, sort_order, node_max_retries, node_backoff_ms, run_if)"
+                + " VALUES (?,?,?,?,?,?,?) RETURNING id",
+            Long.class, did, n.nodeKey(), n.taskId(), n.sortOrder(), n.nodeMaxRetries(), n.nodeBackoffMs(),
+            n.runIf());
         byKey.put(n.nodeKey(), nid);
       }
       List<long[]> resolved = new ArrayList<>();

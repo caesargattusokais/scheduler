@@ -258,6 +258,19 @@ class JdbcDagRepositoryTest extends AbstractPostgresTest {
     assertEquals(2500L, node.nodeBackoffMs(), "node_backoff_ms 落库回读");
   }
 
+  /** 建 DAG 可配置每节点 join 条件(1b run_if);findNodes 回读新列。
+   *  未显式传 join 的既有便捷构造默认 all_success,保证零调用方改动语义不回退。 */
+  @Test void createDag_persistsRunIf() {
+    long t = newTask("0 */5 * * * *");
+    var dag = dagRepo.createDag("d", "desc", "0 */5 * * * *",
+        List.of(new DagRepository.NodeInput("A", t, 0, 0, 5000, "any_success"),
+            new DagRepository.NodeInput("B", t, 1)), // 便捷 3 参 → 默认 all_success
+        List.of());
+    var nodes = dagRepo.findNodes(dag.id());
+    assertEquals("any_success", nodes.get(0).runIf(), "run_if 落库回读");
+    assertEquals("all_success", nodes.get(1).runIf(), "未传 join 默认 all_success");
+  }
+
   /** 节点级重试回绕(1a):RUNNING → PENDING,attempt+1、next_retry_at 落库、execution_id 清空,落 PENDING outcome。
    *  随后重 spawn:markNodeSpawned 覆写新 execution + 清退避门,attempt 继续保留(计预算)。 */
   @Test void scheduleNodeRetry_rewindsRunningToPendingBackoff_clearsExecution_thenRespawns() {

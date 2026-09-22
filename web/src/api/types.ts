@@ -92,10 +92,10 @@ export interface Dag {
 }
 /** 镜像 DagController.DagDetail。 */
 export interface DagDetail { dag: Dag; nodes: DagNode[]; edges: DagEdge[]; }
-export interface DagNode { id: number; dagId: number; nodeKey: string; taskId: number; sortOrder: number; nodeMaxRetries: number; nodeBackoffMs: number; }
+export interface DagNode { id: number; dagId: number; nodeKey: string; taskId: number; sortOrder: number; nodeMaxRetries: number; nodeBackoffMs: number; runIf: string; }
 export interface DagEdge { id: number; dagId: number; fromNodeId: number; toNodeId: number; }
-/** 建工作流请求(镜像 DagController.CreateDagRequest)。nodeMaxRetries 缺省 0=不重试;nodeBackoffMs 缺省 5000。 */
-export interface CreateDagNode { nodeKey: string; taskId: number; sortOrder: number; nodeMaxRetries: number; nodeBackoffMs: number; }
+/** 建工作流请求(镜像 DagController.CreateDagRequest)。nodeMaxRetries 缺省 0=不重试;nodeBackoffMs 缺省 5000;runIf 缺省 'all_success'。 */
+export interface CreateDagNode { nodeKey: string; taskId: number; sortOrder: number; nodeMaxRetries: number; nodeBackoffMs: number; runIf: string; }
 export interface CreateDagEdge { from: string; to: string; }
 export interface CreateDagRequest {
   name: string; description: string | null; cron: string;

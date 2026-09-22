@@ -110,6 +110,18 @@ class DagEngineTest {
     return dags.createDag("d", null, cron, nodes, edgeInputs);
   }
 
+  /** 建一个各节点可独立指定 run_if 的 DAG(1b 条件分支场景);runIfByKey 缺省节点取 all_success。 */
+  private Dag newDagRunIf(String cron, Map<String, Long> byKey, List<String[]> edges,
+                          Map<String, String> runIfByKey) {
+    Map<String, Long> keys = new LinkedHashMap<>(byKey);
+    List<NodeInput> nodes = keys.entrySet().stream()
+        .map(e -> new NodeInput(e.getKey(), e.getValue(), 0, 0, 5000,
+            runIfByKey.getOrDefault(e.getKey(), "all_success")))
+        .toList();
+    List<EdgeInput> edgeInputs = edges.stream().map(e -> new EdgeInput(e[0], e[1])).toList();
+    return dags.createDag("d", null, cron, nodes, edgeInputs);
+  }
+
   private long newTask(int shardCount) {
     return tasks.create(new Task(null, "t", "cron", "demo", null,
         shardCount, 300, 0, 1000, null, 5, true, false)).id();
@@ -442,6 +454,93 @@ class DagEngineTest {
       assertEquals(DagRunNodeStatus.FAILED, node(run.id(), "A").status(),
           "maxRetries=0 → 失败直接终态失败,无重试");
       assertEquals(DagRunStatus.FAILED, dags.findRun(run.id()).orElseThrow().status());
+    } finally { leader.close(); }
+  }
+
+  /** 1b OR-join(any_success):A→C、B→C,C run_if=any_success。A FAILED、B SUCCESS → C 不受 A 失败影响照常 spawn。
+   *  all_success 语义下 A 失败必跳过 C,此处证明 any_success 分支让任一成功上游即可放行。 */
+  @Test void orJoin_runsWhenAnyUpstreamSucceeds() {
+    long t1 = newTask(1), t2 = newTask(1), t3 = newTask(1);
+    Dag dag = newDagRunIf(null, Map.of("A", t1, "B", t2, "C", t3),
+        edges(new String[]{"A", "C"}, new String[]{"B", "C"}),
+        Map.of("C", "any_success"));
+    var leader = new AdvisoryLockLeaderElection(jdbc);
+    try {
+      var engine = engine(leader);
+      DagRun run = dags.createManualRun(dag.id());
+
+      engine.scanOnce(); // S1:A、B 根节点 spawn;C PENDING(两上游均 RUNNING 未终态)
+      assertEquals(DagRunNodeStatus.RUNNING, node(run.id(), "A").status());
+      assertEquals(DagRunNodeStatus.RUNNING, node(run.id(), "B").status());
+      assertEquals(DagRunNodeStatus.PENDING, node(run.id(), "C").status());
+
+      setShardStatus(run.id(), "A", "FAILED");
+      setShardStatus(run.id(), "B", "SUCCESS");
+      engine.scanOnce(); // S2:A FAILED、B SUCCESS;C 本 scan 仍见 scan-start RUNNING → PENDING(跨周期)
+      assertEquals(DagRunNodeStatus.FAILED, node(run.id(), "A").status());
+      assertEquals(DagRunNodeStatus.SUCCESS, node(run.id(), "B").status());
+      assertEquals(DagRunNodeStatus.PENDING, node(run.id(), "C").status());
+
+      engine.scanOnce(); // S3:OR-join:任一上游(B)SUCCESS → C spawn,不受 A FAILED 影响
+      assertEquals(DagRunNodeStatus.RUNNING, node(run.id(), "C").status());
+
+      setShardStatus(run.id(), "C", "SUCCESS");
+      engine.scanOnce(); // S4:C SUCCESS;++ 全节点终态(含 FAILED 的 A)→ run FAILED
+      assertEquals(DagRunNodeStatus.SUCCESS, node(run.id(), "C").status());
+      assertEquals(DagRunStatus.FAILED, dags.findRun(run.id()).orElseThrow().status(),
+          "OR-join 虽放行 C,但任一节点 FAILED → run 仍 FAILED");
+    } finally { leader.close(); }
+  }
+
+  /** 1b OR-join 失败侧:A→C、B→C,C any_success,A、B 均 FAILED → 全部上游终态且无一成功 → C SKIPPED(绝不 spawn)。 */
+  @Test void orJoin_skippedWhenNoUpstreamSucceeded() {
+    long t1 = newTask(1), t2 = newTask(1), t3 = newTask(1);
+    Dag dag = newDagRunIf(null, Map.of("A", t1, "B", t2, "C", t3),
+        edges(new String[]{"A", "C"}, new String[]{"B", "C"}),
+        Map.of("C", "any_success"));
+    var leader = new AdvisoryLockLeaderElection(jdbc);
+    try {
+      var engine = engine(leader);
+      DagRun run = dags.createManualRun(dag.id());
+
+      engine.scanOnce(); // S1:A、B spawn;C PENDING
+      setShardStatus(run.id(), "A", "FAILED");
+      setShardStatus(run.id(), "B", "FAILED");
+      engine.scanOnce(); // S2:A、B FAILED;C 跨周期 PENDING
+      assertEquals(DagRunNodeStatus.FAILED, node(run.id(), "A").status());
+      assertEquals(DagRunNodeStatus.FAILED, node(run.id(), "B").status());
+      assertEquals(DagRunNodeStatus.PENDING, node(run.id(), "C").status());
+
+      engine.scanOnce(); // S3:全部上游终态且无任一 SUCCESS → C SKIPPED
+      assertEquals(DagRunNodeStatus.SKIPPED, node(run.id(), "C").status());
+      assertNull(node(run.id(), "C").executionId(), "OR-join 无上游成功 → 绝不 spawn,直接跳过");
+      assertEquals(DagRunStatus.FAILED, dags.findRun(run.id()).orElseThrow().status());
+    } finally { leader.close(); }
+  }
+
+  /** 1b OR-join 放行 CANCELLED 上游:A→C、B→C,C any_success,A CANCELED(读侧)、B SUCCESS → C 照常 spawn。
+   *  all_success 语义下任一上游 CANCELED 会连带取消 C,此处证明 any_success 分支只认任一成功,忽略已取消上游。 */
+  @Test void orJoin_cancelledUpstreamDoesNotBlockWhenAnotherSucceeds() {
+    long t1 = newTask(1), t2 = newTask(1), t3 = newTask(1);
+    Dag dag = newDagRunIf(null, Map.of("A", t1, "B", t2, "C", t3),
+        edges(new String[]{"A", "C"}, new String[]{"B", "C"}),
+        Map.of("C", "any_success"));
+    var leader = new AdvisoryLockLeaderElection(jdbc);
+    try {
+      var engine = engine(leader);
+      DagRun run = dags.createManualRun(dag.id());
+
+      engine.scanOnce(); // S1:A、B spawn;C PENDING
+      setShardStatus(run.id(), "A", "CANCELED");
+      setShardStatus(run.id(), "B", "SUCCESS");
+      engine.scanOnce(); // S2:A CANCELED、B SUCCESS;C 跨周期 PENDING
+      assertEquals(DagRunNodeStatus.CANCELED, node(run.id(), "A").status());
+      assertEquals(DagRunNodeStatus.SUCCESS, node(run.id(), "B").status());
+      assertEquals(DagRunNodeStatus.PENDING, node(run.id(), "C").status());
+
+      engine.scanOnce(); // S3:任一上游(B)SUCCESS → C 照常 spawn,忽略 CANCELED 的 A
+      assertEquals(DagRunNodeStatus.RUNNING, node(run.id(), "C").status());
+      assertNotNull(node(run.id(), "C").executionId());
     } finally { leader.close(); }
   }
 }

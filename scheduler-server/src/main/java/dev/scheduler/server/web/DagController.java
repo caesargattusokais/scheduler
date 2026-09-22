@@ -57,7 +57,7 @@ public class DagController {
   public record CreateDagRequest(String name, String description, String cron,
       List<NodeReq> nodes, List<EdgeReq> edges) {}
   public record NodeReq(String nodeKey, Long taskId, Integer sortOrder,
-    Integer nodeMaxRetries, Long nodeBackoffMs) {}
+    Integer nodeMaxRetries, Long nodeBackoffMs, String runIf) {}
   public record EdgeReq(String from, String to) {}
   public record DagDetail(Dag dag, List<DagNode> nodes, List<DagEdge> edges) {}
 
@@ -78,7 +78,8 @@ public class DagController {
     List<NodeInput> nodes = req.nodes().stream()
         .map(n -> new NodeInput(n.nodeKey(), n.taskId(), n.sortOrder() == null ? 0 : n.sortOrder(),
             n.nodeMaxRetries() == null ? 0 : n.nodeMaxRetries(),
-            n.nodeBackoffMs() == null ? 5000 : n.nodeBackoffMs()))
+            n.nodeBackoffMs() == null ? 5000 : n.nodeBackoffMs(),
+            n.runIf() == null ? "all_success" : n.runIf()))
         .toList();
     List<EdgeInput> edges = req.edges() == null ? List.of()
         : req.edges().stream().map(e -> new EdgeInput(e.from(), e.to())).toList();

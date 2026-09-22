@@ -76,7 +76,7 @@ export default function DagsPage() {
   const [bName, setBName] = useState('');
   const [bDesc, setBDesc] = useState('');
   const [bCron, setBCron] = useState('0 */5 * * * *');
-  const [bSteps, setBSteps] = useState<{ nodeKey: string; taskId: number | null; maxRetries: number; backoffMs: number }[]>([]);
+  const [bSteps, setBSteps] = useState<{ nodeKey: string; taskId: number | null; maxRetries: number; backoffMs: number; runIf: string }[]>([]);
   /** deps[i] = 第 i 步的上游步骤下标(只允许 j < i) */
   const [bDeps, setBDeps] = useState<number[][]>([]);
   const [bErr, setBErr] = useState<string | null>(null);
@@ -86,14 +86,14 @@ export default function DagsPage() {
 
   const openBuilder = () => {
     setBName(''); setBDesc(''); setBCron('0 */5 * * * *'); setBErr(null); setBBusy(false);
-    setBSteps([{ nodeKey: 'step1', taskId: null, maxRetries: 0, backoffMs: 5000 }, { nodeKey: 'step2', taskId: null, maxRetries: 0, backoffMs: 5000 }]);
+    setBSteps([{ nodeKey: 'step1', taskId: null, maxRetries: 0, backoffMs: 5000, runIf: 'all_success' }, { nodeKey: 'step2', taskId: null, maxRetries: 0, backoffMs: 5000, runIf: 'all_success' }]);
     setBDeps([[], [0]]); // 第 2 步默认依赖第 1 步 = 线性
     setBuilder(true); // 关键:打开弹窗(此前漏掉,导致点了无反应)
   };
   const keyOf = (i: number) => bSteps[i].nodeKey.trim() || `step${i + 1}`;
 
   const addStep = () => {
-    setBSteps((p) => [...p, { nodeKey: `step${p.length + 1}`, taskId: null, maxRetries: 0, backoffMs: 5000 }]);
+    setBSteps((p) => [...p, { nodeKey: `step${p.length + 1}`, taskId: null, maxRetries: 0, backoffMs: 5000, runIf: 'all_success' }]);
     setBDeps((p) => [...p, []]); // 新步默认无上游,由用户勾选
   };
   const removeStep = (i: number) => {
@@ -123,7 +123,7 @@ export default function DagsPage() {
       if (!bCron.trim()) throw new Error('请填写 cron 调度');
       if (bSteps.length === 0) throw new Error('至少需要一个步骤');
       if (bSteps.some((s) => s.taskId == null)) throw new Error('每个步骤都要选一个任务');
-      const nodes = bSteps.map((s, i) => ({ nodeKey: s.nodeKey.trim() || `step${i + 1}`, taskId: s.taskId!, sortOrder: i + 1, nodeMaxRetries: s.maxRetries, nodeBackoffMs: s.backoffMs }));
+      const nodes = bSteps.map((s, i) => ({ nodeKey: s.nodeKey.trim() || `step${i + 1}`, taskId: s.taskId!, sortOrder: i + 1, nodeMaxRetries: s.maxRetries, nodeBackoffMs: s.backoffMs, runIf: s.runIf }));
       const nodeKeys = new Set(nodes.map((n) => n.nodeKey));
       if (nodeKeys.size !== nodes.length) throw new Error('步骤名重复,请改名');
       const edges = [];
@@ -482,6 +482,15 @@ export default function DagsPage() {
                           <input type="number" min={0} step={100} className="input w-24"
                             value={s.backoffMs}
                             onChange={(e) => setBSteps((p) => p.map((x, k) => (k === i ? { ...x, backoffMs: Math.max(0, Number(e.target.value || 0)) } : x)))} />
+                        </label>
+                        {/* 1b 边界分支:join 条件 —— all_success=全部上游成功才跑(默认);any_success=任一上游成功即跑(OR-join) */}
+                        <label className="inline-flex items-center gap-1">
+                          <span className="text-slate-400">满足条件</span>
+                          <select className="input w-36" value={s.runIf}
+                            onChange={(e) => setBSteps((p) => p.map((x, k) => (k === i ? { ...x, runIf: e.target.value } : x)))}>
+                            <option value="all_success">全部成功(默认)</option>
+                            <option value="any_success">任一成功</option>
+                          </select>
                         </label>
                       </div>
                       {i >= 1 && (

@@ -141,7 +141,7 @@ public class DagEngine {
       List<DagRunNode> ups = upstream.getOrDefault(n.nodeKey(), List.of()).stream()
           .map(byKey::get).filter(Objects::nonNull).toList();
       if (n.status() == DagRunNodeStatus.PENDING) {
-        stepPendingNode(run, n, ups);
+        stepPendingNode(run, n, ups, defByKey.get(n.nodeKey()));
       } else if (n.status() == DagRunNodeStatus.RUNNING) {
         stepRunningNode(n, defByKey.get(n.nodeKey()));
       }
@@ -162,9 +162,21 @@ public class DagEngine {
 
   /** §3.1 PENDING 节点:上游失败→SKIPPED(绝不 spawn);上游取消→CANCELED;全 SUCCESS→惰性 spawn RUNNING;否则等。
    *  1a:重试退避门——next_retry_at 在未来(节点刚被 scheduleNodeRetry 回绕待重试)→ 本周期保持 PENDING 不动作,
-   *  到点才重 spawn(镜像 execution 层 DUE 的 next_retry_at 闸)。 */
-  private void stepPendingNode(DagRun run, DagRunNode n, List<DagRunNode> ups) {
+   *  到点才重 spawn(镜像 execution 层 DUE 的 next_retry_at 闸)。
+   *  1b:run_if='any_success' 走 OR-join——任一上游 SUCCESS 即 spawn(即便其它上游失败/跳过/取消);仅当全部
+   *  上游终态且无任一成功 → 被跳过('no upstream succeeded')。默认 all_success 保持旧语义。 */
+  private void stepPendingNode(DagRun run, DagRunNode n, List<DagRunNode> ups, DagNode def) {
     if (n.nextRetryAt() != null && clock.instant().isBefore(n.nextRetryAt())) return;
+    if (def != null && "any_success".equals(def.runIf())) {
+      // OR-join:无上游(根节点)或任一上游成功 → 直接就绪 spawn;否则等。
+      if (ups.isEmpty() || ups.stream().anyMatch(u -> u.status() == DagRunNodeStatus.SUCCESS)) {
+        spawnNode(run, n);
+        return;
+      }
+      boolean allTerminal = ups.stream().allMatch(u -> u.status().isTerminal());
+      if (allTerminal) dags.markNodeStatus(n.id(), DagRunNodeStatus.SKIPPED, "no upstream succeeded");
+      return; // 仍有上游未终态 → 等
+    }
     boolean anyFailSkip = ups.stream()
         .anyMatch(u -> u.status() == DagRunNodeStatus.FAILED || u.status() == DagRunNodeStatus.SKIPPED);
     if (anyFailSkip) { dags.markNodeStatus(n.id(), DagRunNodeStatus.SKIPPED, "upstream failed"); return; }

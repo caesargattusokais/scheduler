@@ -15,10 +15,15 @@ import java.util.Optional;
 public interface DagRepository {
 
   // ---- 定义 ----
-  record NodeInput(String nodeKey, long taskId, int sortOrder, int nodeMaxRetries, long nodeBackoffMs) {
-    /** 便捷 3 参构造:不配置重试(默认 0/5000),供既有测试/调用方零改动。 */
+  record NodeInput(String nodeKey, long taskId, int sortOrder, int nodeMaxRetries, long nodeBackoffMs,
+                   String runIf) {
+    /** 便捷 3 参构造:不配置重试/join(默认 0/5000/all_success),供既有测试/调用方零改动。 */
     public NodeInput(String nodeKey, long taskId, int sortOrder) {
-      this(nodeKey, taskId, sortOrder, 0, 5000);
+      this(nodeKey, taskId, sortOrder, 0, 5000, "all_success");
+    }
+    /** 便捷 5 参构造:配置重试但 join 取默认 all_success(1a 既有调用零改动)。 */
+    public NodeInput(String nodeKey, long taskId, int sortOrder, int nodeMaxRetries, long nodeBackoffMs) {
+      this(nodeKey, taskId, sortOrder, nodeMaxRetries, nodeBackoffMs, "all_success");
     }
   }
   record EdgeInput(String from, String to) {}
