@@ -135,6 +135,50 @@ class TriggerEngineTest extends AbstractTriggerEngineTest {
     } finally { holder.close(); }
   }
 
+  /** 3a interval 触发:任务 cron=null、intervalSeconds=60。FIXED now=10:05:00Z 恰为 60s 边界的整数秒,
+   *  首次 scan 在边界即下发一条 DUE;再扫同一边界幂等不新增(键 = 边界 instant)。 */
+  @Test void intervalTask_firesAtAlignedBoundary_idempotentOnRescan() {
+    long interval = 60;
+    long boundary = Math.floorDiv(FIXED_CLOCK.instant().getEpochSecond(), interval) * interval;
+    var leader = new AdvisoryLockLeaderElection(jdbc);
+    try {
+      long taskId = tasks.create(new Task(null, "t", "interval", "demo", null,
+          1, 300, 0, 1000, null, 8, true, false, null, null, null, "UTC", (int) interval)).id();
+      var engine = new TriggerEngine(tasks, executions, shards, leader, FIXED_CLOCK, 200);
+      engine.scanOnce();
+      assertEquals(1, countExecutions(taskId), "边界命中间隔 → 恰 1 父 execution");
+      long parentId = executions.findCandidate(taskId).orElseThrow().id();
+      assertEquals(IdempotencyKeys.forTrigger(taskId, Instant.ofEpochSecond(boundary)),
+          shards.findParent(parentId).orElseThrow().idempotencyKey(), "幂等键 = 对齐边界 instant");
+      assertEquals(1, shards.findShards(parentId).size(), "单 shard 任务 → 恰 1 条 DUE shard");
+
+      engine.scanOnce(); // 同一边界再扫 → 幂等不新增
+      assertEquals(1, countExecutions(taskId));
+      assertEquals(parentId, executions.findCandidate(taskId).orElseThrow().id());
+    } finally { leader.close(); }
+  }
+
+  /** 3a 时区感知 cron:同一 cron「0 5 10 * * *」(每日 10:05)在 UTC 解释恰落在本分钟窗(现 now=10:05:00Z)→ 触发;
+   *  在 Asia/Shanghai(UTC+8)解释则本地 18:05 是本日最后一个 10:05 之后的下一天,落在 61s 窗外 → 不触发。
+   *  证明时区改变 cron 匹配窗口(同一绝对时刻,不同本地日)。FIXED now=2026-01-01T10:05:00Z。 */
+  @Test void cronTask_timezoneShiftsMatchingWindow() {
+    var leader = new AdvisoryLockLeaderElection(jdbc);
+    try {
+      long utc = tasks.create(new Task(null, "tz-utc", "cron", "demo", "0 5 10 * * *",
+          1, 300, 0, 1000, null, 8, true, false, null, null, null, "UTC", null)).id();
+      long sh = tasks.create(new Task(null, "tz-sh", "cron", "demo", "0 5 10 * * *",
+          1, 300, 0, 1000, null, 8, true, false, null, null, null, "Asia/Shanghai", null)).id();
+      var engine = new TriggerEngine(tasks, executions, shards, leader, FIXED_CLOCK, 200);
+      engine.scanOnce();
+
+      assertEquals(1, countExecutions(utc), "UTC 解释:10:05 tick 落在本分钟窗 → 触发");
+      assertEquals(0, countExecutions(sh), "Asia/Shanghai 解释:本地 18:05 距下个 10:05 一整天 → 窗外不触发");
+      long parentId = executions.findCandidate(utc).orElseThrow().id();
+      assertEquals(IdempotencyKeys.forTrigger(utc, Instant.parse("2026-01-01T10:05:00Z")),
+          shards.findParent(parentId).orElseThrow().idempotencyKey(), "fired 用绝对 instant,不随时区漂移");
+    } finally { leader.close(); }
+  }
+
   /** §4 游标分批:两个候选任务(minute 内各命中一次)在 batch=1 时跨 tick 覆盖,不重不漏。 */
   @Test void scanOnce_batchesAcrossTicks_coversAllTasksOnce() throws Exception {
     var leader = new AdvisoryLockLeaderElection(jdbc);

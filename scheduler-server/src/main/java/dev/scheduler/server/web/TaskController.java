@@ -7,6 +7,7 @@ import dev.scheduler.persistence.ShardRepository;
 import dev.scheduler.persistence.TaskRepository;
 import dev.scheduler.server.security.CurrentOperator;
 import dev.scheduler.server.service.AuditRecorder;
+import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -50,12 +51,14 @@ public class TaskController {
   public record CreateTaskRequest(String name, String kind, String handlerRef, String cron,
       Integer shardCount, Integer timeoutSeconds, Integer maxRetries, Long backoffMs,
       String retryableFailurePattern, Integer maxActiveConcurrent,
-      String retryMode, Long retryCapMs, Long retryBudgetMs) {}
+      String retryMode, Long retryCapMs, Long retryBudgetMs,
+      String timezone, Integer intervalSeconds) {}
 
   public record UpdateTaskRequest(String name, String kind, String handlerRef, String cron,
       Integer shardCount, Integer timeoutSeconds, Integer maxRetries, Long backoffMs,
       String retryableFailurePattern, Integer maxActiveConcurrent, Boolean paused,
-      String retryMode, Long retryCapMs, Long retryBudgetMs) {}
+      String retryMode, Long retryCapMs, Long retryBudgetMs,
+      String timezone, Integer intervalSeconds) {}
 
   @PostMapping
   public ResponseEntity<Task> create(
@@ -66,13 +69,11 @@ public class TaskController {
     if (req.handlerRef() == null || req.handlerRef().isBlank()) {
       throw new IllegalArgumentException("handlerRef is required");
     }
-    if (req.cron() == null || req.cron().isBlank()) {
-      throw new IllegalArgumentException("cron is required");
-    }
     requireAvailableHandlerRef(req.handlerRef());
     checkDefinition(req.name(), req.handlerRef(), req.cron(), req.shardCount(),
         req.timeoutSeconds(), req.maxRetries(), req.backoffMs(), req.maxActiveConcurrent(),
-        req.retryMode(), req.retryCapMs(), req.retryBudgetMs());
+        req.retryMode(), req.retryCapMs(), req.retryBudgetMs(),
+        req.timezone(), req.intervalSeconds());
     Task created = tasks.create(new Task(
         null, req.name(), req.kind() == null ? "cron" : req.kind(), req.handlerRef(), req.cron(),
         req.shardCount() == null ? 1 : req.shardCount(),
@@ -80,7 +81,8 @@ public class TaskController {
         req.maxRetries() == null ? 0 : req.maxRetries(),
         req.backoffMs() == null ? 1000L : req.backoffMs(),
         req.retryableFailurePattern(), req.maxActiveConcurrent() == null ? 8 : req.maxActiveConcurrent(),
-        true, false, req.retryMode(), req.retryCapMs(), req.retryBudgetMs()));
+        true, false, req.retryMode(), req.retryCapMs(), req.retryBudgetMs(),
+        req.timezone() == null ? "UTC" : req.timezone(), req.intervalSeconds()));
     auditor.record(current.get(), "task.create", TargetType.TASK, created.id(), taskMeta(created));
     return ResponseEntity.status(HttpStatus.CREATED).body(created);
   }
@@ -94,13 +96,11 @@ public class TaskController {
     if (req.handlerRef() == null || req.handlerRef().isBlank()) {
       throw new IllegalArgumentException("handlerRef is required");
     }
-    if (req.cron() == null || req.cron().isBlank()) {
-      throw new IllegalArgumentException("cron is required");
-    }
     requireAvailableHandlerRef(req.handlerRef());
     checkDefinition(req.name(), req.handlerRef(), req.cron(), req.shardCount(),
         req.timeoutSeconds(), req.maxRetries(), req.backoffMs(), req.maxActiveConcurrent(),
-        req.retryMode(), req.retryCapMs(), req.retryBudgetMs());
+        req.retryMode(), req.retryCapMs(), req.retryBudgetMs(),
+        req.timezone(), req.intervalSeconds());
     Task updated = new Task(id, req.name(), req.kind() == null ? existing.kind() : req.kind(),
         req.handlerRef(), req.cron(),
         req.shardCount() == null ? existing.shardCount() : req.shardCount(),
@@ -113,7 +113,9 @@ public class TaskController {
         req.paused() == null ? existing.paused() : req.paused(),
         req.retryMode() == null ? existing.retryMode() : req.retryMode(),
         req.retryCapMs() == null ? existing.retryCapMs() : req.retryCapMs(),
-        req.retryBudgetMs() == null ? existing.retryBudgetMs() : req.retryBudgetMs());
+        req.retryBudgetMs() == null ? existing.retryBudgetMs() : req.retryBudgetMs(),
+        req.timezone() == null ? existing.timezone() : req.timezone(),
+        req.intervalSeconds() == null ? existing.intervalSeconds() : req.intervalSeconds());
     if (!tasks.update(id, updated)) {
       throw notFound("task " + id);
     }
@@ -260,6 +262,8 @@ public class TaskController {
     putDiff(d, "retryMode", before.retryMode(), after.retryMode());
     putDiff(d, "retryCapMs", before.retryCapMs(), after.retryCapMs());
     putDiff(d, "retryBudgetMs", before.retryBudgetMs(), after.retryBudgetMs());
+    putDiff(d, "timezone", before.timezone(), after.timezone());
+    putDiff(d, "intervalSeconds", before.intervalSeconds(), after.intervalSeconds());
     return d;
   }
 
@@ -276,10 +280,29 @@ public class TaskController {
 
   /** 定义域数值合法性:负值即 400;cron 必须 6/7 字段且可被 Spring 解析(字段值非法提前 400,防坏 cron 入库
    *  运行时级联拖垮触发扫描)。maxActiveConcurrent 为并发配额,必须 >= 1(0/负会让 claim 闸门恒 false → 任务
-   *  永久卡 DUE)。 */
+   *  永久卡 DUE)。
+   *  3a 触发时钟:任务必须恰具其一(cron 或 intervalSeconds),同时给 → 400(歧义);timezone 必须为合法 ZoneId
+   *  (默认 UTC);intervalSeconds >= 1。cron 为空时不校验 cron(此时走间隔触发)。 */
   static void checkDefinition(String name, String handlerRef, String cron,
       Integer shardCount, Integer timeoutSeconds, Integer maxRetries, Long backoffMs,
-      Integer maxActiveConcurrent, String retryMode, Long retryCapMs, Long retryBudgetMs) {
+      Integer maxActiveConcurrent, String retryMode, Long retryCapMs, Long retryBudgetMs,
+      String timezone, Integer intervalSeconds) {
+    boolean hasCron = cron != null && !cron.isBlank();
+    if (hasCron && intervalSeconds != null) {
+      throw new IllegalArgumentException("provide either cron or intervalSeconds, not both");
+    }
+    if (!hasCron && intervalSeconds == null) {
+      throw new IllegalArgumentException("cron or intervalSeconds is required");
+    }
+    if (intervalSeconds != null && intervalSeconds < 1) {
+      throw new IllegalArgumentException("intervalSeconds must be >= 1");
+    }
+    if (timezone != null && !timezone.isBlank()) {
+      try { ZoneId.of(timezone); }
+      catch (java.time.DateTimeException badZone) {
+        throw new IllegalArgumentException("bad timezone: " + timezone);
+      }
+    }
     if (retryMode != null && !retryMode.isBlank()
         && !(retryMode.equals("fixed") || retryMode.equals("linear") || retryMode.equals("exponential"))) {
       throw new IllegalArgumentException("retryMode must be one of fixed|linear|exponential");
@@ -293,7 +316,7 @@ public class TaskController {
     if (maxActiveConcurrent != null && maxActiveConcurrent < 1) {
       throw new IllegalArgumentException("maxActiveConcurrent must be >= 1");
     }
-    validateCron(cron);
+    if (hasCron) validateCron(cron); // 间隔触发任务(cron 空)不校验 cron
   }
 
   /** 本项目 cron 一律 6 字段(或 7 字段带年);5 字段会被 Spring 6 解析器直接抛异常处决在前面。

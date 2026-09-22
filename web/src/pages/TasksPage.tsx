@@ -12,7 +12,10 @@ const PAGE_SIZE = 10;
 const EMPTY: CreateTaskRequest = {
   name: '', handlerRef: '', cron: '0 */5 * * * *', shardCount: 1,
   timeoutSeconds: 300, maxRetries: 0, backoffMs: 1000, maxActiveConcurrent: 8,
+  timezone: 'UTC',
 };
+
+const CRON_DEFAULT = '0 */5 * * * *';
 
 export default function TasksPage() {
   const [tasks, setTasks] = useState<Task[]>([]);
@@ -24,6 +27,7 @@ export default function TasksPage() {
   const [form, setForm] = useState<CreateTaskRequest>(EMPTY);
   const [editId, setEditId] = useState<number | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [trigType, setTrigType] = useState<'cron' | 'interval'>('cron');
 
   const refresh = useCallback(() => {
     listTasks({
@@ -55,9 +59,11 @@ export default function TasksPage() {
   }
   function beginEdit(t: Task) {
     setEditId(t.id);
+    setTrigType(t.intervalSeconds ? 'interval' : 'cron');
     setForm({ name: t.name, handlerRef: t.handlerRef, cron: t.cron, shardCount: t.shardCount,
       timeoutSeconds: t.timeoutSeconds, maxRetries: t.maxRetries, backoffMs: t.backoffMs,
-      retryableFailurePattern: t.retryableFailurePattern ?? undefined, maxActiveConcurrent: t.maxActiveConcurrent });
+      retryableFailurePattern: t.retryableFailurePattern ?? undefined, maxActiveConcurrent: t.maxActiveConcurrent,
+      timezone: t.timezone, intervalSeconds: t.intervalSeconds });
   }
   async function act(fn: () => Promise<unknown>) {
     try { await fn(); setErr(null); refresh(); } catch (x) { setErr(String(x)); }
@@ -136,8 +142,35 @@ export default function TasksPage() {
           {field('backoffMs', '退避 (ms)', 'number')}
           {field('maxActiveConcurrent', '最大并发', 'number')}
         </div>
+        {/* 3a 触发时钟:任务须恰具其一(cron 或间隔秒);时区仅解释 cron(默认 UTC) */}
         <div className="mt-3">
-          <CronEditor value={form.cron} onChange={(v) => setForm({ ...form, cron: v })} />
+          <div className="mb-2 flex items-center gap-3 text-xs text-slate-600">
+            <span className="shrink-0 text-slate-400">触发方式</span>
+            <label className="inline-flex cursor-pointer items-center gap-1">
+              <input type="radio" checked={trigType === 'cron'}
+                onChange={() => { setTrigType('cron'); setForm((f) => ({ ...f, cron: f.cron ?? CRON_DEFAULT, intervalSeconds: null })); }} />
+              Cron
+            </label>
+            <label className="inline-flex cursor-pointer items-center gap-1">
+              <input type="radio" checked={trigType === 'interval'}
+                onChange={() => { setTrigType('interval'); setForm((f) => ({ ...f, cron: null, intervalSeconds: f.intervalSeconds ?? 60 })); }} />
+              间隔 (秒)
+            </label>
+            <label className="inline-flex items-center gap-1">
+              <span className="text-slate-400">时区</span>
+              <input className="input w-40 font-mono" value={form.timezone ?? 'UTC'}
+                onChange={(e) => setForm({ ...form, timezone: e.target.value })} />
+            </label>
+          </div>
+          {trigType === 'interval' ? (
+            <label className="field">
+              <span className="label">间隔 (秒)</span>
+              <input type="number" min={1} className="input" value={form.intervalSeconds ?? ''}
+                onChange={(e) => setForm({ ...form, intervalSeconds: Math.max(1, Number(e.target.value || 0)) })} />
+            </label>
+          ) : (
+            <CronEditor value={form.cron ?? ''} onChange={(v) => setForm({ ...form, cron: v })} />
+          )}
         </div>
         <div className="mt-3 flex items-center gap-2">
           <button type="submit" className="btn-primary">{editId === null ? '创建任务' : '保存修改'}</button>
@@ -150,14 +183,14 @@ export default function TasksPage() {
       <div className="table-wrap">
         <table className="table">
           <thead>
-            <tr><th>ID</th><th>名称</th><th>Cron</th><th className="num">分片</th><th>状态</th><th>操作</th></tr>
+            <tr><th>ID</th><th>名称</th><th>触发</th><th className="num">分片</th><th>状态</th><th>操作</th></tr>
           </thead>
           <tbody>
             {tasks.map((t) => (
               <tr key={t.id}>
                 <td className="num">{t.id}</td>
                 <td className="font-medium text-slate-900">{t.name}</td>
-                <td><code className="text-xs text-slate-500">{t.cron}</code></td>
+                <td>{t.intervalSeconds ? <code className="text-xs text-slate-500">每 {t.intervalSeconds}s</code> : <code className="text-xs text-slate-500">{t.cron ?? '-'}</code>}</td>
                 <td className="num">{t.shardCount}</td>
                 <td>{t.paused ? <span className="badge badge-slate">暂停</span> : <span className="badge badge-green">启用</span>}</td>
                 <td className="whitespace-nowrap">

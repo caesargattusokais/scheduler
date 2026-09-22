@@ -241,6 +241,32 @@ class ApiIntegrationTest {
         .andExpect(jsonPath("$.name").value("create-list-task"));
   }
 
+  /** 3a:间隔触发任务(cron=null + intervalSeconds)可建;timezone 缺省回读 UTC;GET 读回新列。 */
+  @Test
+  void createTask_intervalTrigger_timezoneDefaultsUtc() throws Exception {
+    String body = "{\"name\":\"interval-task\",\"kind\":\"interval\",\"handlerRef\":\"demo\","
+        + "\"intervalSeconds\":60,\"timezone\":\"Asia/Shanghai\"}";
+    MvcResult r = mvc.perform(post("/api/v1/tasks").contentType(MediaType.APPLICATION_JSON).content(body))
+        .andExpect(status().isCreated())
+        .andReturn();
+    long id = objectMapper.readTree(r.getResponse().getContentAsString()).get("id").asLong();
+
+    mvc.perform(get("/api/v1/tasks/" + id))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.cron").value((String) null))
+        .andExpect(jsonPath("$.intervalSeconds").value(60))
+        .andExpect(jsonPath("$.timezone").value("Asia/Shanghai"));
+  }
+
+  /** 3a:cron 与 intervalSeconds 同给 → 400(cron 或 interval 恰具其一)。 */
+  @Test
+  void createTask_bothCronAndInterval_rejects400() throws Exception {
+    String body = "{\"name\":\"both\",\"kind\":\"cron\",\"handlerRef\":\"demo\","
+        + "\"cron\":\"" + CRON + "\",\"intervalSeconds\":30}";
+    mvc.perform(post("/api/v1/tasks").contentType(MediaType.APPLICATION_JSON).content(body))
+        .andExpect(status().isBadRequest());
+  }
+
   /** M6.3:表单下拉框的数据源 = 纯存活 worker 注册表并集(与 create/update 校验同源;无进程内 handler)。 */
   @Test
   void handlersEndpoint_listsRegisteredRefs() throws Exception {

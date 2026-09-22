@@ -21,7 +21,8 @@ public class JdbcTaskRepository implements TaskRepository {
       rs.getString("retryable_failure_pattern"), rs.getInt("max_active_concurrent"),
       rs.getBoolean("enabled"), rs.getBoolean("paused"),
       rs.getString("retry_mode"), (Long) rs.getObject("retry_cap_ms"),
-      (Long) rs.getObject("retry_budget_ms"));
+      (Long) rs.getObject("retry_budget_ms"),
+      rs.getString("timezone"), (Integer) rs.getObject("interval_seconds"));
 
   @Override public Task create(Task t) {
     KeyHolder kh = new GeneratedKeyHolder();
@@ -29,8 +30,8 @@ public class JdbcTaskRepository implements TaskRepository {
       var ps = con.prepareStatement("""
         INSERT INTO app_task (name, kind, handler_ref, cron, shard_count, timeout_seconds,
                               max_retries, backoff_ms, retryable_failure_pattern, max_active_concurrent,
-                              retry_mode, retry_cap_ms, retry_budget_ms)
-        VALUES (?,?,?,?,?,?,?,?,?,?,COALESCE(?, 'exponential'),?,?)""",
+                              retry_mode, retry_cap_ms, retry_budget_ms, timezone, interval_seconds)
+        VALUES (?,?,?,?,?,?,?,?,?,?,COALESCE(?, 'exponential'),?,?,?,?)""",
           new String[]{"id"});
       ps.setString(1, t.name()); ps.setString(2, t.kind()); ps.setString(3, t.handlerRef());
       ps.setString(4, t.cron()); ps.setInt(5, t.shardCount()); ps.setInt(6, t.timeoutSeconds());
@@ -39,20 +40,23 @@ public class JdbcTaskRepository implements TaskRepository {
       ps.setString(11, t.retryMode());
       ps.setObject(12, t.retryCapMs(), java.sql.Types.BIGINT);
       ps.setObject(13, t.retryBudgetMs(), java.sql.Types.BIGINT);
+      ps.setString(14, t.timezone());
+      ps.setObject(15, t.intervalSeconds(), java.sql.Types.INTEGER);
       return ps;
     }, kh);
     return new Task(kh.getKey().longValue(), t.name(), t.kind(), t.handlerRef(), t.cron(),
         t.shardCount(), t.timeoutSeconds(), t.maxRetries(), t.backoffMs(),
         t.retryableFailurePattern(), t.maxActiveConcurrent(), true, false,
-        t.retryMode(), t.retryCapMs(), t.retryBudgetMs());
+        t.retryMode(), t.retryCapMs(), t.retryBudgetMs(), t.timezone(), t.intervalSeconds());
   }
 
   @Override public Optional<Task> findById(long id) {
     return jdbc.query("SELECT * FROM app_task WHERE id=?", MAP, id).stream().findFirst();
   }
-  @Override public List<Task> findCronEnabledPage(long afterId, int limit) {
+  @Override public List<Task> findScheduleEnabledPage(long afterId, int limit) {
     return jdbc.query(
-        "SELECT * FROM app_task WHERE enabled AND NOT paused AND cron IS NOT NULL AND id > ?"
+        "SELECT * FROM app_task WHERE enabled AND NOT paused"
+            + " AND (cron IS NOT NULL OR interval_seconds IS NOT NULL) AND id > ?"
             + " ORDER BY id LIMIT ?", MAP, afterId, limit);
   }
   @Override public List<Task> findAll() { return jdbc.query("SELECT * FROM app_task ORDER BY id", MAP); }
@@ -88,11 +92,13 @@ public class JdbcTaskRepository implements TaskRepository {
         UPDATE app_task SET name=?, kind=?, handler_ref=?, cron=?, shard_count=?,
                timeout_seconds=?, max_retries=?, backoff_ms=?,
                retryable_failure_pattern=?, max_active_concurrent=?, paused=?,
-               retry_mode=COALESCE(?, 'exponential'), retry_cap_ms=?, retry_budget_ms=?, updated_at=now()
+               retry_mode=COALESCE(?, 'exponential'), retry_cap_ms=?, retry_budget_ms=?,
+               timezone=?, interval_seconds=?, updated_at=now()
         WHERE id=?""",
         t.name(), t.kind(), t.handlerRef(), t.cron(), t.shardCount(), t.timeoutSeconds(),
         t.maxRetries(), t.backoffMs(), t.retryableFailurePattern(), t.maxActiveConcurrent(),
-        t.paused(), t.retryMode(), t.retryCapMs(), t.retryBudgetMs(), id);
+        t.paused(), t.retryMode(), t.retryCapMs(), t.retryBudgetMs(),
+        t.timezone(), t.intervalSeconds(), id);
     return rows > 0;
   }
   @Override public void setPaused(long id, boolean paused) {

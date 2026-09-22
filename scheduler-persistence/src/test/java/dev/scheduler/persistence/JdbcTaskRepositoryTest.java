@@ -5,7 +5,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 class JdbcTaskRepositoryTest extends AbstractPostgresTest {
-  /** 不依赖其它测试类的 TRUNCATE 顺序:共享静态 PG 容器会累积 app_task 行,本类断言 findCronEnabledPage 数量需隔离。 */
+  /** 不依赖其它测试类的 TRUNCATE 顺序:共享静态 PG 容器会累积 app_task 行,本类断言 findScheduleEnabledPage 数量需隔离。 */
   @BeforeEach void clean() {
     jdbc.update("TRUNCATE app_task, execution, execution_outcome RESTART IDENTITY CASCADE");
   }
@@ -16,24 +16,51 @@ class JdbcTaskRepositoryTest extends AbstractPostgresTest {
         1, 300, 0, 1000, null, 8, true, false));
     assertTrue(created.id() > 0);
     assertTrue(repo.findById(created.id()).isPresent());
-    assertEquals(1, repo.findCronEnabledPage(0L, 10).size());
+    assertEquals(1, repo.findScheduleEnabledPage(0L, 10).size());
     repo.setPaused(created.id(), true);
-    assertTrue(repo.findCronEnabledPage(0L, 10).isEmpty());
+    assertTrue(repo.findScheduleEnabledPage(0L, 10).isEmpty());
   }
 
-  @Test void findCronEnabledPage_resumesPastCursor_withoutSkipping() {
+  /** 3a:建任务可配时区(仅 cron 解释)与间隔触发(interval_seconds,cron 可空)。间隔任务 cron=null 仍被
+   *  findScheduleEnabledPage 选中(3a 请求谓词放宽);timezone 落库回读;update 覆写两列。 */
+  @Test void create_persistsTimezoneAndIntervalTrigger() {
+    var repo = new JdbcTaskRepository(jdbc);
+    Task created = repo.create(new Task(null, "interval-task", "interval", "demo", null,
+        1, 300, 0, 1000, null, 8, true, false, null, null, null, "Asia/Shanghai", 60));
+    Task cur = repo.findById(created.id()).orElseThrow();
+    assertEquals("Asia/Shanghai", cur.timezone(), "timezone 落库回读");
+    assertEquals(60, cur.intervalSeconds(), "interval_seconds 落库回读");
+    assertNull(cur.cron());
+    assertEquals(1, repo.findScheduleEnabledPage(0L, 10).size(),
+        "cron=null 的间隔任务被调度扫描选中");
+    // 时区化 cron 任务:缺省时区回读为 UTC
+    Task cronTz = repo.create(new Task(null, "cron-tz", "cron", "demo", "0 */5 * * * *",
+        1, 300, 0, 1000, null, 8, true, false, null, null, null, "America/New_York", null));
+    assertEquals("America/New_York", repo.findById(cronTz.id()).orElseThrow().timezone());
+    assertNull(repo.findById(cronTz.id()).orElseThrow().intervalSeconds());
+    // update 覆写 timezone/interval
+    Task updated = new Task(cronTz.id(), "cron-tz", "cron", "demo", null,
+        1, 300, 0, 1000, null, 8, true, false, null, null, null, "UTC", 120);
+    assertTrue(repo.update(updated.id(), updated));
+    Task after = repo.findById(cronTz.id()).orElseThrow();
+    assertEquals("UTC", after.timezone());
+    assertEquals(120, after.intervalSeconds());
+    assertNull(after.cron());
+  }
+
+  @Test void findScheduleEnabledPage_resumesPastCursor_withoutSkipping() {
     var repo = new JdbcTaskRepository(jdbc);
     repo.create(new Task(null, "t1", "cron", "demo", "*/5 * * * *",
         1, 300, 0, 1000, null, 8, true, false));
     repo.create(new Task(null, "t2", "cron", "demo", "*/5 * * * *",
         1, 300, 0, 1000, null, 8, true, false));
-    var all = repo.findCronEnabledPage(0L, 1);
+    var all = repo.findScheduleEnabledPage(0L, 1);
     assertEquals(1, all.size());
     assertEquals(repo.findAll().get(0).id(), all.get(0).id());
-    var page2 = repo.findCronEnabledPage(all.get(0).id(), 1);
+    var page2 = repo.findScheduleEnabledPage(all.get(0).id(), 1);
     assertEquals(1, page2.size());
     assertFalse(page2.get(0).id() == all.get(0).id()); // 第二页不重复第一页
-    var tail = repo.findCronEnabledPage(page2.get(0).id(), 10);
+    var tail = repo.findScheduleEnabledPage(page2.get(0).id(), 10);
     assertTrue(tail.isEmpty()); // 扫尽
   }
 

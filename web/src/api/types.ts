@@ -3,7 +3,7 @@ export interface Task {
   name: string;
   kind: string;
   handlerRef: string;
-  cron: string;
+  cron: string | null;
   shardCount: number;
   timeoutSeconds: number;
   maxRetries: number;
@@ -12,6 +12,8 @@ export interface Task {
   maxActiveConcurrent: number;
   enabled: boolean;
   paused: boolean;
+  timezone: string;
+  intervalSeconds: number | null;
 }
 
 export interface Execution {
@@ -71,13 +73,15 @@ export interface CreateTaskRequest {
   name: string;
   kind?: string;
   handlerRef: string;
-  cron: string;
+  cron?: string | null;
   shardCount?: number;
   timeoutSeconds?: number;
   maxRetries?: number;
   backoffMs?: number;
   retryableFailurePattern?: string | null;
   maxActiveConcurrent?: number;
+  timezone?: string;
+  intervalSeconds?: number | null;
 }
 
 export interface UpdateTaskRequest extends CreateTaskRequest {
