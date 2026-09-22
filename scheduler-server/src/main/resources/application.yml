@@ -17,6 +17,17 @@ scheduler:
   loop:
     scan-delay-ms: 5000
     work-delay-ms: 100
+  # 通知底座:webhooks 为空 → 投递禁用(kernel 事件 fire 落库但不发外链)。
+  # kinds 为空 = 订阅全部事件;secret 用于 HMAC-SHA256 签名(X-Schkid-Signature)。
+  # maxAttempts=含首次的发送总次数;退避 backoffMs * 2^(attempts-1) 封顶 1h。
+  # notifications:
+  #   dispatch-delay-ms: 1000
+  #   webhooks:
+  #     - url: https://hooks.example.com/scheduler
+  #       secret: change-me
+  #       kinds: [execution.failed, execution.timeout, execution.dead_letter]
+  #       maxAttempts: 5
+  #       backoffMs: 1000
 
 management:
   prometheus:

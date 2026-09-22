@@ -11,9 +11,11 @@ import dev.scheduler.persistence.JdbcDagRepository;
 import dev.scheduler.persistence.JdbcExecutionRepository;
 import dev.scheduler.persistence.JdbcOperatorRepository;
 import dev.scheduler.persistence.JdbcAuthRepository;
+import dev.scheduler.persistence.JdbcNotificationRepository;
 import dev.scheduler.persistence.JdbcShardRepository;
 import dev.scheduler.persistence.JdbcTaskRepository;
 import dev.scheduler.persistence.JdbcWorkerRepository;
+import dev.scheduler.persistence.NotificationRepository;
 import dev.scheduler.persistence.OperatorRepository;
 import dev.scheduler.persistence.ShardRepository;
 import dev.scheduler.persistence.TaskRepository;
@@ -24,6 +26,9 @@ import dev.scheduler.server.leader.LeaderElection;
 import dev.scheduler.server.reconcile.Reconciler;
 import dev.scheduler.server.service.AuditRecorder;
 import dev.scheduler.server.service.AuditRetentionService;
+import dev.scheduler.server.service.NotificationDispatcher;
+import dev.scheduler.server.service.NotificationHub;
+import dev.scheduler.server.service.NotificationProperties;
 import dev.scheduler.server.service.OperatorPasswordService;
 import dev.scheduler.server.web.AvailableHandlerRefs;
 import dev.scheduler.persistence.retry.FailureResolver;
@@ -43,7 +48,9 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.core.Ordered;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.web.client.RestTemplate;
 
 /** 装配 Task 1-9 的既有零件为可运行 Bean 集。 */
 @Configuration
@@ -296,6 +303,43 @@ public class Beans {
     return new AuditRetentionLoop(retention, leader, retentionDays);
   }
 
+  /** 通知底座:outbox 仓储。当期 fire 落库由 NotificationHub(非阻断)驱动,投递由 NotificationLoop 拉取。 */
+  @Bean
+  NotificationRepository notificationRepository(JdbcTemplate jdbc) {
+    return new JdbcNotificationRepository(jdbc);
+  }
+
+  /** 通知投递专用 RestTemplate(命名注入,避免与未来其它 Rest 客户端混淆):超时防止慢/挂水滴端点挂死投递循环。 */
+  @Bean
+  RestTemplate notificationRestTemplate() {
+    SimpleClientHttpRequestFactory f = new SimpleClientHttpRequestFactory();
+    f.setConnectTimeout(2000);
+    f.setReadTimeout(10000);
+    return new RestTemplate(f);
+  }
+
+  /** 通知入点半:kernel 事件 fire 落库 outbox(非阻断,入库失败仅告警不打断调用方)。 */
+  @Bean
+  NotificationHub notificationHub(NotificationRepository notifications, ObjectMapper json) {
+    return new NotificationHub(notifications, json);
+  }
+
+  /** 通知投递器:foreground 拉取到期行、HMAC 签名投递、退避/重试/终态。由 NotificationLoop 周期驱动。 */
+  @Bean
+  NotificationDispatcher notificationDispatcher(NotificationRepository notifications,
+                                                NotificationProperties props,
+                                                RestTemplate notificationRestTemplate,
+                                                ObjectMapper json) {
+    return new NotificationDispatcher(notifications, props, notificationRestTemplate, json);
+  }
+
+  /** 通知投递循环:leader 门控,周期把到期通知投给已订阅 webhook;失败兜底不杀线程。webhooks 空 → no-op。 */
+  @Bean
+  @ConditionalOnProperty(name = "scheduler.notifications.enabled", havingValue = "true", matchIfMissing = true)
+  NotificationLoop notificationLoop(NotificationDispatcher dispatcher, LeaderElection leader) {
+    return new NotificationLoop(dispatcher, leader);
+  }
+
   /** ApplicationRunner + Ordered:使启动引导按 order 升序确定性执行(Spring 的 runner 排序读对象类的
    *  Ordered/@Order,不读 @Bean 工厂方法注解——lambda 无法承载得靠实体包装)。 */
   private static final class OrderedApplicationRunner implements ApplicationRunner, Ordered {
@@ -393,6 +437,28 @@ public class Beans {
         engine.scanOnce();
       } catch (Throwable t) {
         log.warn("dag scan loop tick failed; continuing next tick", t);
+      }
+    }
+  }
+
+  /** 通知投递循环:leader 门控,周期把到期通知投给已订阅 webhook;失败兜底不杀线程(镜像 ReconcileLoop)。 */
+  public static final class NotificationLoop {
+    private static final Logger log = LoggerFactory.getLogger(NotificationLoop.class);
+    private final NotificationDispatcher dispatcher;
+    private final LeaderElection leader;
+
+    NotificationLoop(NotificationDispatcher dispatcher, LeaderElection leader) {
+      this.dispatcher = dispatcher;
+      this.leader = leader;
+    }
+
+    @Scheduled(fixedDelayString = "${scheduler.notifications.dispatch-delay-ms:1000}")
+    public void tick() {
+      if (!leader.isLeader()) return;
+      try {
+        dispatcher.dispatchOnce();
+      } catch (Throwable t) {
+        log.warn("notification dispatch tick failed; continuing next tick", t);
       }
     }
   }
