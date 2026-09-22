@@ -52,13 +52,13 @@ public class TaskController {
       Integer shardCount, Integer timeoutSeconds, Integer maxRetries, Long backoffMs,
       String retryableFailurePattern, Integer maxActiveConcurrent,
       String retryMode, Long retryCapMs, Long retryBudgetMs,
-      String timezone, Integer intervalSeconds) {}
+      String timezone, Integer intervalSeconds, List<String> eventRoutes) {}
 
   public record UpdateTaskRequest(String name, String kind, String handlerRef, String cron,
       Integer shardCount, Integer timeoutSeconds, Integer maxRetries, Long backoffMs,
       String retryableFailurePattern, Integer maxActiveConcurrent, Boolean paused,
       String retryMode, Long retryCapMs, Long retryBudgetMs,
-      String timezone, Integer intervalSeconds) {}
+      String timezone, Integer intervalSeconds, List<String> eventRoutes) {}
 
   @PostMapping
   public ResponseEntity<Task> create(
@@ -73,16 +73,18 @@ public class TaskController {
     checkDefinition(req.name(), req.handlerRef(), req.cron(), req.shardCount(),
         req.timeoutSeconds(), req.maxRetries(), req.backoffMs(), req.maxActiveConcurrent(),
         req.retryMode(), req.retryCapMs(), req.retryBudgetMs(),
-        req.timezone(), req.intervalSeconds());
+        req.timezone(), req.intervalSeconds(), req.eventRoutes());
     Task created = tasks.create(new Task(
-        null, req.name(), req.kind() == null ? "cron" : req.kind(), req.handlerRef(), req.cron(),
+        null, req.name(), req.kind() == null ? (req.eventRoutes() == null || req.eventRoutes().isEmpty() ? "cron" : "event") : req.kind(),
+        req.handlerRef(), req.cron(),
         req.shardCount() == null ? 1 : req.shardCount(),
         req.timeoutSeconds() == null ? 300 : req.timeoutSeconds(),
         req.maxRetries() == null ? 0 : req.maxRetries(),
         req.backoffMs() == null ? 1000L : req.backoffMs(),
         req.retryableFailurePattern(), req.maxActiveConcurrent() == null ? 8 : req.maxActiveConcurrent(),
         true, false, req.retryMode(), req.retryCapMs(), req.retryBudgetMs(),
-        req.timezone() == null ? "UTC" : req.timezone(), req.intervalSeconds()));
+        req.timezone() == null ? "UTC" : req.timezone(), req.intervalSeconds(),
+        req.eventRoutes() == null ? List.of() : req.eventRoutes()));
     auditor.record(current.get(), "task.create", TargetType.TASK, created.id(), taskMeta(created));
     return ResponseEntity.status(HttpStatus.CREATED).body(created);
   }
@@ -100,7 +102,7 @@ public class TaskController {
     checkDefinition(req.name(), req.handlerRef(), req.cron(), req.shardCount(),
         req.timeoutSeconds(), req.maxRetries(), req.backoffMs(), req.maxActiveConcurrent(),
         req.retryMode(), req.retryCapMs(), req.retryBudgetMs(),
-        req.timezone(), req.intervalSeconds());
+        req.timezone(), req.intervalSeconds(), req.eventRoutes());
     Task updated = new Task(id, req.name(), req.kind() == null ? existing.kind() : req.kind(),
         req.handlerRef(), req.cron(),
         req.shardCount() == null ? existing.shardCount() : req.shardCount(),
@@ -115,7 +117,8 @@ public class TaskController {
         req.retryCapMs() == null ? existing.retryCapMs() : req.retryCapMs(),
         req.retryBudgetMs() == null ? existing.retryBudgetMs() : req.retryBudgetMs(),
         req.timezone() == null ? existing.timezone() : req.timezone(),
-        req.intervalSeconds() == null ? existing.intervalSeconds() : req.intervalSeconds());
+        req.intervalSeconds() == null ? existing.intervalSeconds() : req.intervalSeconds(),
+        req.eventRoutes() == null ? existing.eventRoutes() : req.eventRoutes());
     if (!tasks.update(id, updated)) {
       throw notFound("task " + id);
     }
@@ -264,6 +267,7 @@ public class TaskController {
     putDiff(d, "retryBudgetMs", before.retryBudgetMs(), after.retryBudgetMs());
     putDiff(d, "timezone", before.timezone(), after.timezone());
     putDiff(d, "intervalSeconds", before.intervalSeconds(), after.intervalSeconds());
+    putDiff(d, "eventRoutes", before.eventRoutes(), after.eventRoutes());
     return d;
   }
 
@@ -281,21 +285,30 @@ public class TaskController {
   /** 定义域数值合法性:负值即 400;cron 必须 6/7 字段且可被 Spring 解析(字段值非法提前 400,防坏 cron 入库
    *  运行时级联拖垮触发扫描)。maxActiveConcurrent 为并发配额,必须 >= 1(0/负会让 claim 闸门恒 false → 任务
    *  永久卡 DUE)。
-   *  3a 触发时钟:任务必须恰具其一(cron 或 intervalSeconds),同时给 → 400(歧义);timezone 必须为合法 ZoneId
-   *  (默认 UTC);intervalSeconds >= 1。cron 为空时不校验 cron(此时走间隔触发)。 */
+   *  3a/3b 触发时钟:任务必须恰具其一——cron、intervalSeconds、eventRoutes(非空),同时给两个 → 400(歧义)、
+   *  全空 → 400(坏任务,否则该任务不触发任何轮);timezone 必须为合法 ZoneId(默认 UTC);intervalSeconds >= 1;
+   *  event_routes 各路由 key 不得为空串。cron 为空时不校验 cron(此时走间隔或事件触发)。 */
   static void checkDefinition(String name, String handlerRef, String cron,
       Integer shardCount, Integer timeoutSeconds, Integer maxRetries, Long backoffMs,
       Integer maxActiveConcurrent, String retryMode, Long retryCapMs, Long retryBudgetMs,
-      String timezone, Integer intervalSeconds) {
+      String timezone, Integer intervalSeconds, List<String> eventRoutes) {
     boolean hasCron = cron != null && !cron.isBlank();
-    if (hasCron && intervalSeconds != null) {
-      throw new IllegalArgumentException("provide either cron or intervalSeconds, not both");
+    boolean hasInterval = intervalSeconds != null;
+    boolean hasEvents = eventRoutes != null && !eventRoutes.isEmpty();
+    int clockCount = (hasCron ? 1 : 0) + (hasInterval ? 1 : 0) + (hasEvents ? 1 : 0);
+    if (clockCount > 1) {
+      throw new IllegalArgumentException("provide exactly one of cron, intervalSeconds, eventRoutes");
     }
-    if (!hasCron && intervalSeconds == null) {
-      throw new IllegalArgumentException("cron or intervalSeconds is required");
+    if (clockCount == 0) {
+      throw new IllegalArgumentException("cron, intervalSeconds or eventRoutes is required");
     }
     if (intervalSeconds != null && intervalSeconds < 1) {
       throw new IllegalArgumentException("intervalSeconds must be >= 1");
+    }
+    if (eventRoutes != null) {
+      for (String r : eventRoutes) {
+        if (r == null || r.isBlank()) throw new IllegalArgumentException("event route key must not be blank");
+      }
     }
     if (timezone != null && !timezone.isBlank()) {
       try { ZoneId.of(timezone); }

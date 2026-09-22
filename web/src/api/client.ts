@@ -3,6 +3,7 @@ import type {
   AuditArchiveResult,
   AuditEntry,
   AuditIntegrity,
+  CreateEventRequest,
   CreateTaskRequest,
   CreateDagRequest,
   Dag,
@@ -12,6 +13,7 @@ import type {
   DlqRow,
   Execution,
   ExecutionDetail,
+  InboundEvent,
   LoginResponse,
   MeResponse,
   OperatorEntry,
@@ -239,3 +241,12 @@ export const listSessions = (name: string) =>
 /** 强制登出(ADMIN):撤销该操作者全部活动会话(疑似受攻陷时当下中止),返回本次撤销数并留审计。 */
 export const revokeSessions = (name: string) =>
   req<SessionsRevokeResult>(`/api/v1/operators/${encodeURIComponent(name)}/sessions/revoke`, { method: 'POST' });
+
+// ---- 3b 入站事件(事件触发) ----
+export interface ListEventsParams { limit?: number; offset?: number; }
+/** 入站事件列表(按 id 降序):观察每条事件的路由分派状态。 */
+export const listEvents = (p: ListEventsParams = {}): Promise<Page<InboundEvent>> =>
+  req<Page<InboundEvent>>(`/api/v1/events${qstr(p)}`);
+/** 提交事件:落 PENDING 待事件引擎分派(dedupeKey 重放幂等,命中既有行)。 */
+export const postEvent = (b: CreateEventRequest) =>
+  req<InboundEvent>('/api/v1/events', { method: 'POST', body: JSON.stringify(b) });

@@ -11,7 +11,9 @@ import dev.scheduler.persistence.JdbcDagRepository;
 import dev.scheduler.persistence.JdbcExecutionRepository;
 import dev.scheduler.persistence.JdbcOperatorRepository;
 import dev.scheduler.persistence.JdbcAuthRepository;
+import dev.scheduler.persistence.JdbcEventRepository;
 import dev.scheduler.persistence.JdbcNotificationRepository;
+import dev.scheduler.persistence.EventRepository;
 import dev.scheduler.persistence.JdbcShardRepository;
 import dev.scheduler.persistence.JdbcTaskRepository;
 import dev.scheduler.persistence.JdbcWorkerRepository;
@@ -34,6 +36,7 @@ import dev.scheduler.server.service.OperatorPasswordService;
 import dev.scheduler.server.web.AvailableHandlerRefs;
 import dev.scheduler.persistence.retry.FailureResolver;
 import dev.scheduler.persistence.retry.RetryPolicy;
+import dev.scheduler.server.trigger.EventEngine;
 import dev.scheduler.server.trigger.TriggerEngine;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.binder.MeterBinder;
@@ -182,6 +185,18 @@ public class Beans {
     return new DagEngine(dags, tasks, shards, leader, clock, 200); // §4 单 tick 批上限(5s 周期 ×200,触发/传播各 200)
   }
 
+  @Bean
+  EventRepository eventRepository(JdbcTemplate jdbc) {
+    return new JdbcEventRepository(jdbc);
+  }
+
+  /** 3b 事件触发引擎:leader 扫描入站事件 outbox,把 route_key 匹配到订阅任务的 PENDING 事件各建一轮。 */
+  @Bean
+  EventEngine eventEngine(EventRepository events, TaskRepository tasks, ShardRepository shards,
+                          LeaderElection leader) {
+    return new EventEngine(events, tasks, shards, leader, 200); // §4 单 tick 批上限(5s 周期 ×200)
+  }
+
   /** 重试决策纯类:只判定"应否重试/退避多久",不含 DB 与时钟。 */
   @Bean
   RetryPolicy retryPolicy() {
@@ -312,6 +327,13 @@ public class Beans {
   @ConditionalOnProperty(name = "scheduler.dag.enabled", havingValue = "true", matchIfMissing = true)
   DagLoop dagLoop(DagEngine engine) {
     return new DagLoop(engine);
+  }
+
+  /** 3b 事件触发循环:固定周期驱动 EventEngine.scanOnce();失败兜底不杀线程(镜像 ScanLoop)。 */
+  @Bean
+  @ConditionalOnProperty(name = "scheduler.event.enabled", havingValue = "true", matchIfMissing = true)
+  EventLoop eventLoop(EventEngine engine) {
+    return new EventLoop(engine);
   }
 
   /** 审计保留循环:leader 门控,按 {@code scheduler.audit.retention-days} 定期归档过期审计行。
@@ -457,6 +479,25 @@ public class Beans {
         engine.scanOnce();
       } catch (Throwable t) {
         log.warn("dag scan loop tick failed; continuing next tick", t);
+      }
+    }
+  }
+
+  /** 3b 入站事件触发循环:固定周期驱动 EventEngine.scanOnce();失败兜底不杀线程(镜像 ScanLoop)。 */
+  public static final class EventLoop {
+    private static final Logger log = LoggerFactory.getLogger(EventLoop.class);
+    private final EventEngine engine;
+
+    EventLoop(EventEngine engine) {
+      this.engine = engine;
+    }
+
+    @Scheduled(fixedDelayString = "${scheduler.event.scan-delay-ms:5000}")
+    public void tick() {
+      try {
+        engine.scanOnce();
+      } catch (Throwable t) {
+        log.warn("event scan loop tick failed; continuing next tick", t);
       }
     }
   }

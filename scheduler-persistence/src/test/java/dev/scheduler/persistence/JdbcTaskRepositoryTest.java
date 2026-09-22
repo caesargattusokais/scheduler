@@ -1,6 +1,7 @@
 package dev.scheduler.persistence;
 import static org.junit.jupiter.api.Assertions.*;
 import dev.scheduler.core.Task;
+import java.util.List;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -144,5 +145,37 @@ class JdbcTaskRepositoryTest extends AbstractPostgresTest {
         1, 60, 0, 1000, null, 8, true, false));
     assertEquals("exponential", repo.findById(created.id()).orElseThrow().retryMode(),
         "13 参便捷构造 retryMode=null → INSERT COALESCE 落 'exponential'");
+  }
+
+  /** 3b:事件触发任务(event_routes 非空,cron/interval 皆空)落库回读;不进定时扫描;仅匹配订阅的路由。 */
+  @Test void create_persistsEventRoutes_andFindEnabledByRouteMatches() {
+    var repo = new JdbcTaskRepository(jdbc);
+    Task evt = repo.create(new Task(null, "evt-task", "event", "demo", null,
+        1, 300, 0, 1000, null, 8, true, false, null, null, null, "UTC", null,
+        List.of("order.created", "order.updated")));
+    Task cur = repo.findById(evt.id()).orElseThrow();
+    assertEquals(List.of("order.created", "order.updated"), cur.eventRoutes(), "event_routes 落库回读");
+    assertEquals("event", cur.kind(), "kind 落库回读");
+    assertTrue(repo.findScheduleEnabledPage(0L, 10).isEmpty(), "纯事件任务(cron/interval 皆空)不出现在定时扫描");
+    assertEquals(List.of(evt.id()), repo.findEnabledByRoute("order.created").stream().map(Task::id).toList());
+    assertEquals(List.of(evt.id()), repo.findEnabledByRoute("order.updated").stream().map(Task::id).toList());
+    assertTrue(repo.findEnabledByRoute("order.deleted").isEmpty(), "未订阅路由不匹配");
+    assertTrue(cur.eventRoutes() != null && !cur.eventRoutes().isEmpty(), "hasEventRoutes 语义成立");
+  }
+
+  /** 3b:暂停/禁用的任务不参与路由匹配;update 覆写 event_routes。 */
+  @Test void findEnabledByRoute_excludesPausedAnd_updateOverwritesRoutes() {
+    var repo = new JdbcTaskRepository(jdbc);
+    Task t = repo.create(new Task(null, "evt-t", "event", "demo", null,
+        1, 300, 0, 1000, null, 8, true, false, null, null, null, "UTC", null, List.of("r")));
+    repo.setPaused(t.id(), true);
+    assertTrue(repo.findEnabledByRoute("r").isEmpty(), "暂停的事件任务不匹配路由");
+
+    Task updated = new Task(t.id(), "evt-t", "event", "demo", null,
+        1, 300, 0, 1000, null, 8, true, false, null, null, null, "UTC", null, List.of("new.r"));
+    assertTrue(repo.update(updated.id(), updated));
+    assertEquals(List.of("new.r"), repo.findById(t.id()).orElseThrow().eventRoutes(), "update 覆写 event_routes");
+    assertTrue(repo.findEnabledByRoute("r").isEmpty());
+    assertEquals(List.of(t.id()), repo.findEnabledByRoute("new.r").stream().map(Task::id).toList());
   }
 }

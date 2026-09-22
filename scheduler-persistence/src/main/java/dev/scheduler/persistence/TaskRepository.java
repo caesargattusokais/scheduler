@@ -6,8 +6,13 @@ import java.util.Optional;
 public interface TaskRepository {
   Task create(Task t);
   Optional<Task> findById(long id);
-  /** 游标分批:返回 id>afterId 的 enabled+cron 或 enabled+interval 任务(3a 任一触发时钟),至多 limit 行;afterId=0 从头。配合 §4 扫描分批。 */
+  /** 游标分批:返回 id>afterId 的 enabled 且具备「定时触发时钟」(cron 或 interval)的任务,至多 limit 行;
+   *  afterId=0 从头。事件触发任务(仅 event_routes)由 {@link #findEnabledByRoute} 兜,不入本结果集。配合 §4 扫描分批。 */
   List<Task> findScheduleEnabledPage(long afterId, int limit);
+
+  /** 事件触发:返回 enabled、非 paused 且订阅了 {@code routeKey} 的任务,按 id 升序。EventEngine 用它把
+   *  入站事件 route_key 关联到目标任务(0..N 条,分派到首条)。 */
+  List<Task> findEnabledByRoute(String routeKey);
   List<Task> findAll();
   /** 列表:name 子串(ILIKE)、paused 过滤 + limit/offset 分页(ORDER BY id)。 */
   List<Task> findPage(String name, Boolean paused, int limit, int offset);

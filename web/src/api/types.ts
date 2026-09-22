@@ -14,6 +14,8 @@ export interface Task {
   paused: boolean;
   timezone: string;
   intervalSeconds: number | null;
+  /** 事件触发时钟:非空数组 = 订阅这些路由 key,入站事件触发每事件一轮;与 cron/intervalSeconds 三选一互斥。 */
+  eventRoutes: string[];
 }
 
 export interface Execution {
@@ -82,6 +84,8 @@ export interface CreateTaskRequest {
   maxActiveConcurrent?: number;
   timezone?: string;
   intervalSeconds?: number | null;
+  /** 事件触发时钟:非空数组 = 事件触发(与 cron/intervalSeconds 三选一互斥)。 */
+  eventRoutes?: string[];
 }
 
 export interface UpdateTaskRequest extends CreateTaskRequest {
@@ -178,3 +182,22 @@ export interface ActiveSession {
 export interface SessionsRevokeResult { revoked: number; }
 /** POST /api/v1/audits/archive 响应:{archived: 本次归档行数, olderThan: 截止时刻 ISO}。 */
 export interface AuditArchiveResult { archived: number; olderThan: string; }
+
+/** 3b 入站事件行(镜像后端 InboundEvent):PENDING=待分派 / DISPATCHED=已投递。taskId/executionId 分派后回填。 */
+export interface InboundEvent {
+  id: number;
+  routeKey: string;
+  payload: string | null; // JSON 文本(展示时 JSON.parse)
+  dedupeKey: string;
+  status: 'PENDING' | 'DISPATCHED';
+  taskId: number | null;
+  executionId: number | null;
+  createdAt: string | null;
+  dispatchedAt: string | null;
+}
+/** POST /api/v1/events 请求:routeKey/dedupeKey 必填;payload 为任意 JSON(dedupeKey 防重放,重放命中既有行)。 */
+export interface CreateEventRequest {
+  routeKey: string;
+  payload?: unknown;
+  dedupeKey: string;
+}

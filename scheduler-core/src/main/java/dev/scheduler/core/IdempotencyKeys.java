@@ -24,4 +24,9 @@ public final class IdempotencyKeys {
   public static String forNodeRerun(long runId, String nodeKey) {
     return "dag:" + runId + ":node:" + nodeKey + ":rerun:" + UUID.randomUUID();
   }
+
+  /** 3b 入站事件(dedupeKey)→ 父 execution 全局幂等键:重放同一事件 → 同一键(upsert 自愈,一条事件至多一轮)。 */
+  public static String forEvent(String dedupeKey) {
+    return "event:" + dedupeKey;
+  }
 }

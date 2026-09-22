@@ -15,6 +15,8 @@ const EMPTY: CreateTaskRequest = {
   timezone: 'UTC',
 };
 
+type TrigType = 'cron' | 'interval' | 'event';
+
 const CRON_DEFAULT = '0 */5 * * * *';
 
 export default function TasksPage() {
@@ -27,7 +29,7 @@ export default function TasksPage() {
   const [form, setForm] = useState<CreateTaskRequest>(EMPTY);
   const [editId, setEditId] = useState<number | null>(null);
   const [err, setErr] = useState<string | null>(null);
-  const [trigType, setTrigType] = useState<'cron' | 'interval'>('cron');
+  const [trigType, setTrigType] = useState<TrigType>('cron');
 
   const refresh = useCallback(() => {
     listTasks({
@@ -59,11 +61,12 @@ export default function TasksPage() {
   }
   function beginEdit(t: Task) {
     setEditId(t.id);
-    setTrigType(t.intervalSeconds ? 'interval' : 'cron');
+    // 触发时钟三选一:cron 非空 → cron;intervalSeconds 非空 → interval;否则事件触发(eventRoutes 非空)。
+    setTrigType(t.cron ? 'cron' : t.intervalSeconds ? 'interval' : 'event');
     setForm({ name: t.name, handlerRef: t.handlerRef, cron: t.cron, shardCount: t.shardCount,
       timeoutSeconds: t.timeoutSeconds, maxRetries: t.maxRetries, backoffMs: t.backoffMs,
       retryableFailurePattern: t.retryableFailurePattern ?? undefined, maxActiveConcurrent: t.maxActiveConcurrent,
-      timezone: t.timezone, intervalSeconds: t.intervalSeconds });
+      timezone: t.timezone, intervalSeconds: t.intervalSeconds, eventRoutes: t.eventRoutes ?? [] });
   }
   async function act(fn: () => Promise<unknown>) {
     try { await fn(); setErr(null); refresh(); } catch (x) { setErr(String(x)); }
@@ -142,36 +145,47 @@ export default function TasksPage() {
           {field('backoffMs', '退避 (ms)', 'number')}
           {field('maxActiveConcurrent', '最大并发', 'number')}
         </div>
-        {/* 3a 触发时钟:任务须恰具其一(cron 或间隔秒);时区仅解释 cron(默认 UTC) */}
-        <div className="mt-3">
-          <div className="mb-2 flex items-center gap-3 text-xs text-slate-600">
-            <span className="shrink-0 text-slate-400">触发方式</span>
-            <label className="inline-flex cursor-pointer items-center gap-1">
-              <input type="radio" checked={trigType === 'cron'}
-                onChange={() => { setTrigType('cron'); setForm((f) => ({ ...f, cron: f.cron ?? CRON_DEFAULT, intervalSeconds: null })); }} />
-              Cron
-            </label>
-            <label className="inline-flex cursor-pointer items-center gap-1">
-              <input type="radio" checked={trigType === 'interval'}
-                onChange={() => { setTrigType('interval'); setForm((f) => ({ ...f, cron: null, intervalSeconds: f.intervalSeconds ?? 60 })); }} />
-              间隔 (秒)
-            </label>
-            <label className="inline-flex items-center gap-1">
-              <span className="text-slate-400">时区</span>
-              <input className="input w-40 font-mono" value={form.timezone ?? 'UTC'}
-                onChange={(e) => setForm({ ...form, timezone: e.target.value })} />
-            </label>
+        {/* 3a/3b 触发时钟:任务须恰具其一——cron、间隔秒、或事件路由(非空);时区仅解释 cron(默认 UTC) */}
+          <div className="mt-3">
+            <div className="mb-2 flex flex-wrap items-center gap-3 text-xs text-slate-600">
+              <span className="shrink-0 text-slate-400">触发方式</span>
+              <label className="inline-flex cursor-pointer items-center gap-1">
+                <input type="radio" checked={trigType === 'cron'}
+                  onChange={() => { setTrigType('cron'); setForm((f) => ({ ...f, cron: f.cron ?? CRON_DEFAULT, intervalSeconds: null, eventRoutes: [] })); }} />
+                Cron
+              </label>
+              <label className="inline-flex cursor-pointer items-center gap-1">
+                <input type="radio" checked={trigType === 'interval'}
+                  onChange={() => { setTrigType('interval'); setForm((f) => ({ ...f, cron: null, intervalSeconds: f.intervalSeconds ?? 60, eventRoutes: [] })); }} />
+                间隔 (秒)
+              </label>
+              <label className="inline-flex cursor-pointer items-center gap-1">
+                <input type="radio" checked={trigType === 'event'}
+                  onChange={() => { setTrigType('event'); setForm((f) => ({ ...f, cron: null, intervalSeconds: null, eventRoutes: f.eventRoutes && f.eventRoutes.length ? f.eventRoutes : ['order.created'] })); }} />
+                事件
+              </label>
+              <label className="inline-flex items-center gap-1">
+                <span className="text-slate-400">时区</span>
+                <input className="input w-40 font-mono" value={form.timezone ?? 'UTC'}
+                  onChange={(e) => setForm({ ...form, timezone: e.target.value })} />
+              </label>
+            </div>
+            {trigType === 'interval' ? (
+              <label className="field">
+                <span className="label">间隔 (秒)</span>
+                <input type="number" min={1} className="input" value={form.intervalSeconds ?? ''}
+                  onChange={(e) => setForm({ ...form, intervalSeconds: Math.max(1, Number(e.target.value || 0)) })} />
+              </label>
+            ) : trigType === 'event' ? (
+              <label className="field">
+                <span className="label">事件路由 (逗号分隔的 route key,入站事件据此触发每事件一轮)</span>
+                <input className="input font-mono" placeholder="order.created, order.updated" value={(form.eventRoutes ?? []).join(', ')}
+                  onChange={(e) => setForm({ ...form, eventRoutes: e.target.value.split(',').map((s) => s.trim()).filter(Boolean) })} />
+              </label>
+            ) : (
+              <CronEditor value={form.cron ?? ''} onChange={(v) => setForm({ ...form, cron: v })} />
+            )}
           </div>
-          {trigType === 'interval' ? (
-            <label className="field">
-              <span className="label">间隔 (秒)</span>
-              <input type="number" min={1} className="input" value={form.intervalSeconds ?? ''}
-                onChange={(e) => setForm({ ...form, intervalSeconds: Math.max(1, Number(e.target.value || 0)) })} />
-            </label>
-          ) : (
-            <CronEditor value={form.cron ?? ''} onChange={(v) => setForm({ ...form, cron: v })} />
-          )}
-        </div>
         <div className="mt-3 flex items-center gap-2">
           <button type="submit" className="btn-primary">{editId === null ? '创建任务' : '保存修改'}</button>
           {editId !== null && (
@@ -190,7 +204,9 @@ export default function TasksPage() {
               <tr key={t.id}>
                 <td className="num">{t.id}</td>
                 <td className="font-medium text-slate-900">{t.name}</td>
-                <td>{t.intervalSeconds ? <code className="text-xs text-slate-500">每 {t.intervalSeconds}s</code> : <code className="text-xs text-slate-500">{t.cron ?? '-'}</code>}</td>
+                <td>{t.intervalSeconds ? <code className="text-xs text-slate-500">每 {t.intervalSeconds}s</code> :
+                t.eventRoutes && t.eventRoutes.length ? <code className="text-xs text-slate-500">{t.eventRoutes.join(', ')}</code> :
+                <code className="text-xs text-slate-500">{t.cron ?? '-'}</code>}</td>
                 <td className="num">{t.shardCount}</td>
                 <td>{t.paused ? <span className="badge badge-slate">暂停</span> : <span className="badge badge-green">启用</span>}</td>
                 <td className="whitespace-nowrap">

@@ -188,7 +188,7 @@ class ApiIntegrationTest {
   void resetDb() {
     jdbc.execute("TRUNCATE app_dag CASCADE; TRUNCATE execution, execution_outcome, execution_shard,"
         + " execution_shard_outcome, app_task, app_audit, app_audit_archive, worker,"
-        + " app_auth_session, app_login_attempt, app_notification RESTART IDENTITY CASCADE");
+        + " app_auth_session, app_login_attempt, app_notification, app_task_event RESTART IDENTITY CASCADE");
     // app_operator 不在 TRUNCATE 之列(写端授权依赖其在引导/测试期间恒在;且不清 password_hash,保留上下文
     // 启动时 boot-pass 引导的口令,login(boot-pass) 恒可用):幂等确保 alice/bob/carol/dave 每用例都在,
     //  即便某用例 deactivate 过也不会让后续用例缺人。
@@ -265,6 +265,91 @@ class ApiIntegrationTest {
         + "\"cron\":\"" + CRON + "\",\"intervalSeconds\":30}";
     mvc.perform(post("/api/v1/tasks").contentType(MediaType.APPLICATION_JSON).content(body))
         .andExpect(status().isBadRequest());
+  }
+
+  /** 3b:事件触发任务(eventRoutes 非空,cron/interval 皆空)可建;kind 缺省 'event';GET 读回 eventRoutes。 */
+  @Test
+  void createTask_eventTrigger_persistsEventRoutes_andReadsBack() throws Exception {
+    String body = "{\"name\":\"evt-task\",\"kind\":\"event\",\"handlerRef\":\"demo\","
+        + "\"eventRoutes\":[\"order.created\",\"order.updated\"]}";
+    MvcResult r = mvc.perform(post("/api/v1/tasks").contentType(MediaType.APPLICATION_JSON).content(body))
+        .andExpect(status().isCreated())
+        .andReturn();
+    long id = objectMapper.readTree(r.getResponse().getContentAsString()).get("id").asLong();
+
+    mvc.perform(get("/api/v1/tasks/" + id))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.cron").value((String) null))
+        .andExpect(jsonPath("$.intervalSeconds").value((Object) null))
+        .andExpect(jsonPath("$.eventRoutes[0]").value("order.created"))
+        .andExpect(jsonPath("$.eventRoutes[1]").value("order.updated"));
+
+    // kind 缺省:用户未给时按事件触发推导为 'event'(与 cron 缺省 'cron' 对齐)。
+    String body2 = "{\"name\":\"evt-default-kind\",\"handlerRef\":\"demo\","
+        + "\"eventRoutes\":[\"order.created\"]}";
+    MvcResult r2 = mvc.perform(post("/api/v1/tasks").contentType(MediaType.APPLICATION_JSON).content(body2))
+        .andExpect(status().isCreated())
+        .andReturn();
+    assertEquals("event", objectMapper.readTree(r2.getResponse().getContentAsString()).get("kind").asText());
+  }
+
+  /** 3b:cron 与 eventRoutes 同给 → 400(三种触发时钟恰具其一)。 */
+  @Test
+  void createTask_cronAndEventRoutes_rejects400() throws Exception {
+    String body = "{\"name\":\"mixed-clock\",\"kind\":\"cron\",\"handlerRef\":\"demo\","
+        + "\"cron\":\"" + CRON + "\",\"eventRoutes\":[\"order.created\"]}";
+    mvc.perform(post("/api/v1/tasks").contentType(MediaType.APPLICATION_JSON).content(body))
+        .andExpect(status().isBadRequest());
+  }
+
+  /** 3b:三种触发时钟全缺 → 400(坏任务,否则永不触发)。空路由数组(视为无事件时钟)同样拒绝。 */
+  @Test
+  void createTask_noTriggerClock_rejects400() throws Exception {
+    mvc.perform(post("/api/v1/tasks").contentType(MediaType.APPLICATION_JSON)
+        .content("{\"name\":\"no-clock\",\"handlerRef\":\"demo\"}"))
+        .andExpect(status().isBadRequest());
+    mvc.perform(post("/api/v1/tasks").contentType(MediaType.APPLICATION_JSON)
+        .content("{\"name\":\"empty-routes\",\"handlerRef\":\"demo\",\"eventRoutes\":[]}"))
+        .andExpect(status().isBadRequest());
+  }
+
+  /** 3b:POST /api/v1/events 落 PENDING 事件行并回显 id/routeKey/dedupeKey;缺 routeKey 或 dedupeKey → 400。 */
+  @Test
+  void postEvent_persistsPendingRow_andRequiresRouteAndDedupe() throws Exception {
+    String body = "{\"routeKey\":\"order.created\",\"payload\":{\"oid\":7},\"dedupeKey\":\"evt-1\"}";
+    MvcResult r = mvc.perform(post("/api/v1/events").contentType(MediaType.APPLICATION_JSON).content(body))
+        .andExpect(status().isCreated())
+        .andReturn();
+    long id = objectMapper.readTree(r.getResponse().getContentAsString()).get("id").asLong();
+    assertTrue(id > 0);
+    // 分派循环在测试上下文被关闭(loop.enabled=false),事件保持 PENDING 待事件引擎。
+    mvc.perform(get("/api/v1/events/" + id))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.routeKey").value("order.created"))
+        .andExpect(jsonPath("$.dedupeKey").value("evt-1"))
+        .andExpect(jsonPath("$.status").value("PENDING"));
+
+    mvc.perform(post("/api/v1/events").contentType(MediaType.APPLICATION_JSON)
+        .content("{\"payload\":{},\"dedupeKey\":\"x\"}"))
+        .andExpect(status().isBadRequest());
+    mvc.perform(post("/api/v1/events").contentType(MediaType.APPLICATION_JSON)
+        .content("{\"routeKey\":\"r\"}"))
+        .andExpect(status().isBadRequest());
+  }
+
+  /** 3b:相同 dedupeKey 重放 POST → 幂等返回既有行 id,不新建(防重放)。 */
+  @Test
+  void postEvent_replayedByDedupeKey_returnsExistingRow() throws Exception {
+    String body = "{\"routeKey\":\"order.created\",\"payload\":{\"oid\":7},\"dedupeKey\":\"evt-dup\"}";
+    MvcResult first = mvc.perform(post("/api/v1/events").contentType(MediaType.APPLICATION_JSON).content(body))
+        .andExpect(status().isCreated()).andReturn();
+    long id1 = objectMapper.readTree(first.getResponse().getContentAsString()).get("id").asLong();
+
+    MvcResult replay = mvc.perform(post("/api/v1/events").contentType(MediaType.APPLICATION_JSON).content(body))
+        .andExpect(status().isCreated()).andReturn();
+    long id2 = objectMapper.readTree(replay.getResponse().getContentAsString()).get("id").asLong();
+    assertEquals(id1, id2, "重放命中既有行");
+    assertEquals(1L, jdbc.queryForObject("SELECT count(*) FROM app_task_event", Long.class));
   }
 
   /** M6.3:表单下拉框的数据源 = 纯存活 worker 注册表并集(与 create/update 校验同源;无进程内 handler)。 */

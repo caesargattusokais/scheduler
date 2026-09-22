@@ -11,10 +11,12 @@ import DagsPage from './pages/DagsPage';
 import MetricsPage from './pages/MetricsPage';
 import AuditPage from './pages/AuditPage';
 import OperatorsPage from './pages/OperatorsPage';
+import EventsPage from './pages/EventsPage';
 
 const NAV = [
   { to: '/tasks', label: '任务', icon: '▤' },
   { to: '/executions', label: '执行', icon: '↻' },
+  { to: '/events', label: '事件', icon: '✉' }, // 3b 入口(事件触发入站)
   { to: '/dlq', label: 'DLQ', icon: '⚠' },
   { to: '/dags', label: '工作流', icon: '⌗' },
   { to: '/metrics', label: '指标', icon: '▦' },
@@ -91,6 +93,7 @@ export default function App() {
             <Route path="/" element={<Navigate to="/tasks" replace />} />
             <Route path="/tasks" element={<TasksPage />} />
             <Route path="/executions" element={<ExecutionsPage />} />
+            <Route path="/events" element={<EventsPage />} />
             <Route path="/dlq" element={<DlqPage />} />
             <Route path="/dags" element={<DagsPage />} />
             <Route path="/metrics" element={<MetricsPage />} />
