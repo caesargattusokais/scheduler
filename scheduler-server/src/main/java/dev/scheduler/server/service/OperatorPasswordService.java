@@ -6,23 +6,20 @@ import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 
-/** 操作者口令管理:长度校验 → 存在性校验 → BCrypt 编码落库 → 改密/停用即撤销该操作者全部活动会话。 */
+/** 操作者口令管理:口令策略(长度/复杂度/防重) → 存在性校验 → BCrypt 编码落库 → 改密/停用即撤销该操作者全部活动会话。 */
 @Service
 public class OperatorPasswordService {
   public static final int MIN_PASSWORD = 8;
 
   private final OperatorRepository operators;
   private final AuthRepository auth;
+  private final PasswordPolicy policy;
   private final PasswordEncoder enc = new BCryptPasswordEncoder();
 
-  public OperatorPasswordService(OperatorRepository operators, AuthRepository auth) {
+  public OperatorPasswordService(OperatorRepository operators, AuthRepository auth, PasswordPolicy policy) {
     this.operators = operators;
     this.auth = auth;
-  }
-
-  private void requireLength(String raw) {
-    if (raw == null || raw.length() < MIN_PASSWORD)
-      throw new IllegalArgumentException("password must be at least " + MIN_PASSWORD + " chars");
+    this.policy = policy;
   }
 
   /** 校验操作者是否已登记;未登记则抛 IllegalArgumentException(setPassword 落库是对未知名行的静默 no-op,
@@ -32,10 +29,12 @@ public class OperatorPasswordService {
       throw new IllegalArgumentException("unknown operator: " + name);
   }
 
-  /** 设/改口令:长度 → 存在 → 编码落库 → 撤销该操作者全部会话。 */
+  /** 设/改口令:策略(长度+复杂度+防重) → 存在 → 旧哈希入史 → 编码落库 → 撤销该操作者全部会话。 */
   public void setPassword(String name, String raw) {
-    requireLength(raw);
+    policy.validate(raw);
     requireRegistered(name);
+    policy.rejectIfReused(name, raw);
+    policy.pushHistory(name); // 防重校验通过后,把当前活跃口令压入历史(回落库前,读到的是旧口令)
     operators.setPassword(name, enc.encode(raw));
     auth.revokeAllForOperator(name);
     operators.setMustChangePassword(name, false); // 人类选定口径 → 不强制首登改密
@@ -47,10 +46,10 @@ public class OperatorPasswordService {
     auth.revokeAllForOperator(name);
   }
 
-  /** 引导默认口令:仅对当前无口令的操作者应用(不覆盖管理员已设口令);仍走长度校验 + 编码落库。
+  /** 引导默认口令:仅对当前无口令的操作者应用(不覆盖管理员已设口令);走引导策略校验(仅长度)+ 编码落库。
    *  该口令为共享默认 → 置 must_change_password=true,操作者须在首登改密。 */
   public void bootstrap(String name, String raw) {
-    requireLength(raw);
+    policy.validateBootstrap(raw);
     if (!operators.namesWithoutPassword().contains(name)) return; // 已有口令 → 跳过,不覆盖
     operators.setPassword(name, enc.encode(raw));
     auth.revokeAllForOperator(name);

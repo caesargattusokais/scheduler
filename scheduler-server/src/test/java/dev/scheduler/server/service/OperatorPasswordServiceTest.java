@@ -13,6 +13,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import org.junit.jupiter.api.Test;
+import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 
 /** 纯单测(不连 DB):BCrypt 前缀、长度校验、存在性校验、revokeAllForOperator 调用、bootstrap 仅作用于无密者。 */
 class OperatorPasswordServiceTest {
@@ -23,6 +24,8 @@ class OperatorPasswordServiceTest {
     final List<String> hashed = new ArrayList<>();
     final List<String> mustChangeSet = new ArrayList<>();
     final List<String> mustChangeCleared = new ArrayList<>();
+    final List<String> historyHashes = new ArrayList<>();
+    Optional<String> activeHash = Optional.empty();
     Boolean mustChange = false;
     List<String> passwordless = new ArrayList<>();
 
@@ -40,7 +43,7 @@ class OperatorPasswordServiceTest {
 
     @Override public void deactivate(String name) { }
 
-    @Override public Optional<String> activePasswordHash(String name) { return Optional.empty(); }
+    @Override public Optional<String> activePasswordHash(String name) { return activeHash; }
 
     @Override public void setPassword(String name, String bcryptHash) { hashed.add(name + "=" + bcryptHash); }
 
@@ -52,6 +55,13 @@ class OperatorPasswordServiceTest {
     @Override public Optional<Boolean> mustChangePassword(String name) { return Optional.ofNullable(mustChange); }
 
     @Override public List<String> namesWithoutPassword() { return passwordless; }
+
+    @Override public List<String> passwordHistoryHashes(String name) { return List.copyOf(historyHashes); }
+
+    @Override public void pushPasswordHistory(String name, String bcryptHash, int keep) {
+      historyHashes.add(bcryptHash);
+      while (historyHashes.size() > keep) historyHashes.remove(0); // 只保留最新 keep 条(镜像持久层裁剪)
+    }
   }
 
   /** 记录撤销调用的假 AuthRepository。 */
@@ -84,9 +94,9 @@ class OperatorPasswordServiceTest {
     FakeOperators ops = new FakeOperators();
     ops.upsert("alice", OperatorRole.ADMIN, true);
     FakeAuth auth = new FakeAuth();
-    OperatorPasswordService svc = new OperatorPasswordService(ops, auth);
+    OperatorPasswordService svc = new OperatorPasswordService(ops, auth, new PasswordPolicy(ops));
 
-    svc.setPassword("alice", "secret-pass");
+    svc.setPassword("alice", "secret-pass1");
 
     assertEquals(1, ops.hashed.size());
     String stored = ops.hashed.get(0);
@@ -99,7 +109,7 @@ class OperatorPasswordServiceTest {
     FakeOperators ops = new FakeOperators();
     ops.upsert("alice", OperatorRole.ADMIN, true);
     FakeAuth auth = new FakeAuth();
-    OperatorPasswordService svc = new OperatorPasswordService(ops, auth);
+    OperatorPasswordService svc = new OperatorPasswordService(ops, auth, new PasswordPolicy(ops));
 
     IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
         () -> svc.setPassword("alice", "short"));
@@ -112,7 +122,7 @@ class OperatorPasswordServiceTest {
   void setPassword_unknownOperator_rejected() {
     FakeOperators ops = new FakeOperators(); // 空目录,alice 未登记
     FakeAuth auth = new FakeAuth();
-    OperatorPasswordService svc = new OperatorPasswordService(ops, auth);
+    OperatorPasswordService svc = new OperatorPasswordService(ops, auth, new PasswordPolicy(ops));
 
     assertThrows(IllegalArgumentException.class, () -> svc.setPassword("alice", "secret-pass"));
     assertTrue(ops.hashed.isEmpty(), "未知名不得静默落库(避免打错名后看似成功但没改到)");
@@ -127,7 +137,7 @@ class OperatorPasswordServiceTest {
     // 仅 bob 当前无密 → 引导应只作用于 bob
     ops.passwordless = List.of("bob");
     FakeAuth auth = new FakeAuth();
-    OperatorPasswordService svc = new OperatorPasswordService(ops, auth);
+    OperatorPasswordService svc = new OperatorPasswordService(ops, auth, new PasswordPolicy(ops));
 
     svc.bootstrap("bob", "boot-pass");
 
@@ -145,9 +155,9 @@ class OperatorPasswordServiceTest {
     FakeOperators ops = new FakeOperators();
     ops.upsert("alice", OperatorRole.ADMIN, true);
     FakeAuth auth = new FakeAuth();
-    OperatorPasswordService svc = new OperatorPasswordService(ops, auth);
+    OperatorPasswordService svc = new OperatorPasswordService(ops, auth, new PasswordPolicy(ops));
 
-    svc.setPassword("alice", "secret-pass");
+    svc.setPassword("alice", "secret-pass1");
 
     assertEquals(List.of("alice"), ops.mustChangeCleared, "人类选定口令后应清除必须改密标");
   }
@@ -157,10 +167,41 @@ class OperatorPasswordServiceTest {
     FakeOperators ops = new FakeOperators();
     ops.upsert("carol", OperatorRole.ADMIN, true);
     FakeAuth auth = new FakeAuth();
-    OperatorPasswordService svc = new OperatorPasswordService(ops, auth);
+    OperatorPasswordService svc = new OperatorPasswordService(ops, auth, new PasswordPolicy(ops));
 
     svc.deactivate("carol");
 
     assertEquals(List.of("carol"), auth.revokedAll, "停用应撤销该操作者全部会话");
+  }
+
+  /** 设密不得复用当前活跃口令:相同 → 策略拒绝(不落库、不入史)。 */
+  @Test
+  void setPassword_sameAsActive_rejected() {
+    FakeOperators ops = new FakeOperators();
+    ops.upsert("alice", OperatorRole.ADMIN, true);
+    ops.activeHash = Optional.of(new BCryptPasswordEncoder().encode("secret-pass1"));
+    FakeAuth auth = new FakeAuth();
+    OperatorPasswordService svc = new OperatorPasswordService(ops, auth, new PasswordPolicy(ops));
+
+    assertThrows(IllegalArgumentException.class, () -> svc.setPassword("alice", "secret-pass1"));
+    assertTrue(ops.hashed.isEmpty(), "复用当前口令不得落库");
+    assertTrue(ops.historyHashes.isEmpty(), "未通过防重不得压历史");
+  }
+
+  /** 设密成功后,把当前活跃口令的哈希压入历史(供下次防重),再落新密。 */
+  @Test
+  void setPassword_success_pushesOldActiveIntoHistory() {
+    FakeOperators ops = new FakeOperators();
+    ops.upsert("alice", OperatorRole.ADMIN, true);
+    String oldHash = new BCryptPasswordEncoder().encode("old-pass1");
+    ops.activeHash = Optional.of(oldHash);
+    FakeAuth auth = new FakeAuth();
+    OperatorPasswordService svc = new OperatorPasswordService(ops, auth, new PasswordPolicy(ops));
+
+    svc.setPassword("alice", "brand-new1");
+
+    assertEquals(1, ops.historyHashes.size(), "旧口令哈希应入史");
+    assertEquals(oldHash, ops.historyHashes.get(0), "入史的应是旧活跃口令哈希");
+    assertEquals(1, ops.hashed.size(), "新密仍应落库");
   }
 }

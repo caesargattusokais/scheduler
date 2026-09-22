@@ -32,13 +32,15 @@ public class AuthService {
   private final AuthRepository auth;
   private final OperatorRepository operators;
   private final AuditRecorder auditor;
+  private final PasswordPolicy policy;
   private final PasswordEncoder enc;
   private final SecureRandom rng = new SecureRandom();
 
-  public AuthService(AuthRepository auth, OperatorRepository operators, AuditRecorder auditor) {
+  public AuthService(AuthRepository auth, OperatorRepository operators, AuditRecorder auditor, PasswordPolicy policy) {
     this.auth = auth;
     this.operators = operators;
     this.auditor = auditor;
+    this.policy = policy;
     this.enc = new BCryptPasswordEncoder();
   }
 
@@ -121,9 +123,9 @@ public class AuthService {
           deniedMeta("/api/v1/auth/change-password", "bad current password on self password change"));
       return Optional.empty();
     }
-    if (newRaw == null || newRaw.length() < OperatorPasswordService.MIN_PASSWORD) {
-      throw new IllegalArgumentException("password must be at least " + OperatorPasswordService.MIN_PASSWORD + " chars");
-    }
+    policy.validate(newRaw); // 长度 + 复杂度(含数字)
+    policy.rejectIfReused(operator, newRaw); // 不得复用当前或最近 historySize 条口令
+    policy.pushHistory(operator); // 校验通过后把当前活跃口令压入历史(回读旧哈希,落新密前)
     operators.setPassword(operator, enc.encode(newRaw));
     operators.setMustChangePassword(operator, false); // 人类选定口径 → 不再强制首登改密
     auth.revokeAllForOperator(operator); // 旧/其他会话全作废

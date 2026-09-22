@@ -70,4 +70,19 @@ public class JdbcOperatorRepository implements OperatorRepository {
   public void setMustChangePassword(String name, boolean v) {
     jdbc.update("UPDATE app_operator SET must_change_password = ? WHERE name = ?", v, name);
   }
+
+  @Override
+  public List<String> passwordHistoryHashes(String name) {
+    return jdbc.query("SELECT password_hash FROM app_password_history WHERE operator_name = ? ORDER BY id DESC",
+        (rs, i) -> rs.getString(1), name);
+  }
+
+  @Override
+  public void pushPasswordHistory(String name, String bcryptHash, int keep) {
+    jdbc.update("INSERT INTO app_password_history (operator_name, password_hash) VALUES (?, ?)", name, bcryptHash);
+    // 超出最新 keep 条的旧记录删除:id 小于「后 keep 条里最旧那条 id」即淘汰。
+    jdbc.update("DELETE FROM app_password_history WHERE operator_name = ? AND id NOT IN ("
+        + "  SELECT id FROM app_password_history WHERE operator_name = ? ORDER BY id DESC LIMIT ?)",
+        name, name, keep);
+  }
 }

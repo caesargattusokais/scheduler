@@ -2160,6 +2160,48 @@ class ApiIntegrationTest {
         .andExpect(jsonPath("$.totalRecords").value(4));
   }
 
+  /**
+   * 口令策略:自助改密缺数字(复杂度)→ 400、复用当前口令 → 400;合规改密后旧口令入史,
+   * ADMIN 设密再取回历史口令 → 400(防重用),合规设密仍通。
+   */
+  @Test
+  void passwordPolicy_complexityReuseReject_compliantSucceeds() throws Exception {
+    pinOperatorPassword("bob", "old-pass1", false);
+
+    // 缺数字(复杂度)→ 400
+    mvc.perform(post("/api/v1/auth/change-password").cookie(session(BOB_TOKEN))
+            .contentType(MediaType.APPLICATION_JSON)
+            .content("{\"currentPassword\":\"old-pass1\",\"newPassword\":\"onlyletters\"}"))
+        .andExpect(status().isBadRequest());
+    assertEquals(0L, jdbc.queryForObject(
+        "SELECT count(*) FROM app_password_history WHERE operator_name='bob'", Long.class),
+        "复杂度拒绝不得压历史(无副作用)");
+    // 复用当前口令 → 400;同样不得压历史
+    mvc.perform(post("/api/v1/auth/change-password").cookie(session(BOB_TOKEN))
+            .contentType(MediaType.APPLICATION_JSON)
+            .content("{\"currentPassword\":\"old-pass1\",\"newPassword\":\"old-pass1\"}"))
+        .andExpect(status().isBadRequest());
+    // 合规自助改密 → 200;旧口令 old-pass1 压入 bob 历史
+    mvc.perform(post("/api/v1/auth/change-password").cookie(session(BOB_TOKEN))
+            .contentType(MediaType.APPLICATION_JSON)
+            .content("{\"currentPassword\":\"old-pass1\",\"newPassword\":\"brand-new1\"}"))
+        .andExpect(status().isOk());
+    assertEquals(1L, jdbc.queryForObject(
+        "SELECT count(*) FROM app_password_history WHERE operator_name='bob'", Long.class),
+        "改密成功后把旧活跃口令压入历史");
+    // 自助改密已撤销 bob 全部会话;改 ADMIN(alice)继续测防重:
+    //  ADMIN 把 bob 口令设回历史里曾有过的 old-pass1(含数字,复杂度通过)→ 400(防重用历史)
+    mvc.perform(post("/api/v1/operators/bob/password").cookie(session(ALICE_TOKEN))
+            .contentType(MediaType.APPLICATION_JSON)
+            .content("{\"password\":\"old-pass1\"}"))
+        .andExpect(status().isBadRequest());
+    // 合规 ADMIN 设密 → 200
+    mvc.perform(post("/api/v1/operators/bob/password").cookie(session(ALICE_TOKEN))
+            .contentType(MediaType.APPLICATION_JSON)
+            .content("{\"password\":\"final-pass1\"}"))
+        .andExpect(status().isOk());
+  }
+
   // ---- 自助改密 + 首登强制改密(必须改密标) ----
 
   /** app_operator 不在 resetDb truncate 之列(passwd/flag 跨用例保留),故每用例先用 jdbc 直接钉死要断言的口令/标。 */

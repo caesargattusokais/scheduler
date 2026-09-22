@@ -37,7 +37,7 @@ class AuthServiceTest {
   void setUp() {
     auth = new FakeAuth();
     auditor = new FakeAuditor();
-    svc = new AuthService(auth, new FakeOperators(), auditor);
+    svc = svc(new FakeOperators());
   }
 
   // ---- login ----
@@ -57,7 +57,7 @@ class AuthServiceTest {
   @Test
   void login_badPassword_recordFailureAndDenied() {
     auth.locked = Optional.empty();
-    svc = new AuthService(auth, withHash(enc.encode("right-secret")), auditor);
+    svc = svc(withHash(enc.encode("right-secret")));
     var r = svc.login("alice", "wrong-pass");
     assertTrue(r.isEmpty());
     assertEquals(List.of("alice"), auth.failures, "验密失败累计退避");
@@ -69,7 +69,7 @@ class AuthServiceTest {
   @Test
   void login_success_resetsLockoutAndCreatesSession() {
     auth.locked = Optional.empty();
-    svc = new AuthService(auth, withHash(enc.encode("secret-pass")), auditor);
+    svc = svc(withHash(enc.encode("secret-pass")));
     var r = svc.login("alice", "secret-pass");
     assertTrue(r.isPresent());
     assertEquals("alice", r.get().operator());
@@ -133,7 +133,7 @@ class AuthServiceTest {
   @Test
   void login_create_passesNullCreatedAt() {
     auth.locked = Optional.empty();
-    svc = new AuthService(auth, withHash(enc.encode("secret-pass")), auditor);
+    svc = svc(withHash(enc.encode("secret-pass")));
     svc.login("alice", "secret-pass");
     assertEquals(1, auth.createdAts.size());
     assertEquals(null, auth.createdAts.get(0), "登录建会话 created_at=DB now()(传 null)");
@@ -171,7 +171,7 @@ class AuthServiceTest {
   /** 当前口令不符 → empty + access.denied,不改密、不撤会话、不建新会话。 */
   @Test
   void changePassword_wrongCurrent_emptyAndDenied() {
-    svc = new AuthService(auth, withHash(enc.encode("right-secret")), auditor);
+    svc = svc(withHash(enc.encode("right-secret")));
     var r = svc.changePassword("alice", "wrong-pass", "brand-new-pass");
     assertTrue(r.isEmpty());
     assertTrue(auditor.denied.contains("alice"), "当前密不符应记 access.denied");
@@ -190,7 +190,7 @@ class AuthServiceTest {
   /** 新密过短 → IAE(不得落库/撤会话)。 */
   @Test
   void changePassword_shortNew_rejected() {
-    svc = new AuthService(auth, withHash(enc.encode("right-secret")), auditor);
+    svc = svc(withHash(enc.encode("right-secret")));
     var exception = assertThrows(IllegalArgumentException.class,
         () -> svc.changePassword("alice", "right-secret", "short"));
     assertTrue(exception.getMessage().contains("8"), exception.getMessage());
@@ -204,9 +204,9 @@ class AuthServiceTest {
     FakeOperators ops = new FakeOperators();
     ops.passwordHash = Optional.of(enc.encode("right-secret"));
     ops.mustChange = true; // 首登强制改密场景:旧标为 true
-    svc = new AuthService(auth, ops, auditor);
+    svc = svc(ops);
 
-    var r = svc.changePassword("alice", "right-secret", "brand-new-pass");
+    var r = svc.changePassword("alice", "right-secret", "brand-new-pass1");
 
     assertTrue(r.isPresent());
     assertEquals("alice", r.get().operator());
@@ -221,6 +221,44 @@ class AuthServiceTest {
     assertEquals(auth.now.plus(AuthService.TOKEN_TTL), r.get().expiresAt(), "新会话到期=now+8h");
     assertTrue(auditor.denied.isEmpty(), "成功不记 denied");
     assertTrue(auditor.audited.contains("auth.change_password"), "自助改密记 auth.change_password 审计");
+    assertEquals(1, ops.historyHashes.size(), "改密成功后旧口令哈希应压入历史(供下次防重)");
+    assertTrue(enc.matches("right-secret", ops.historyHashes.get(0)), "入史的应是旧口令哈希");
+  }
+
+  /** 改密不得复用当前口令:新密与当前密相同 → 策略拒绝(不落库、不入史、不撤会话)。 */
+  @Test
+  void changePassword_sameAsCurrent_rejectedByPolicy() {
+    FakeOperators ops = withHash(enc.encode("right-secret1"));
+    svc = svc(ops);
+
+    assertThrows(IllegalArgumentException.class,
+        () -> svc.changePassword("alice", "right-secret1", "right-secret1"));
+    assertTrue(ops.passwordSet.isEmpty(), "复用当前口令不得落库");
+    assertTrue(ops.historyHashes.isEmpty(), "未通过防重不得压历史");
+  }
+
+  /** 改密不得复用历史口令:曾用过的口令再次提交 → 策略拒绝。 */
+  @Test
+  void changePassword_reusesRecentlyUsed_rejected() {
+    FakeOperators ops = withHash(enc.encode("current-pass2"));
+    ops.historyHashes.add(enc.encode("brand-new1")); // 历史里已有该口令
+    svc = svc(ops);
+
+    assertThrows(IllegalArgumentException.class,
+        () -> svc.changePassword("alice", "current-pass2", "brand-new1"));
+    assertTrue(ops.passwordSet.isEmpty(), "复用历史口令不得落库");
+    assertEquals(1, ops.historyHashes.size(), "未通过防重不得新增历史(仍为预置的那条)");
+  }
+
+  /** 复杂度:不含数字且长度足够的新密 → 策略拒绝(IAE,不落库)。 */
+  @Test
+  void changePassword_missingDigit_rejected() {
+    FakeOperators ops = withHash(enc.encode("right-secret1"));
+    svc = svc(ops);
+
+    assertThrows(IllegalArgumentException.class,
+        () -> svc.changePassword("alice", "right-secret1", "onlyletters"));
+    assertTrue(ops.passwordSet.isEmpty(), "不含数字的新密不得落库");
   }
 
   // ---- fakes ----
@@ -229,6 +267,11 @@ class AuthServiceTest {
     FakeOperators o = new FakeOperators();
     o.passwordHash = Optional.of(hash);
     return o;
+  }
+
+  /** 构造 AuthService,并用同一 ops 实例注入默认口令策略(minLength=8, requireDigit=true, historySize=5)。 */
+  private AuthService svc(FakeOperators ops) {
+    return new AuthService(auth, ops, auditor, new PasswordPolicy(ops));
   }
 
   /** 可控的假 AuthRepository:记录建/撤/退避/重置 + 可拨 now()。 */
@@ -265,6 +308,7 @@ class AuthServiceTest {
   /** 可控口令哈希的假 OperatorRepository(仅需 activePasswordHash)。 */
   private static final class FakeOperators implements OperatorRepository {
     Optional<String> passwordHash = Optional.empty();
+    final List<String> historyHashes = new ArrayList<>();
     final List<String> passwordSet = new ArrayList<>();
     final List<String> mustChangeSet = new ArrayList<>();
     final List<String> mustChangeCleared = new ArrayList<>();
@@ -282,6 +326,11 @@ class AuthServiceTest {
     }
     @Override public Optional<Boolean> mustChangePassword(String name) { return Optional.ofNullable(mustChange); }
     @Override public List<String> namesWithoutPassword() { return List.of(); }
+    @Override public List<String> passwordHistoryHashes(String name) { return List.copyOf(historyHashes); }
+    @Override public void pushPasswordHistory(String name, String bcryptHash, int keep) {
+      historyHashes.add(bcryptHash);
+      while (historyHashes.size() > keep) historyHashes.remove(0); // 只保留最新 keep 条(镜像持久层裁剪)
+    }
   }
 
   /** 捕获全部动作名的假审计(覆写 5-arg record,不经序列化):auth.* 成功侧 + access.denied 失败侧。 */

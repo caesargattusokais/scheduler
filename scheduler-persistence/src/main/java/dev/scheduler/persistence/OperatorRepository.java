@@ -33,4 +33,16 @@ public interface OperatorRepository {
 
   /** 置位/清除强制改密标:true=口令仍为共享默认须首登改密;false=已有妥善口令。 */
   void setMustChangePassword(String name, boolean v);
+
+  /**
+   * 该操作者全部历史口令哈希(按设定先后倒序,最新在前;不含当前活跃口令),供「防重」校验:
+   * 新口令不得与当前活跃口令或最近若干条历史口令相同。
+   */
+  List<String> passwordHistoryHashes(String operator);
+
+  /**
+   * 把旧口令哈希压入历史并保留最新 {@code keep} 条(超出最近的记录删除,防历史无限膨胀)。
+   * operator 无旧口令(首次设密)时业务方不应调用;此处对空历史是幂等插入。
+   */
+  void pushPasswordHistory(String operator, String bcryptHash, int keep);
 }

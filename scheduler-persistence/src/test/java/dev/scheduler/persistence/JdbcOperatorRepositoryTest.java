@@ -14,7 +14,8 @@ class JdbcOperatorRepositoryTest extends AbstractPostgresTest {
 
   @BeforeEach
   void clean() {
-    jdbc.execute("TRUNCATE app_operator RESTART IDENTITY CASCADE");
+    // app_password_history 无 FK,不受 app_operator CASCADE 连带,须显式清以隔离用例。
+    jdbc.execute("TRUNCATE app_operator, app_password_history RESTART IDENTITY CASCADE");
     operators = new JdbcOperatorRepository(jdbc);
   }
 
@@ -98,5 +99,32 @@ class JdbcOperatorRepositoryTest extends AbstractPostgresTest {
 
     operators.setMustChangePassword("alice", false); // 人类选定口令清除
     assertFalse(operators.mustChangePassword("alice").orElse(true), "清除应可回读");
+  }
+
+  @Test
+  void passwordHistory_pushAndRead_newestFirst() {
+    operators.upsert("alice", OperatorRole.ADMIN, true);
+    operators.pushPasswordHistory("alice", "hash-1", 5);
+    operators.pushPasswordHistory("alice", "hash-2", 5);
+    operators.pushPasswordHistory("alice", "hash-3", 5);
+    assertEquals(List.of("hash-3", "hash-2", "hash-1"), operators.passwordHistoryHashes("alice"),
+        "历史按设定先后倒序,最新在前");
+  }
+
+  @Test
+  void passwordHistory_pushTrimsToKeepNewest() {
+    operators.upsert("alice", OperatorRole.ADMIN, true);
+    for (int i = 1; i <= 6; i++) operators.pushPasswordHistory("alice", "hash-" + i, 3);
+    assertEquals(List.of("hash-6", "hash-5", "hash-4"), operators.passwordHistoryHashes("alice"),
+        "只保留最新 keep=3 条,旧的淘汰");
+  }
+
+  @Test
+  void passwordHistory_scopedPerOperator() {
+    operators.upsert("alice", OperatorRole.ADMIN, true);
+    operators.upsert("bob", OperatorRole.OPERATOR, true);
+    operators.pushPasswordHistory("alice", "alice-hash", 5);
+    assertEquals(List.of("alice-hash"), operators.passwordHistoryHashes("alice"));
+    assertTrue(operators.passwordHistoryHashes("bob").isEmpty(), "历史按操作者隔离,互不串扰");
   }
 }
