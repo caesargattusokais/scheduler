@@ -1,9 +1,8 @@
 package dev.scheduler.server.dag;
 
 import dev.scheduler.core.Dag;
-import dev.scheduler.core.DagEdge;
-import dev.scheduler.core.DagNode;
 import dev.scheduler.core.DagRun;
+import dev.scheduler.core.DagRunEdge;
 import dev.scheduler.core.DagRunNode;
 import dev.scheduler.core.DagRunNodeStatus;
 import dev.scheduler.core.DagRunStatus;
@@ -93,10 +92,13 @@ public class DagEngine {
     lastRunId = (page.size() == batchSize) ? page.get(page.size() - 1).id() : 0L;
   }
 
-  /** 上游表:nodeKey → 直接上游 nodeKey 列表(读 dag 定义的边 + 节点 id↔key 映射)。 */
-  private Map<String, List<String>> upstreamMap(long dagId, Map<Long, String> keyByNodeId) {
+  /** 上游表:run 内 nodeKey → 直接上游 nodeKey 列表。1c:读 run 封印边 dag_run_edge(from/to 是 run 内节点 id),
+   *  不读当前定义 dag_edge——定义编辑不影响在飞 run。 */
+  private Map<String, List<String>> upstreamMap(long runId, Map<String, DagRunNode> byKey) {
+    Map<Long, String> keyByNodeId = new HashMap<>();
+    for (DagRunNode n : byKey.values()) keyByNodeId.put(n.id(), n.nodeKey());
     Map<String, List<String>> up = new HashMap<>();
-    for (DagEdge e : dags.findEdges(dagId)) {
+    for (DagRunEdge e : dags.findRunEdges(runId)) {
       String to = keyByNodeId.get(e.toNodeId());
       String from = keyByNodeId.get(e.fromNodeId());
       if (to != null && from != null) up.computeIfAbsent(to, k -> new ArrayList<>()).add(from);
@@ -125,25 +127,20 @@ public class DagEngine {
   }
 
   private void propagateRun(DagRun run, List<DagRunNode> nodes) {
-    // nodeId → nodeKey(用 dag 定义节点映射边引用的 node id 到 run 内的 node_key)
-    Map<Long, String> keyByNodeId = new HashMap<>();
-    Map<String, DagNode> defByKey = new HashMap<>(); // nodeKey → 定义节点(读节点级重试预算)
-    for (DagNode dn : dags.findNodes(run.dagId())) {
-      keyByNodeId.put(dn.id(), dn.nodeKey());
-      defByKey.put(dn.nodeKey(), dn);
-    }
+    // 1c:引擎只读 run 封印数据——节点行为(run_if/node_max_retries/node_backoff_ms)+ 边(dag_run_edge)都是
+    // createRun 时快照进 run 的;之后定义怎么改都不影响在飞/历史 run(引擎不再读当前定义 dag 表)。
     Map<String, DagRunNode> byKey = new HashMap<>();
     for (DagRunNode n : nodes) byKey.put(n.nodeKey(), n);
-    Map<String, List<String>> upstream = upstreamMap(run.dagId(), keyByNodeId);
+    Map<String, List<String>> upstream = upstreamMap(run.id(), byKey);
 
     for (DagRunNode n : nodes) {
       if (n.status().isTerminal()) continue;
       List<DagRunNode> ups = upstream.getOrDefault(n.nodeKey(), List.of()).stream()
           .map(byKey::get).filter(Objects::nonNull).toList();
       if (n.status() == DagRunNodeStatus.PENDING) {
-        stepPendingNode(run, n, ups, defByKey.get(n.nodeKey()));
+        stepPendingNode(run, n, ups);
       } else if (n.status() == DagRunNodeStatus.RUNNING) {
-        stepRunningNode(n, defByKey.get(n.nodeKey()));
+        stepRunningNode(n);
       }
     }
 
@@ -166,9 +163,9 @@ public class DagEngine {
    *  到点才重 spawn(镜像 execution 层 DUE 的 next_retry_at 闸)。
    *  1b:run_if='any_success' 走 OR-join——任一上游 SUCCESS 即 spawn(即便其它上游失败/跳过/取消);仅当全部
    *  上游终态且无任一成功 → 被跳过('no upstream succeeded')。默认 all_success 保持旧语义。 */
-  private void stepPendingNode(DagRun run, DagRunNode n, List<DagRunNode> ups, DagNode def) {
+  private void stepPendingNode(DagRun run, DagRunNode n, List<DagRunNode> ups) {
     if (n.nextRetryAt() != null && clock.instant().isBefore(n.nextRetryAt())) return;
-    if (def != null && "any_success".equals(def.runIf())) {
+    if ("any_success".equals(n.runIf())) {
       // OR-join:无上游(根节点)或任一上游成功 → 直接就绪 spawn;否则等。
       if (ups.isEmpty() || ups.stream().anyMatch(u -> u.status() == DagRunNodeStatus.SUCCESS)) {
         spawnNode(run, n);
@@ -200,16 +197,17 @@ public class DagEngine {
   }
 
   /** §3.2 RUNNING 节点:读其 execution 的全部 shard;全终态后派生节点终态(FAILED 先于 CANCELED 先于 SUCCESS)。
-   *  1a 重试劫持:若节点定义允许重试且 attempt 未超预算 → 失败时不标 FAILED,回绕 PENDING 待重试。 */
-  private void stepRunningNode(DagRunNode n, DagNode def) {
+   *  1a 重试劫持:1c 用 run 封印的 node_max_retries/node_backoff_ms——若节点允许重试且 attempt 未超预算 →
+   *  失败时不标 FAILED,回绕 PENDING 待重试。 */
+  private void stepRunningNode(DagRunNode n) {
     if (n.executionId() == null) return;
     List<Shard> ss = shards.findShards(n.executionId());
     if (!ss.stream().allMatch(s -> s.status().isTerminal())) return; // 未全终态 → 保持 RUNNING,等 worker/对账
     boolean anyFailed = ss.stream().anyMatch(s -> s.status() == ExecutionStatus.FAILED);
-    if (anyFailed && def != null && n.attempt() < def.nodeMaxRetries()) {
+    if (anyFailed && n.attempt() < n.nodeMaxRetries()) {
       // 消费一次重试预算:回绕到 PENDING(execution_id 清空)+ attempt+1 + 退避到点;下游仍等;到点由
       // stepPendingNode 以新 idempotency key(:a{attempt})重 spawn 该节点(不复用已失败的父执行)。
-      Instant retryAt = clock.instant().plusMillis(nodeRetryDelayMs(def, n.attempt()));
+      Instant retryAt = clock.instant().plusMillis(nodeRetryDelayMs(n));
       dags.scheduleNodeRetry(n.id(), retryAt, n.attempt() + 1, "shards failed; will retry");
       return;
     }
@@ -230,9 +228,9 @@ public class DagEngine {
     }
   }
 
-  /** 节点级退避:指数(attempt 0 起)×backoff,封顶 1h;镜像 RetryPolicy 的 exponential 语义但用节点自持 backoff。 */
-  private static long nodeRetryDelayMs(DagNode def, int attempt) {
-    long backoff = Math.max(1L, def.nodeBackoffMs());
-    return Math.min(3_600_000L, backoff * (1L << Math.min(attempt, 30)));
+  /** 节点级退避:指数(attempt 起)×run 封印 backoff,封顶 1h;镜像 RetryPolicy 的 exponential 语义但用节点自持 backoff。 */
+  private static long nodeRetryDelayMs(DagRunNode n) {
+    long backoff = Math.max(1L, n.nodeBackoffMs());
+    return Math.min(3_600_000L, backoff * (1L << Math.min(n.attempt(), 30)));
   }
 }

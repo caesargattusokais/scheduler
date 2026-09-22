@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { cancelRun, createDag, getDag, getRunDetail, listDagRuns, listDags, listTasks, pauseDag, resumeDag, rerunNode, triggerDag } from '../api/client';
+import { cancelRun, createDag, getDag, getRunDetail, listDagRuns, listDags, listTasks, pauseDag, resumeDag, rerunNode, triggerDag, updateDag } from '../api/client';
 import type { CreateDagRequest, Dag, DagDetail, DagRun, NodeDetail, RunDetail, Task } from '../api/types';
 import { useInterval } from '../lib/useInterval';
 import Pager from '../components/Pager';
@@ -87,14 +87,40 @@ export default function DagsPage() {
   const [bDeps, setBDeps] = useState<number[][]>([]);
   const [bErr, setBErr] = useState<string | null>(null);
   const [bBusy, setBBusy] = useState(false);
+  /** 1c 编辑态:非空 = 本次弹窗是对该 DAG 的编辑(PUT 而非 POST),保存后 version++。 */
+  const [bEditId, setBEditId] = useState<number | null>(null);
 
   const taskById = useMemo(() => new Map(tasks.map((t) => [t.id, t])), [tasks]);
 
   const openBuilder = () => {
-    setBName(''); setBDesc(''); setBCron('0 */5 * * * *'); setBTrig('cron'); setBDep(0); setBErr(null); setBBusy(false);
+    setBEditId(null); setBName(''); setBDesc(''); setBCron('0 */5 * * * *'); setBTrig('cron'); setBDep(0); setBErr(null); setBBusy(false);
     setBSteps([{ nodeKey: 'step1', taskId: null, maxRetries: 0, backoffMs: 5000, runIf: 'all_success' }, { nodeKey: 'step2', taskId: null, maxRetries: 0, backoffMs: 5000, runIf: 'all_success' }]);
     setBDeps([[], [0]]); // 第 2 步默认依赖第 1 步 = 线性
     setBuilder(true); // 关键:打开弹窗(此前漏掉,导致点了无反应)
+  };
+  /** 1c 编辑:以该 DAG 当前定义预填编辑器(PUT);节点行为与依赖边一次带入,改完整份重写。 */
+  const openEdit = async (d: Dag) => {
+    setBEditId(d.id); setBName(d.name); setBDesc(d.description ?? '');
+    setBTrig(d.dependsOnDagId != null ? 'dep' : 'cron');
+    setBDep(d.dependsOnDagId ?? 0);
+    setBCron(d.cron ?? '0 */5 * * * *');
+    setBErr(null); setBBusy(false);
+    try {
+      const dg = await getDag(d.id);
+      const idx = new Map<number, number>();
+      dg.nodes.forEach((n, i) => idx.set(n.id, i));
+      const steps = dg.nodes.map((n) => ({
+        nodeKey: n.nodeKey, taskId: n.taskId,
+        maxRetries: n.nodeMaxRetries, backoffMs: n.nodeBackoffMs, runIf: n.runIf,
+      }));
+      const deps: number[][] = steps.map(() => []);
+      for (const e of dg.edges) {
+        const to = idx.get(e.toNodeId); const from = idx.get(e.fromNodeId);
+        if (to != null && from != null && from < to) deps[to].push(from);
+      }
+      setBSteps(steps); setBDeps(deps);
+    } catch (e) { setErr(String(e)); } // 预填失败仍打开,用户可手动填
+    setBuilder(true);
   };
   const keyOf = (i: number) => bSteps[i].nodeKey.trim() || `step${i + 1}`;
 
@@ -141,10 +167,11 @@ export default function DagsPage() {
       const req: CreateDagRequest = depMode
         ? { name: bName.trim(), description: bDesc.trim() || null, cron: null, dependsOnDagId: bDep, nodes, edges }
         : { name: bName.trim(), description: bDesc.trim() || null, cron: bCron.trim(), nodes, edges };
-      const created = await createDag(req);
+      const created = bEditId != null ? await updateDag(bEditId, req) : await createDag(req);
+      setBEditId(null);
       setBuilder(false);
       setWfOffset(0);
-      await loadDags(0); // 回到第一页刷新,新工作流通常排在后部,选中后可翻页定位
+      await loadDags(0); // 建/改后回第一页刷新(编辑一般不变 id,选中仍有效)
       setSelected(created.id);
     } catch (e) { setBErr(String(e instanceof Error ? e.message : e)); }
     finally { setBBusy(false); }
@@ -296,6 +323,9 @@ export default function DagsPage() {
                           {d.paused ? '启用' : '暂停'}
                         </button>
                       )}
+                      <button className="btn-ghost" onClick={(e) => { e.stopPropagation(); void openEdit(d); }}>
+                        编辑
+                      </button>
                     </div>
                   </td>
                   <td className="num text-slate-700">{info?.steps ?? '…'}</td>
@@ -352,6 +382,9 @@ export default function DagsPage() {
             <div className="flex items-center gap-2 text-sm font-semibold text-slate-900">
               批次 #{detail.run.id}
               <Chip status={detail.status} />
+              {detail.run.dagVersion != null && (
+                <span className="text-xs font-medium text-slate-400">v{detail.run.dagVersion}</span>
+              )}
             </div>
             <div className="flex items-center gap-2 text-xs text-slate-500">
               <span>{trig(detail.run.triggerReason)}</span>
@@ -423,16 +456,16 @@ export default function DagsPage() {
         </div>
       )}
 
-      {/* 新建工作流编辑器 */}
+      {/* 新建 / 编辑工作流编辑器(1c 同一弹窗,编辑态走 PUT) */}
       {builder && (
         <div
           className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-slate-900/40 p-6"
-          onClick={() => !bBusy && setBuilder(false)}
+          onClick={() => !bBusy && (setBuilder(false), setBEditId(null))}
         >
           <div className="w-full max-w-2xl rounded-xl bg-white shadow-xl" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between border-b border-slate-200 px-5 py-3">
-              <h2 className="text-sm font-semibold text-slate-900">新建工作流</h2>
-              <button className="text-slate-400 hover:text-slate-600" onClick={() => setBuilder(false)} disabled={bBusy}>✕</button>
+              <h2 className="text-sm font-semibold text-slate-900">{bEditId != null ? '编辑工作流' : '新建工作流'}</h2>
+              <button className="text-slate-400 hover:text-slate-600" onClick={() => (setBuilder(false), setBEditId(null))} disabled={bBusy}>✕</button>
             </div>
 
             <div className="space-y-4 px-5 py-4">
@@ -553,8 +586,8 @@ export default function DagsPage() {
             </div>
 
             <div className="flex justify-end gap-2 border-t border-slate-200 px-5 py-3">
-              <button className="btn-secondary" onClick={() => setBuilder(false)} disabled={bBusy}>取消</button>
-              <button className="btn-primary" onClick={onSaveDag} disabled={bBusy}>{bBusy ? '创建中…' : '保存并创建'}</button>
+              <button className="btn-secondary" onClick={() => (setBuilder(false), setBEditId(null))} disabled={bBusy}>取消</button>
+              <button className="btn-primary" onClick={onSaveDag} disabled={bBusy}>{bBusy ? (bEditId != null ? '保存中…' : '创建中…') : (bEditId != null ? '保存修改' : '保存并创建')}</button>
             </div>
           </div>
         </div>

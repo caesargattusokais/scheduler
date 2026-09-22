@@ -4,6 +4,7 @@ import dev.scheduler.core.Dag;
 import dev.scheduler.core.DagEdge;
 import dev.scheduler.core.DagNode;
 import dev.scheduler.core.DagRun;
+import dev.scheduler.core.DagRunEdge;
 import dev.scheduler.core.DagRunNode;
 import dev.scheduler.core.DagRunNodeStatus;
 import dev.scheduler.core.DagRunStatus;
@@ -36,6 +37,12 @@ public interface DagRepository {
   /** 建 DAG(可带跨 DAG 依赖 dependsOnDagId,1d):复用上方校验,另加依赖校验——被依赖 DAG 存在、非自身、
    *  经 depends_on_dag_id 链 DFS 无环(dependsOnDagId 不能(直接/间接)依赖自己)。dependsOnDagId 非空时 cron 写 NULL。 */
   Dag createDag(String name, String description, String cron, Long dependsOnDagId,
+                List<NodeInput> nodes, List<EdgeInput> edges);
+
+  /** 1c 编辑 DAG:校验同 createDag(含依赖链),事务内删旧节点/边 + 重插(dag_edge/dag_run_edge 只影响未来新 run,
+   *  已封印的历史/在飞 run 不受影响)+ 更新定义头 + version=version+1。返回改后 dag 头。
+   *  调用方须保证已用与 create 相同的触发源校验(cron 恰其一)。 */
+  Dag updateDag(long id, String name, String description, String cron, Long dependsOnDagId,
                 List<NodeInput> nodes, List<EdgeInput> edges);
 
   Optional<Dag> findDag(long id);
@@ -72,6 +79,8 @@ public interface DagRepository {
   List<DagRun> findActiveRunsPage(long afterId, int limit);
   /** 某 run 的全部节点,ORDER BY sort_order, id。 */
   List<DagRunNode> findNodesOfRun(long runId);
+  /** 1c:某 run 封印的边(DagEngine 推进据此读上游拓扑;不再读当前定义)。 */
+  List<DagRunEdge> findRunEdges(long runId);
   /** 某 run 的非终态节点(status IN (PENDING, RUNNING)),取消级联用。 */
   List<DagRunNode> findNonTerminalNodes(long runId);
 

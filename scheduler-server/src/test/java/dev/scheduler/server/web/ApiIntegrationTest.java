@@ -1579,6 +1579,87 @@ class ApiIntegrationTest {
     assertEquals(IdempotencyKeys.forDagDep(upRun), downRun.get("idempotencyKey").asText());
   }
 
+  /** 1c:PUT 编辑整份定义 + version++,GET 回读 v2 定义,新 run 封印 v2 快照(仅 X 单节点)。 */
+  @Test
+  void dagUpdate_persistsEdit_versionsUp_sealsNewDef() throws Exception {
+    long t = postTask("update-task");
+    long dagId = postDag("update-dag", new long[]{t, t}, new String[]{"A", "B"},
+        new String[][]{{"A", "B"}});
+
+    mvc.perform(put("/api/v1/dags/" + dagId).contentType(MediaType.APPLICATION_JSON)
+        .content(dagBody("update-dag-2", new long[]{t}, new String[]{"X"}, null)))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.version").value(2))
+        .andExpect(jsonPath("$.name").value("update-dag-2"));
+
+    mvc.perform(get("/api/v1/dags/" + dagId))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.dag.version").value(2))
+        .andExpect(jsonPath("$.dag.name").value("update-dag-2"))
+        .andExpect(jsonPath("$.nodes", hasSize(1)))
+        .andExpect(jsonPath("$.nodes[0].nodeKey").value("X"));
+
+    pauseDag(dagId); // 剔除 cron 触发(CLOCK 钉在 tick 上),只用手动 run
+    long runId = triggerDag(dagId);
+    String body = mvc.perform(get("/api/v1/dags/runs/" + runId)).andExpect(status().isOk())
+        .andReturn().getResponse().getContentAsString();
+    JsonNode detail = objectMapper.readTree(body);
+    assertEquals(2, detail.get("run").get("dagVersion").asInt(), "新 run 封印 v2");
+    assertEquals(1, detail.get("nodes").size(), "新 run 只封印新定义单节点");
+    assertEquals("X", detail.get("nodes").get(0).get("node").get("nodeKey").asText());
+  }
+
+  /** 1c:PUT 校验——触发源恰其一(cron/dep 都缺)→400;自身依赖 →400;未知 task →400;不存在 id →404。 */
+  @Test
+  void dagUpdate_rejectsInvalidPayloads_and404() throws Exception {
+    long t = postTask("update-task");
+    long dagId = postDag("ud", new long[]{t}, new String[]{"A"}, null);
+
+    mvc.perform(put("/api/v1/dags/" + dagId).contentType(MediaType.APPLICATION_JSON)
+        .content("{\"name\":\"ud\",\"nodes\":[{\"nodeKey\":\"A\",\"taskId\":" + t + "}],\"edges\":[]}"))
+        .andExpect(status().isBadRequest()); // cron 与 dep 都缺 → 400
+    mvc.perform(put("/api/v1/dags/" + dagId).contentType(MediaType.APPLICATION_JSON)
+        .content(dagDepBody("ud", dagId, new long[]{t}, new String[]{"A"})))
+        .andExpect(status().isBadRequest()); // 自身依赖 → 400
+    mvc.perform(put("/api/v1/dags/" + dagId).contentType(MediaType.APPLICATION_JSON)
+        .content(dagBody("ud", new long[]{999999L}, new String[]{"A"}, null)))
+        .andExpect(status().isBadRequest()); // 未知 task → 400
+    mvc.perform(put("/api/v1/dags/999999").contentType(MediaType.APPLICATION_JSON)
+        .content(dagBody("ud", new long[]{t}, new String[]{"A"}, null)))
+        .andExpect(status().isNotFound());   // 不存在 → 404
+  }
+
+  /** 1c:在飞 run 封印 v1 快照——定义编辑(去掉 B)不影响已触发 run;run 仍按封印边 A→B 走完 SUCCESS。 */
+  @Test
+  void dagUpdate_doesNotDisturbSealedRun() throws Exception {
+    long t = postTask("ud-task");
+    long dagId = postDag("ud-dag", new long[]{t, t}, new String[]{"A", "B"},
+        new String[][]{{"A", "B"}});
+    pauseDag(dagId);
+    long runId = triggerDag(dagId);
+
+    dagEngine.scanOnce();          // A 根 spawn;B 等上游
+    completeNodeShards(runId, "A", "SUCCESS");
+    reconciler.scanOnce();         // A 父 execution SUCCESS
+
+    // A 已 SUCCESS、B 未 spawn 时编辑定义(去掉 B)
+    mvc.perform(put("/api/v1/dags/" + dagId).contentType(MediaType.APPLICATION_JSON)
+        .content(dagBody("ud-dag-2", new long[]{t}, new String[]{"A"}, null)))
+        .andExpect(status().isOk()).andExpect(jsonPath("$.version").value(2));
+
+    dagEngine.scanOnce();          // A 派生 SUCCESS;B 本 scan 仍见 A scan-start 态 → PENDING(跨周期收敛)
+    dagEngine.scanOnce();          // B 见上游 A SUCCESS → 依封印边 spawn RUNNING(不因当前定义已是根而提前)
+    completeNodeShards(runId, "B", "SUCCESS");
+    reconciler.scanOnce();         // B 父 execution SUCCESS
+    dagEngine.scanOnce();          // += 全节点终态 → 旧 run 按 v1 走完 SUCCESS
+
+    mvc.perform(get("/api/v1/dags/runs/" + runId))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.run.status").value("SUCCESS"))
+        .andExpect(jsonPath("$.run.dagVersion").value(1))
+        .andExpect(jsonPath("$.nodes", hasSize(2))); // 封印 v1:仍 A+B
+  }
+
   /** M4:线性 A→B 全成功端到端。真实触发 + 同步驱动(dagEngine.scanOnce → completeNodeShards → reconciler.scanOnce)。
    *  跨周期收敛:节点只在"其上游 SUCCESS 之后的下一次 scan"才 spawn,故 A 终态后需多一次 scan 才生成 B。 */
   @Test

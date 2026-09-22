@@ -396,4 +396,66 @@ class JdbcDagRepositoryTest extends AbstractPostgresTest {
     assertNull(n.nextRetryAt(), "operator 重跑清除重试退避门");
     assertEquals(eid2, n.executionId());
   }
+
+  /** 1c:createRun 封印整份快照——dag_version + 节点行为列(run_if/node_max_retries/node_backoff_ms)+ 边(dag_run_edge)。 */
+  @Test void createRun_sealsVersionBehaviorAndEdges() {
+    long t = newTask("0 */5 * * * *");
+    long dagId = dagRepo.createDag("d", "desc", "0 */5 * * * *",
+        List.of(new DagRepository.NodeInput("A", t, 0, 2, 1000, "any_success"),
+            new DagRepository.NodeInput("B", t, 1, 0, 5000, "all_success")),
+        List.of(new DagRepository.EdgeInput("A", "B"))).id();
+    long runId = dagRepo.createScheduledRun(dagId, Instant.now()).id();
+
+    DagRun r = dagRepo.findRun(runId).orElseThrow();
+    assertEquals(1, r.dagVersion(), "run 封印定义版本号(dag_version)");
+    var nodes = dagRepo.findNodesOfRun(runId);
+    assertEquals(2, nodes.size());
+    assertEquals("any_success", nodes.get(0).runIf(), "run 节点封印 run_if 快照");
+    assertEquals(2, nodes.get(0).nodeMaxRetries(), "run 节点封印重试预算快照");
+    assertEquals(1000, nodes.get(0).nodeBackoffMs(), "run 节点封印退避快照");
+    assertEquals("all_success", nodes.get(1).runIf(), "默认 run_if 在封印时落 all_success 而非 NULL");
+
+    var edges = dagRepo.findRunEdges(runId);
+    assertEquals(1, edges.size(), "run 封印 A→B 边(dag_run_edge)");
+    assertEquals(nodes.get(0).id(), edges.get(0).fromNodeId(), "边 from 引用 run 内 A 节点");
+    assertEquals(nodes.get(1).id(), edges.get(0).toNodeId(), "边 to 引用 run 内 B 节点");
+  }
+
+  /** 1c:编辑(updateDag)整份定义重写 + version++ ——仅影响未来新 run;已封印历史/在飞 run 快照原样保留。 */
+  @Test void updateDag_rewritesDefinition_versionsUp_sealedRunUntouched() {
+    long t = newTask("0 */5 * * * *");
+    long dagId = dagRepo.createDag("d", "desc", "0 */5 * * * *",
+        List.of(new DagRepository.NodeInput("A", t, 0), new DagRepository.NodeInput("B", t, 1)),
+        List.of(new DagRepository.EdgeInput("A", "B"))).id();
+    assertEquals(1, dagRepo.findDag(dagId).orElseThrow().version(), "新建 version=1");
+    long oldRun = dagRepo.createScheduledRun(dagId, Instant.now()).id(); // 封印 v1 快照
+    assertEquals(1, dagRepo.findRun(oldRun).orElseThrow().dagVersion());
+
+    // 编辑:改名 + 去掉 B 及其边(整份重写)
+    Dag updated = dagRepo.updateDag(dagId, "d2", "desc2", "0 * * * * *", null,
+        List.of(new DagRepository.NodeInput("A", t, 0)), List.of());
+    assertEquals(2, updated.version(), "编辑 → version++");
+    assertEquals("d2", dagRepo.findDag(dagId).orElseThrow().name());
+    assertEquals(1, dagRepo.findNodes(dagId).size(), "定义现只剩 A");
+
+    // 历史/在飞旧 run 不受影响:封印 v1 快照原样.
+    assertEquals(1, dagRepo.findRun(oldRun).orElseThrow().dagVersion());
+    assertEquals(2, dagRepo.findNodesOfRun(oldRun).size(), "旧 run 仍含 B");
+    assertEquals(1, dagRepo.findRunEdges(oldRun).size(), "旧 run 仍封印 A→B");
+
+    // 新 run 封印 v2:仅 A 且无边.
+    DagRun newRun = dagRepo.createScheduledRun(dagId, Instant.now());
+    assertEquals(2, dagRepo.findRun(newRun.id()).orElseThrow().dagVersion(), "新 run 封印 v2");
+    assertEquals(1, dagRepo.findNodesOfRun(newRun.id()).size(), "新 run 只封印新定义的单节点");
+    assertEquals(0, dagRepo.findRunEdges(newRun.id()).size(), "新 run 无边");
+  }
+
+  /** 1c:编辑若引入自身依赖 → 拒绝且整事务回滚(version 不 ++)。 */
+  @Test void updateDag_selfDepend_rejects() {
+    long dagId = newDag();
+    long t = dagRepo.findNodes(dagId).get(0).taskId();
+    assertThrows(IllegalArgumentException.class, () -> dagRepo.updateDag(dagId, "d", "desc", null, dagId,
+        List.of(new DagRepository.NodeInput("A", t, 0)), List.of()));
+    assertEquals(1, dagRepo.findDag(dagId).orElseThrow().version(), "失败事务回滚 → 版本不 ++");
+  }
 }

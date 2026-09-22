@@ -4,6 +4,7 @@ import dev.scheduler.core.Dag;
 import dev.scheduler.core.DagEdge;
 import dev.scheduler.core.DagNode;
 import dev.scheduler.core.DagRun;
+import dev.scheduler.core.DagRunEdge;
 import dev.scheduler.core.DagRunNode;
 import dev.scheduler.core.DagRunNodeStatus;
 import dev.scheduler.core.DagRunNodeTransitions;
@@ -37,7 +38,7 @@ public class JdbcDagRepository implements DagRepository {
     Long dep = rs.wasNull() ? null : did;
     return new Dag(
         rs.getLong("id"), rs.getString("name"), rs.getString("description"), rs.getString("cron"), dep,
-        rs.getBoolean("enabled"), rs.getBoolean("paused"),
+        rs.getBoolean("enabled"), rs.getBoolean("paused"), rs.getInt("version"),
         rs.getTimestamp("created_at") != null ? rs.getTimestamp("created_at").toInstant() : null,
         rs.getTimestamp("updated_at") != null ? rs.getTimestamp("updated_at").toInstant() : null);
   };
@@ -47,12 +48,16 @@ public class JdbcDagRepository implements DagRepository {
       rs.getString("run_if"));
   private static final RowMapper<DagEdge> EDGE_MAP = (rs, i) -> new DagEdge(
       rs.getLong("id"), rs.getLong("dag_id"), rs.getLong("from_node_id"), rs.getLong("to_node_id"));
-  private static final RowMapper<DagRun> RUN_MAP = (rs, i) -> new DagRun(
-      rs.getLong("id"), rs.getLong("dag_id"), rs.getString("idempotency_key"),
-      DagRunStatus.valueOf(rs.getString("status")), rs.getString("trigger_reason"),
-      rs.getBoolean("cancel_requested"),
-      rs.getTimestamp("finished_at") != null ? rs.getTimestamp("finished_at").toInstant() : null,
-      rs.getTimestamp("created_at") != null ? rs.getTimestamp("created_at").toInstant() : null);
+  private static final RowMapper<DagRun> RUN_MAP = (rs, i) -> {
+    int dv = rs.getInt("dag_version");
+    Integer dagVersion = rs.wasNull() ? null : dv;
+    return new DagRun(
+        rs.getLong("id"), rs.getLong("dag_id"), rs.getString("idempotency_key"),
+        DagRunStatus.valueOf(rs.getString("status")), rs.getString("trigger_reason"),
+        rs.getBoolean("cancel_requested"), dagVersion,
+        rs.getTimestamp("finished_at") != null ? rs.getTimestamp("finished_at").toInstant() : null,
+        rs.getTimestamp("created_at") != null ? rs.getTimestamp("created_at").toInstant() : null);
+  };
   private static final RowMapper<DagRunNode> RUN_NODE_MAP = (rs, i) -> {
     long eid = rs.getLong("execution_id");
     Long exec = rs.wasNull() ? null : eid;
@@ -64,8 +69,11 @@ public class JdbcDagRepository implements DagRepository {
         rs.getTimestamp("created_at") != null ? rs.getTimestamp("created_at").toInstant() : null,
         rs.getTimestamp("finished_at") != null ? rs.getTimestamp("finished_at").toInstant() : null,
         rs.getInt("attempt"),
-        rs.getTimestamp("next_retry_at") != null ? rs.getTimestamp("next_retry_at").toInstant() : null);
+        rs.getTimestamp("next_retry_at") != null ? rs.getTimestamp("next_retry_at").toInstant() : null,
+        rs.getString("run_if"), rs.getInt("node_max_retries"), rs.getLong("node_backoff_ms"));
   };
+  private static final RowMapper<DagRunEdge> RUN_EDGE_MAP = (rs, i) -> new DagRunEdge(
+      rs.getLong("id"), rs.getLong("dag_run_id"), rs.getLong("from_node_id"), rs.getLong("to_node_id"));
 
   // ---- 定义 ----
 
@@ -96,40 +104,67 @@ public class JdbcDagRepository implements DagRepository {
             Long.class, name, description, cron);
       }
       dagId[0] = did;
-      Map<String, Long> byKey = new LinkedHashMap<>();
-      for (NodeInput n : nodes) {
-        List<Integer> exists = jdbc.queryForList(
-            "SELECT 1 FROM app_task WHERE id=?", Integer.class, n.taskId());
-        if (exists.isEmpty()) throw new IllegalArgumentException(
-            "node '" + n.nodeKey() + "' references unknown task " + n.taskId());
-        if (byKey.put(n.nodeKey(), -1L) != null) throw new IllegalArgumentException(
-            "duplicate node key '" + n.nodeKey() + "'");
-        Long nid = jdbc.queryForObject(
-            "INSERT INTO app_dag_node (dag_id, node_key, task_id, sort_order, node_max_retries, node_backoff_ms, run_if)"
-                + " VALUES (?,?,?,?,?,?,?) RETURNING id",
-            Long.class, did, n.nodeKey(), n.taskId(), n.sortOrder(), n.nodeMaxRetries(), n.nodeBackoffMs(),
-            n.runIf());
-        byKey.put(n.nodeKey(), nid);
-      }
-      List<long[]> resolved = new ArrayList<>();
-      for (EdgeInput e : edges) {
-        Long from = byKey.get(e.from());
-        Long to = byKey.get(e.to());
-        if (from == null || to == null) throw new IllegalArgumentException(
-            "edge references unknown node key '" + (from == null ? e.from() : e.to()) + "'");
-        if (from.equals(to)) throw new IllegalArgumentException(
-            "self-loop edge " + e.from() + "->" + e.to() + " is not allowed");
-        boolean dup = resolved.stream().anyMatch(r -> r[0] == from && r[1] == to);
-        if (dup) throw new IllegalArgumentException("duplicate edge " + e.from() + "->" + e.to());
-        resolved.add(new long[]{from, to});
-      }
-      assertAcyclic(byKey.values().stream().filter(v -> v > 0).toList(), resolved);
-      for (long[] r : resolved) {
-        jdbc.update("INSERT INTO dag_edge (dag_id, from_node_id, to_node_id) VALUES (?,?,?)",
-            did, r[0], r[1]);
-      }
+      insertDefinition(did, nodes, edges);
     });
     return findDag(dagId[0]).orElseThrow();
+  }
+
+  /** 1c:校验并写入定义节点+边(definition 部分;cron/依赖头由调用方先写给 did)。事务内调用:抛 IllegalArgumentException 回滚。 */
+  private void insertDefinition(Long did, List<NodeInput> nodes, List<EdgeInput> edges) {
+    Map<String, Long> byKey = new LinkedHashMap<>();
+    for (NodeInput n : nodes) {
+      List<Integer> exists = jdbc.queryForList(
+          "SELECT 1 FROM app_task WHERE id=?", Integer.class, n.taskId());
+      if (exists.isEmpty()) throw new IllegalArgumentException(
+          "node '" + n.nodeKey() + "' references unknown task " + n.taskId());
+      if (byKey.put(n.nodeKey(), -1L) != null) throw new IllegalArgumentException(
+          "duplicate node key '" + n.nodeKey() + "'");
+      Long nid = jdbc.queryForObject(
+          "INSERT INTO app_dag_node (dag_id, node_key, task_id, sort_order, node_max_retries, node_backoff_ms, run_if)"
+              + " VALUES (?,?,?,?,?,?,?) RETURNING id",
+          Long.class, did, n.nodeKey(), n.taskId(), n.sortOrder(), n.nodeMaxRetries(), n.nodeBackoffMs(),
+          n.runIf());
+      byKey.put(n.nodeKey(), nid);
+    }
+    List<long[]> resolved = new ArrayList<>();
+    for (EdgeInput e : edges) {
+      Long from = byKey.get(e.from());
+      Long to = byKey.get(e.to());
+      if (from == null || to == null) throw new IllegalArgumentException(
+          "edge references unknown node key '" + (from == null ? e.from() : e.to()) + "'");
+      if (from.equals(to)) throw new IllegalArgumentException(
+          "self-loop edge " + e.from() + "->" + e.to() + " is not allowed");
+      boolean dup = resolved.stream().anyMatch(r -> r[0] == from && r[1] == to);
+      if (dup) throw new IllegalArgumentException("duplicate edge " + e.from() + "->" + e.to());
+      resolved.add(new long[]{from, to});
+    }
+    assertAcyclic(byKey.values().stream().filter(v -> v > 0).toList(), resolved);
+    for (long[] r : resolved) {
+      jdbc.update("INSERT INTO dag_edge (dag_id, from_node_id, to_node_id) VALUES (?,?,?)",
+          did, r[0], r[1]);
+    }
+  }
+
+  @Override public Dag updateDag(long id, String name, String description, String cron, Long dependsOnDagId,
+                                 List<NodeInput> nodes, List<EdgeInput> edges) {
+    // 1c 编辑校验同 createDag:所连 DAG 存在 + 沿 depends_on 链无环(自身依赖或间接回环均拒)。仅影响未来新 run,
+    // 已封印的历史/在飞 run 不受影响(定义表单版原地重写 + version++)。
+    if (dependsOnDagId != null) {
+      if (dependsOnDagId == id) throw new IllegalArgumentException("dag " + id + " cannot depend on itself");
+      findDag(dependsOnDagId).orElseThrow(
+          () -> new IllegalArgumentException("depends_on_dag " + dependsOnDagId + " does not exist"));
+      assertNoDependencyCycle(dependsOnDagId);
+    }
+    tx.executeWithoutResult(s -> {
+      jdbc.update("DELETE FROM dag_edge WHERE dag_id=?", id);
+      jdbc.update("DELETE FROM app_dag_node WHERE dag_id=?", id);
+      insertDefinition(id, nodes, edges);
+      jdbc.update(
+          "UPDATE app_dag SET name=?, description=?, cron=?, depends_on_dag_id=?, version=version+1, updated_at=now()"
+              + " WHERE id=?",
+          name, description, dependsOnDagId != null ? null : cron, dependsOnDagId, id);
+    });
+    return findDag(id).orElseThrow();
   }
 
   /** DFS 无环校验:任一节点有前向边(正在 DFS 栈上)即环 → 抛 IllegalArgumentException(400),回滚整个建 DAG 事务。 */
@@ -227,18 +262,34 @@ public class JdbcDagRepository implements DagRepository {
     long[] runId = new long[1];
     tx.executeWithoutResult(s -> {
       Long id = jdbc.queryForObject("""
-        INSERT INTO dag_run (dag_id, status, idempotency_key, trigger_reason)
-        VALUES (?, 'PENDING', ?, ?)
+        INSERT INTO dag_run (dag_id, status, idempotency_key, trigger_reason, dag_version)
+        VALUES (?, 'PENDING', ?, ?, (SELECT version FROM app_dag WHERE id=?))
         ON CONFLICT (idempotency_key) DO UPDATE SET idempotency_key = EXCLUDED.idempotency_key
-        RETURNING id""", Long.class, dagId, key, reason);
+        RETURNING id""", Long.class, dagId, key, reason, dagId);
       long existing = jdbc.queryForObject(
           "SELECT count(*) FROM dag_run_node WHERE dag_run_id=?", Long.class, id);
-      if (existing == 0) { // 首次物化:按定义节点快照 task_id 插入全部 PENDING 节点(重放不重复插)
+      if (existing == 0) { // 首次物化:按定义封印整份快照(run_if/node_max_retries/node_backoff_ms + 边),重放不重复插
         List<DagNode> nodes = findNodes(dagId);
         jdbc.batchUpdate("""
-          INSERT INTO dag_run_node (dag_run_id, node_key, task_id, sort_order)
-          VALUES (?, ?, ?, ?)""",
-          nodes.stream().map(n -> new Object[]{id, n.nodeKey(), n.taskId(), n.sortOrder()}).toList());
+          INSERT INTO dag_run_node (dag_run_id, node_key, task_id, sort_order, run_if, node_max_retries, node_backoff_ms)
+          VALUES (?, ?, ?, ?, ?, ?, ?)""",
+          nodes.stream().map(n -> new Object[]{id, n.nodeKey(), n.taskId(), n.sortOrder(),
+              n.runIf(), n.nodeMaxRetries(), n.nodeBackoffMs()}).toList());
+        // 封印边:按 node_key 把 dag_edge 的 from/to(app_dag_node id)映射到本 run 内节点 id
+        Map<Long, String> defKeyByNodeId = new HashMap<>();
+        for (DagNode n : nodes) defKeyByNodeId.put(n.id(), n.nodeKey());
+        Map<String, Long> runNodeIdByKey = new HashMap<>();
+        for (DagRunNode rn : jdbc.query(
+            "SELECT * FROM dag_run_node WHERE dag_run_id=? ORDER BY sort_order, id", RUN_NODE_MAP, id)) {
+          runNodeIdByKey.put(rn.nodeKey(), rn.id());
+        }
+        List<Object[]> edgeRows = new ArrayList<>();
+        for (DagEdge e : findEdges(dagId)) {
+          edgeRows.add(new Object[]{id, runNodeIdByKey.get(defKeyByNodeId.get(e.fromNodeId())),
+              runNodeIdByKey.get(defKeyByNodeId.get(e.toNodeId()))});
+        }
+        jdbc.batchUpdate(
+            "INSERT INTO dag_run_edge (dag_run_id, from_node_id, to_node_id) VALUES (?, ?, ?)", edgeRows);
       }
       runId[0] = id;
     });
@@ -286,6 +337,9 @@ public class JdbcDagRepository implements DagRepository {
     return jdbc.query(
         "SELECT * FROM dag_run_node WHERE dag_run_id=? AND status IN ('PENDING','RUNNING')"
             + " ORDER BY sort_order, id", RUN_NODE_MAP, runId);
+  }
+  @Override public List<DagRunEdge> findRunEdges(long runId) {
+    return jdbc.query("SELECT * FROM dag_run_edge WHERE dag_run_id=? ORDER BY id", RUN_EDGE_MAP, runId);
   }
 
   @Override public boolean markNodeSpawned(long nodeId, long executionId) {

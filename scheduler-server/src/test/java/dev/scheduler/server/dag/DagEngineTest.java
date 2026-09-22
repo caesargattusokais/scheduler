@@ -619,4 +619,43 @@ class DagEngineTest {
       assertEquals(0, dags.findRuns(pausedDown).size(), "暂停下游 → 不派生");
     } finally { leader.close(); }
   }
+
+  /** 1c:在飞 run 读封印快照——定义编辑后,在飞 run 仍按封印边走旧拓扑;新 run 用新定义。 */
+  @Test void inFlightRun_afterDefinitionEdit_keepsSealedTopology_newRunUsesNewDef() {
+    long t1 = newTask(1), t2 = newTask(1);
+    Dag dag = newDag(null, Map.of("A", t1, "B", t2), edges(new String[]{"A", "B"}));
+    var leader = new AdvisoryLockLeaderElection(jdbc);
+    try {
+      var engine = engine(leader);
+      DagRun run = dags.createManualRun(dag.id());
+
+      engine.scanOnce(); // S1:A 根 spawn;B 等上游 A
+      assertEquals(DagRunNodeStatus.RUNNING, node(run.id(), "A").status());
+      assertEquals(DagRunNodeStatus.PENDING, node(run.id(), "B").status(), "B 等上游 A");
+
+      // 编辑定义:去掉 A→B 边,把 B 改成独立根节点(仅剩 B)。在飞 run 封印 v1 不受影响。
+      dags.updateDag(dag.id(), "d2", null, null, null,
+          List.of(new NodeInput("B", t2, 0)), List.of());
+      assertEquals(1, dags.findNodes(dag.id()).size(), "当前定义只剩 B");
+
+      // 在飞 run 的 B 仍读封印边 A→B → 保持 PENDING,不因当前定义已是根而独立 spawn
+      engine.scanOnce();
+      assertEquals(DagRunNodeStatus.PENDING, node(run.id(), "B").status(), "在飞 run 读封印边,仍等上游 A");
+
+      setShardStatus(run.id(), "A", "SUCCESS");
+      engine.scanOnce(); // A 派生 SUCCESS;本 scan B 仍见 A scan-start 态 → B 保持 PENDING(跨周期收敛)
+      engine.scanOnce(); // 下一周期 B 见上游 A SUCCESS → 依封印边 spawn
+      assertEquals(DagRunNodeStatus.RUNNING, node(run.id(), "B").status(), "封印边让 B 在上游成功后 spawn");
+
+      setShardStatus(run.id(), "B", "SUCCESS");
+      engine.scanOnce(); // B SUCCESS → ++ 全节点终态 → run 按封印 v1 走完
+      assertEquals(DagRunStatus.SUCCESS, dags.findRun(run.id()).orElseThrow().status(),
+          "旧 run 按封印 v1 定义走完、终态 SUCCESS");
+
+      // 新 run 用新定义:只封印单节点 B、无边
+      DagRun fresh = dags.createManualRun(dag.id());
+      assertEquals(1, dags.findNodesOfRun(fresh.id()).size(), "新 run 只封印新定义单节点 B");
+      assertEquals(0, dags.findRunEdges(fresh.id()).size(), "新 run 无边");
+    } finally { leader.close(); }
+  }
 }

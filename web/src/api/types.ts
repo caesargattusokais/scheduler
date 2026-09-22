@@ -98,6 +98,8 @@ export interface Dag {
   /** 1d 跨 DAG 依赖:依赖的上游 DAG id(非空时 cron 为 null,上游每成功一次 → 下游跑一次,事件链)。 */
   dependsOnDagId: number | null;
   enabled: boolean; paused: boolean;
+  /** 1c 定义版本号:编辑(PUT)即 ++;run 封印它取自哪版。 */
+  version: number;
   createdAt: string | null; updatedAt: string | null;
 }
 /** 镜像 DagController.DagDetail。 */
@@ -116,6 +118,8 @@ export interface CreateDagRequest {
 export interface DagRun {
   id: number; dagId: number; idempotencyKey: string;
   status: string; triggerReason: string; cancelRequested: boolean;
+  /** 1c 本批次封印的 DAG 定义版本号(旧 run 为 null)。 */
+  dagVersion: number | null;
   finishedAt: string | null; createdAt: string | null;
 }
 export interface DagRunNode {
@@ -123,6 +127,8 @@ export interface DagRunNode {
   executionId: number | null; status: string; sortOrder: number;
   detail: string | null; createdAt: string | null; finishedAt: string | null;
   attempt: number; nextRetryAt: string | null;
+  /** 1c 运行时封印的节点行为(run 完全自包含,定义编辑不影响已封印批次)。 */
+  runIf: string; nodeMaxRetries: number; nodeBackoffMs: number;
 }
 export interface NodeDetail { node: DagRunNode; shards: Shard[]; }
 export interface RunDetail { run: DagRun; status: string; nodes: NodeDetail[]; }

@@ -18,14 +18,18 @@ import dev.scheduler.server.service.AuditRecorder;
 import dev.scheduler.server.service.DagQueryService;
 import dev.scheduler.server.service.DagQueryService.RunDetail;
 import java.time.Instant;
+import java.util.Arrays;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
@@ -65,10 +69,35 @@ public class DagController {
   @PostMapping
   public ResponseEntity<Dag> create(
       @RequestBody CreateDagRequest req) {
-    if (req == null || req.name() == null || req.name().isBlank()) {
+    if (req == null) throw new IllegalArgumentException("name is required");
+    boolean hasDep = validateDefinitionRequest(req);
+    Dag created = hasDep
+        ? dags.createDag(req.name(), req.description(), null, req.dependsOnDagId(), materializeNodes(req), materializeEdges(req))
+        : dags.createDag(req.name(), req.description(), req.cron(), materializeNodes(req), materializeEdges(req));
+    auditor.record(current.get(), "dag.create", TargetType.DAG, created.id(), Map.of("name", created.name()));
+    return ResponseEntity.status(HttpStatus.CREATED).body(created);
+  }
+
+  /** 1c 编辑 DAG:整份定义重写(校验同 createDag),version++。仅影响未来新 run;已封印历史/在飞 run 不受影响。成功返回改后定义头。 */
+  @PutMapping("/{id}")
+  public Dag update(@PathVariable long id, @RequestBody CreateDagRequest req) {
+    Dag existing = requireDag(id);
+    if (req == null) throw new IllegalArgumentException("name is required");
+    boolean hasDep = validateDefinitionRequest(req);
+    Dag updated = dags.updateDag(id, req.name(), req.description(),
+        hasDep ? null : req.cron(), req.dependsOnDagId(), materializeNodes(req), materializeEdges(req));
+    auditor.record(current.get(), "dag.update", TargetType.DAG, id,
+        Map.of("name", updated.name(), "version", updated.version()),
+        dagDiff(existing, updated), dagFullBefore(existing));
+    return updated;
+  }
+
+  /** 建/改共用的定义请求校验+触发源判定:name 必填、cron/dependsOnDagId 恰其一(1d)、坏 cron 预检、节点非空。
+   *  返回是否有跨 DAG 依赖(决定写 cron 还是 NULL)。 */
+  private boolean validateDefinitionRequest(CreateDagRequest req) {
+    if (req.name() == null || req.name().isBlank()) {
       throw new IllegalArgumentException("name is required");
     }
-    // 1d:触发源恰其一——cron(定时)或 dependsOnDagId(跨 DAG 依赖);两者都缺/都给 → 400。
     boolean hasCron = req.cron() != null && !req.cron().isBlank();
     boolean hasDep = req.dependsOnDagId() != null;
     if (hasCron == hasDep) {
@@ -78,19 +107,20 @@ public class DagController {
     if (req.nodes() == null || req.nodes().isEmpty()) {
       throw new IllegalArgumentException("nodes must not be empty");
     }
-    List<NodeInput> nodes = req.nodes().stream()
+    return hasDep;
+  }
+
+  private List<NodeInput> materializeNodes(CreateDagRequest req) {
+    return req.nodes().stream()
         .map(n -> new NodeInput(n.nodeKey(), n.taskId(), n.sortOrder() == null ? 0 : n.sortOrder(),
             n.nodeMaxRetries() == null ? 0 : n.nodeMaxRetries(),
             n.nodeBackoffMs() == null ? 5000 : n.nodeBackoffMs(),
             n.runIf() == null ? "all_success" : n.runIf()))
         .toList();
-    List<EdgeInput> edges = req.edges() == null ? List.of()
+  }
+  private List<EdgeInput> materializeEdges(CreateDagRequest req) {
+    return req.edges() == null ? List.of()
         : req.edges().stream().map(e -> new EdgeInput(e.from(), e.to())).toList();
-    Dag created = hasDep
-        ? dags.createDag(req.name(), req.description(), null, req.dependsOnDagId(), nodes, edges)
-        : dags.createDag(req.name(), req.description(), req.cron(), nodes, edges);
-    auditor.record(current.get(), "dag.create", TargetType.DAG, created.id(), Map.of("name", created.name()));
-    return ResponseEntity.status(HttpStatus.CREATED).body(created);
   }
 
   /** DAG 列表:name 子串过滤 + limit/offset 分页,返回 Page<Dag>。 */
@@ -195,7 +225,22 @@ public class DagController {
   private Dag byId(long id) { return dags.findDag(id).orElseThrow(() -> notFound("dag " + id)); }
   private Dag requireDag(long id) { return byId(id); }
 
-  /** 审计 before = 操作前全量 DAG 定义(9 组件):供取证溯源;Instant 收敛为 ISO-8601 文本(恒定可序列化)。 */
+  /** dag.update 的字段级 diff:仅收录前后不同者 → {field:[before,after]};用 Arrays.asList 容忍空值(nullable 的
+   *  description/cron/dependsOnDagId 在 dep⇄cron 切换时可为 null,List.of 会对 null 抛 NPE)。节点/边变更在 diff 范围外(以 before 快照可溯源)。 */
+  private Map<String, Object> dagDiff(Dag before, Dag after) {
+    Map<String, Object> d = new LinkedHashMap<>();
+    putDagDiff(d, "name", before.name(), after.name());
+    putDagDiff(d, "description", before.description(), after.description());
+    putDagDiff(d, "cron", before.cron(), after.cron());
+    putDagDiff(d, "dependsOnDagId", before.dependsOnDagId(), after.dependsOnDagId());
+    if (before.version() != after.version()) d.put("version", List.of(before.version(), after.version()));
+    return d;
+  }
+  private void putDagDiff(Map<String, Object> d, String field, Object before, Object after) {
+    if (!Objects.equals(before, after)) d.put(field, Arrays.asList(before, after));
+  }
+
+  /** 审计 before = 操作前全量 DAG 定义头(10 组件):供取证溯源;Instant 收敛为 ISO-8601 文本(恒定可序列化)。 */
   private Map<String, Object> dagBefore(Dag d) {
     Map<String, Object> b = new LinkedHashMap<>();
     b.put("id", d.id());
@@ -205,8 +250,25 @@ public class DagController {
     b.put("dependsOnDagId", d.dependsOnDagId());
     b.put("enabled", d.enabled());
     b.put("paused", d.paused());
+    b.put("version", d.version());
     b.put("createdAt", ts(d.createdAt()));
     b.put("updatedAt", ts(d.updatedAt()));
+    return b;
+  }
+
+  /** 审计 before = 操作前全量 DAG 定义(头 + 节点 + 边;1c dag.update 取证):节点/边按 nodeKey 文本化。 */
+  private Map<String, Object> dagFullBefore(Dag d) {
+    Map<String, Object> b = dagBefore(d);
+    List<DagNode> nodes = dags.findNodes(d.id());
+    b.put("nodes", nodes.stream()
+        .map(n -> Map.of("nodeKey", n.nodeKey(), "taskId", n.taskId(), "sortOrder", n.sortOrder(),
+            "nodeMaxRetries", n.nodeMaxRetries(), "nodeBackoffMs", n.nodeBackoffMs(), "runIf", n.runIf()))
+        .toList());
+    Map<Long, String> keyByNodeId = new HashMap<>();
+    for (DagNode n : nodes) keyByNodeId.put(n.id(), n.nodeKey());
+    b.put("edges", dags.findEdges(d.id()).stream()
+        .map(e -> Map.of("from", keyByNodeId.get(e.fromNodeId()), "to", keyByNodeId.get(e.toNodeId())))
+        .toList());
     return b;
   }
 
