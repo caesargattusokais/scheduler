@@ -1,20 +1,28 @@
 package dev.scheduler.server.reconcile;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.scheduler.core.Execution;
 import dev.scheduler.core.ExecutionStatus;
 import dev.scheduler.core.Shard;
 import dev.scheduler.core.Task;
 import dev.scheduler.persistence.JdbcShardRepository;
 import dev.scheduler.persistence.JdbcTaskRepository;
+import dev.scheduler.persistence.NotificationRepository;
+import dev.scheduler.persistence.OutboundNotification;
 import dev.scheduler.persistence.ShardRepository;
 import dev.scheduler.persistence.TaskRepository;
 import dev.scheduler.persistence.retry.FailureResolver;
 import dev.scheduler.persistence.retry.RetryPolicy;
+import dev.scheduler.server.service.NotificationFirer;
+import dev.scheduler.server.service.NotificationHub;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
+import java.util.List;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
@@ -38,6 +46,7 @@ class ReconcilerTest {
 
   private TaskRepository tasks;
   private ShardRepository shards;
+  private final List<Fired> fired = new ArrayList<>();
 
   @BeforeAll static void setUp() {
     Flyway.configure()
@@ -52,6 +61,7 @@ class ReconcilerTest {
         + " execution_outcome RESTART IDENTITY CASCADE");
     tasks = new JdbcTaskRepository(jdbc);
     shards = new JdbcShardRepository(jdbc);
+    fired.clear(); // 通知事件捕获(内存 fake repo,不落 outbox 表)。
   }
 
   private long createTask(int shardCount, int maxRetries, long backoffMs, String pattern) {
@@ -100,7 +110,25 @@ class ReconcilerTest {
 
   private Reconciler reconciler() {
     return new Reconciler(tasks, shards,
-        new FailureResolver(shards, new RetryPolicy(), CLOCK), "reconciler", 30);
+        new FailureResolver(shards, new RetryPolicy(), CLOCK),
+        new NotificationFirer(new NotificationHub(new CapturingRepo(fired), new ObjectMapper())),
+        "reconciler", 30);
+  }
+
+  /** 事件捕获:把 fire 到的 kind/targetType/targetId/idempotencyKey 记入共享列表,供断言点火点。 */
+  private record Fired(String kind, String targetType, Long targetId, String idempotencyKey) { }
+
+  private static final class CapturingRepo implements NotificationRepository {
+    private final List<Fired> out;
+    CapturingRepo(List<Fired> out) { this.out = out; }
+    @Override public long enqueue(String kind, String op, String tt, Long tid, String p, String key) {
+      out.add(new Fired(kind, tt, tid, key));
+      return out.size();
+    }
+    @Override public List<OutboundNotification> due(int limit) { return List.of(); }
+    @Override public void markSent(long id) { }
+    @Override public void markRetry(long id, Instant at, String err) { }
+    @Override public void markFailed(long id, String err) { }
   }
 
   /** 孤儿 shard 回收:租约过期的 RUNNING 被认领方(reconciler)落 FAILED,不可重试 → DLQ。 */
@@ -191,6 +219,10 @@ class ReconcilerTest {
 
     reconciler().scanOnce(); // 幂等:父已 SUCCESS,不再汇聚
     assertEquals(1L, parentOutcomeCount(parentId, "SUCCESS"), "父终态后不重复落 outcome");
+    assertTrue(fired.contains(new Fired("execution.completed", "execution", parentId,
+        "parent:execution.completed:" + parentId)), "父 SUCCESS → 发 execution.completed 事件");
+    assertEquals(1, fired.stream().filter(f -> f.kind().equals("execution.completed")).count(),
+        "父终态后仅发一次(幂等 key 去重)");
   }
 
   /**
@@ -236,6 +268,10 @@ class ReconcilerTest {
     assertEquals(ExecutionStatus.FAILED, shards.findParent(parentId).orElseThrow().status(),
         "any-FAILED(且全部终态)→ 父 FAILED");
     assertEquals(1L, parentOutcomeCount(parentId, "FAILED"));
+    assertTrue(fired.contains(new Fired("execution.failed", "execution", parentId,
+        "parent:execution.failed:" + parentId)), "父 FAILED → 发 execution.failed");
+    assertTrue(fired.contains(new Fired("execution.dead_letter", "shard", trigger.id(),
+        "dlq:" + trigger.id() + ":1")), "DLQ 触发片 → 发 execution.dead_letter(attempt=1)");
   }
 
   /** 无 FAILED 时,任一兄弟 CANCELED → 父 CANCELED(优先于 SUCCESS)。 */
@@ -272,6 +308,11 @@ class ReconcilerTest {
         "SELECT count(*) FROM execution_shard_outcome WHERE shard_id=? AND status='FAILED' AND detail='runtime timeout'",
         Long.class, sid);
     assertEquals(1L, rt, "failure detail = runtime timeout");
+    assertTrue(fired.contains(new Fired("execution.timeout", "shard", sid,
+        "timeout:" + sid + ":1")), "超时回收 → 发 execution.timeout(attempt=1)");
+    // 单分片父随之汇聚 FAILED → 父级 execution.failed 亦发。
+    assertTrue(fired.contains(new Fired("execution.failed", "execution", parentId,
+        "parent:execution.failed:" + parentId)), "父终态 FAILED → 发 execution.failed");
   }
 
   /** §3 对照:timeoutSeconds=0(不超时)即便 started_at 极旧也不被铁。 */

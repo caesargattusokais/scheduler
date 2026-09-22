@@ -7,6 +7,7 @@ import dev.scheduler.persistence.ShardRepository;
 import dev.scheduler.persistence.ShardRepository.ExpiredShard;
 import dev.scheduler.persistence.TaskRepository;
 import dev.scheduler.persistence.retry.FailureResolver;
+import dev.scheduler.server.service.NotificationFirer;
 import java.util.List;
 
 /**
@@ -21,14 +22,17 @@ public class Reconciler {
   private final TaskRepository tasks;
   private final ShardRepository shards;
   private final FailureResolver failureResolver;
+  private final NotificationFirer firer;
   private final String workerId;
   private final int staleAfterSeconds;
 
   public Reconciler(TaskRepository tasks, ShardRepository shards,
-                    FailureResolver failureResolver, String workerId, int staleAfterSeconds) {
+                    FailureResolver failureResolver, NotificationFirer firer,
+                    String workerId, int staleAfterSeconds) {
     this.tasks = tasks;
     this.shards = shards;
     this.failureResolver = failureResolver;
+    this.firer = firer;
     this.workerId = workerId;
     this.staleAfterSeconds = staleAfterSeconds;
   }
@@ -61,6 +65,7 @@ public class Reconciler {
           try {
             if (shards.markStatus(run.id(), ExecutionStatus.FAILED, workerId, "runtime timeout")) {
               failureResolver.handle(task, run.id(), run.attempt(), "runtime timeout");
+              firer.shardTimedOut(run.id(), task.id(), run.attempt(), task.timeoutSeconds());
               reclaimed++;
             }
           } catch (IllegalStateException alreadyMovedOn) {
@@ -87,6 +92,11 @@ public class Reconciler {
       String detail = anyFailed ? "shard failed"
           : (parentTerminal == ExecutionStatus.CANCELED ? "shard cancelled" : "all shards ok");
       shards.finalizeParent(pid, parentTerminal, detail);
+      // 事件点火(次序:先死信、再父终态;均在父收敛落库后,幂等由 key 保证只发一次)。
+      for (Shard s : parent) {
+        if (s.deadLetter()) firer.shardDeadLettered(pid, s.id(), s.attempt());
+      }
+      firer.parentTerminal(pid, parentTerminal, parent);
     }
   }
 }
