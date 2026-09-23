@@ -2629,6 +2629,27 @@ class ApiIntegrationTest {
         "ADMIN 设密后应清除必须改密标");
   }
 
+  /** 4b OpenAPI:springdoc 自动生成 /v3/api-docs——含项目元信息、既有 controller 路径与会话 HttpOnly cookie 安全方案。 */
+  @Test
+  void openApiDocs_includeInfoPathsAndSecurityScheme() throws Exception {
+    mvc.perform(get("/v3/api-docs"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.info.title").value("Scheduler 调度器 API"))
+        .andExpect(jsonPath("$.paths['/api/v1/tasks']").exists())
+        .andExpect(jsonPath("$.paths['/api/v1/tasks'].post").exists())
+        .andExpect(jsonPath("$.paths['/api/v1/auth/login'].post").exists())
+        .andExpect(jsonPath("$.components.securitySchemes.sessionAuth.type").value("apiKey"))
+        .andExpect(jsonPath("$.components.securitySchemes.sessionAuth.in").value("cookie"))
+        .andExpect(jsonPath("$.components.securitySchemes.sessionAuth.name").value("session"));
+  }
+
+  /** 4b OpenAPI:Swagger UI 交互式文档页可访问(文档只读开放,与审计读一致)。 */
+  @Test
+  void swaggerUi_servesInteractiveDocs() throws Exception {
+    mvc.perform(get("/swagger-ui/index.html"))
+        .andExpect(status().isOk());
+  }
+
   /** 可复写的皮时钟:instant 由测试控制,getZone 固定 UTC。 */
   static final class MutableClock extends Clock {
     Instant now;

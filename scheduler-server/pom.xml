@@ -36,6 +36,12 @@
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-jdbc</artifactId>
     </dependency>
+    <!-- 4b OpenAPI:自动扫描 MVC 生成 OpenAPI 3(/v3/api-docs)+ Swagger UI(/swagger-ui),零注解侵入。 -->
+    <dependency>
+      <groupId>org.springdoc</groupId>
+      <artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
+      <version>2.3.0</version>
+    </dependency>
     <!-- 仅用 BCryptPasswordEncoder(强认证口令哈希);版本由 spring-boot-dependencies BOM 管至 6.2.4,不引入 Spring Security 过滤器链。 -->
     <dependency>
       <groupId>org.springframework.security</groupId>
