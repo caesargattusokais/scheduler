@@ -19,4 +19,10 @@ public interface NotificationRepository {
 
   /** 永久失败/重试耗尽:status→FAILED、attempts+1、记录错误。 */
   void markFailed(long id, String lastError);
+
+  /** 投递历史分页:kind/status 精确过滤,created_at DESC;全 null = 不过滤。 */
+  List<OutboundNotification> findPage(String kind, String status, int limit, int offset);
+
+  /** findPage 同过滤条件的全量计数。 */
+  long count(String kind, String status);
 }

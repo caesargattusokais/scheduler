@@ -56,6 +56,22 @@ public class JdbcNotificationRepository implements NotificationRepository {
         + " last_error = ?, sent_at = NULL WHERE id = ?", OutboundNotification.STATUS_FAILED, lastError, id);
   }
 
+  @Override
+  public List<OutboundNotification> findPage(String kind, String status, int limit, int offset) {
+    return jdbc.query("SELECT " + COLS + " FROM app_notification"
+            + " WHERE (?::text IS NULL OR kind = ?)"
+            + "   AND (?::text IS NULL OR status = ?)"
+            + " ORDER BY id DESC LIMIT ? OFFSET ?",
+        (rs, row) -> row(rs), kind, kind, status, status, limit, offset);
+  }
+
+  @Override
+  public long count(String kind, String status) {
+    return jdbc.queryForObject("SELECT count(*) FROM app_notification"
+        + " WHERE (?::text IS NULL OR kind = ?) AND (?::text IS NULL OR status = ?)",
+        Long.class, kind, kind, status, status);
+  }
+
   private static OutboundNotification row(ResultSet rs) throws java.sql.SQLException {
     return new OutboundNotification(
         rs.getLong("id"),

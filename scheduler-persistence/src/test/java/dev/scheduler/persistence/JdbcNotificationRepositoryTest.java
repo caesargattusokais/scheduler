@@ -131,6 +131,36 @@ class JdbcNotificationRepositoryTest extends AbstractPostgresTest {
     assertEquals(5, byId(id).attempts(), "4 次重试 + 1 次失败 = attempts 5");
   }
 
+  /** findPage:kind/status 精确过滤 + created_at DESC 分页;count 与之同过滤、全量计数。 */
+  @Test
+  void findPage_filtersAndPaginatesDescByCreated() {
+    long sent = repo.enqueue("execution.completed", "alice", "execution", 1L, "{}", "p1");
+    repo.markSent(sent);
+    long failed = repo.enqueue("execution.failed", "bob", "execution", 2L, "{}", "p2");
+    repo.markFailed(failed, "permanent");
+    long pending = repo.enqueue("execution.failed", "carol", "execution", 3L, "{}", "p3");
+
+    // kind 过滤
+    List<OutboundNotification> com = repo.findPage("execution.completed", null, 10, 0);
+    assertEquals(1, com.size());
+    assertEquals("execution.completed", com.get(0).kind());
+
+    // status 过滤
+    List<OutboundNotification> failedOnly = repo.findPage(null, OutboundNotification.STATUS_FAILED, 10, 0);
+    assertEquals(1, failedOnly.size());
+    assertEquals(failed, failedOnly.get(0).id());
+
+    // 无过滤 + 分页:DESC 序,第 1 页取两行
+    List<OutboundNotification> page1 = repo.findPage(null, null, 2, 0);
+    assertEquals(2, page1.size());
+    assertEquals(pending, page1.get(0).id(), "id 大者在前(DESC)");
+    assertEquals(failed, page1.get(1).id());
+    List<OutboundNotification> page0 = repo.findPage(null, null, 10, 0);
+    assertEquals(3, page0.size());
+    assertEquals(3, repo.count(null, null), "全量计数");
+    assertEquals(1, repo.count(null, OutboundNotification.STATUS_FAILED), "仅 failed 行为 FAILED");
+  }
+
   /** 直查整行(兼容终态行,due() 会过滤)。 */
   private OutboundNotification byId(long id) {
     return jdbc.queryForObject(

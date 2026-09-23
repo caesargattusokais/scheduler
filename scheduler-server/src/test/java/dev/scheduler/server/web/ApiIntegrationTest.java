@@ -22,6 +22,7 @@ import dev.scheduler.core.ExecutionStatus;
 import dev.scheduler.core.IdempotencyKeys;
 import dev.scheduler.core.Shard;
 import dev.scheduler.persistence.AuthHashing;
+import dev.scheduler.persistence.NotificationRepository;
 import dev.scheduler.persistence.ShardRepository;
 import dev.scheduler.persistence.WorkerRegistration;
 import dev.scheduler.persistence.WorkerRepository;
@@ -126,6 +127,8 @@ class ApiIntegrationTest {
   @Autowired dev.scheduler.persistence.DagRepository dagRepository;
   /** M5.3 §1.5:选主锁持有者,worker 活性 gauge(scheduler_worker_active)判据。 */
   @Autowired dev.scheduler.server.leader.LeaderElection leader;
+  /** 通知 outbox 仓储:投递历史 API 断言前先落库一行(fire 侧单测覆盖,集成侧不重驱动 NotificationLoop)。 */
+  @Autowired NotificationRepository notifications;
 
   /** 上下文启动(绑定时刻)前就存在的任务 id,用于断言 per-task 指标 series。 */
   private static long METRICS_TASK_ID;
@@ -189,7 +192,7 @@ class ApiIntegrationTest {
   void resetDb() {
     jdbc.execute("TRUNCATE app_dag CASCADE; TRUNCATE execution, execution_outcome, execution_shard,"
         + " execution_shard_outcome, app_task, app_audit, app_audit_archive, worker,"
-        + " app_auth_session, app_login_attempt, app_notification, app_task_event RESTART IDENTITY CASCADE");
+        + " app_auth_session, app_login_attempt, app_notification, app_task_event, app_webhook RESTART IDENTITY CASCADE");
     // app_operator 不在 TRUNCATE 之列(写端授权依赖其在引导/测试期间恒在;且不清 password_hash,保留上下文
     // 启动时 boot-pass 引导的口令,login(boot-pass) 恒可用):幂等确保 alice/bob/carol/dave 每用例都在,
     //  即便某用例 deactivate 过也不会让后续用例缺人。
@@ -2648,6 +2651,72 @@ class ApiIntegrationTest {
   void swaggerUi_servesInteractiveDocs() throws Exception {
     mvc.perform(get("/swagger-ui/index.html"))
         .andExpect(status().isOk());
+  }
+
+  // ---- 4-1 通知告警闭环:webhook 订阅 CRUD + 投递历史 ----
+
+  /** ADMIN 建/改/删 webhook 订阅往返 + 落 audit(4-1);GET 列表读开放。 */
+  @Test
+  void webhooks_adminCrud_roundTripsAndAudits() throws Exception {
+    // 建(ADMIN alice 默认 cookie)→ 201,回读 id。
+    String create = "{\"url\":\"https://hooks.example.com/x\",\"secret\":\"s3\","
+        + "\"kinds\":[\"execution.failed\"],\"enabled\":true}";
+    long id = objectMapper.readTree(mvc.perform(post("/api/v1/webhooks")
+            .contentType(MediaType.APPLICATION_JSON).content(create))
+        .andExpect(status().isOk())   // 控制器未标 @ResponseStatus → 默认 200
+        .andReturn().getResponse().getContentAsString()).get("id").asLong();
+
+    mvc.perform(get("/api/v1/webhooks"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$[0].url").value("https://hooks.example.com/x"))
+        .andExpect(jsonPath("$[0].kinds[0]").value("execution.failed"))
+        .andExpect(jsonPath("$[0].enabled").value(true));
+
+    // 改(enabled → false,list 反射)→ 200。
+    String update = "{\"url\":\"https://hooks.example.com/y\",\"enabled\":false}";
+    mvc.perform(put("/api/v1/webhooks/" + id)
+            .contentType(MediaType.APPLICATION_JSON).content(update))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.enabled").value(false));
+
+    // 删 → 200;列表空。
+    mvc.perform(delete("/api/v1/webhooks/" + id)).andExpect(status().isOk());
+    mvc.perform(get("/api/v1/webhooks")).andExpect(status().isOk())
+        .andExpect(jsonPath("$.length()").value(0));
+
+    // 审计:create + update + delete 各一条 webhook.* 动作。
+    assertEquals(3L, jdbc.queryForObject(
+        "SELECT count(*) FROM app_audit WHERE action LIKE 'webhook.%'", Long.class),
+        "webhook create/update/delete 各留一条审计");
+  }
+
+  /** 非 ADMIN(OPERATOR)写 webhook → 403(订阅管理为安全敏感,整体提权到 ADMIN)。 */
+  @Test
+  void webhooks_nonAdminWrite_denied() throws Exception {
+    mvc.perform(post("/api/v1/webhooks").cookie(session(BOB_TOKEN))
+            .contentType(MediaType.APPLICATION_JSON)
+            .content("{\"url\":\"https://hooks.example.com/x\"}"))
+        .andExpect(status().isForbidden());
+  }
+
+  /** 投递历史:outbox 落库一行后 GET /notifications 返回,且支持 status 过滤。 */
+  @Test
+  void notifications_history_returnsPageAndFilters() throws Exception {
+    long delivered = notifications.enqueue("execution.completed", "alice", "execution", 7L,
+        "{\"t\":1}", "ntf-hist-1");
+    notifications.markSent(delivered);
+    notifications.enqueue("execution.failed", "bob", "execution", 8L, "{\"t\":2}", "ntf-hist-2");
+
+    mvc.perform(get("/api/v1/notifications"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.total").value(2))
+        .andExpect(jsonPath("$.items[0].kind").value("execution.failed"))
+        .andExpect(jsonPath("$.items[1].kind").value("execution.completed")); // DESC:新建者在前
+
+    mvc.perform(get("/api/v1/notifications").param("status", "SENT"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.total").value(1))
+        .andExpect(jsonPath("$.items[0].id").value(delivered));
   }
 
   /** 可复写的皮时钟:instant 由测试控制,getZone 固定 UTC。 */

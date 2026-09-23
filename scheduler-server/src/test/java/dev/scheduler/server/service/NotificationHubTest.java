@@ -47,6 +47,10 @@ class NotificationHubTest {
       @Override public void markSent(long id) { }
       @Override public void markRetry(long id, Instant at, String err) { }
       @Override public void markFailed(long id, String err) { }
+      @Override public List<OutboundNotification> findPage(String kind, String status, int limit, int offset) {
+        return List.of();
+      }
+      @Override public long count(String kind, String status) { return 0; }
     };
     NotificationHub hub = new NotificationHub(boom, json);
 
@@ -67,5 +71,9 @@ class NotificationHubTest {
     @Override public void markSent(long id) { }
     @Override public void markRetry(long id, Instant at, String err) { }
     @Override public void markFailed(long id, String err) { }
+    @Override public List<OutboundNotification> findPage(String kind, String status, int limit, int offset) {
+      return List.of();
+    }
+    @Override public long count(String kind, String status) { return 0; }
   }
 }

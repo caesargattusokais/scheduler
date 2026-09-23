@@ -136,6 +136,10 @@ class ReconcilerTest {
     @Override public void markSent(long id) { }
     @Override public void markRetry(long id, Instant at, String err) { }
     @Override public void markFailed(long id, String err) { }
+    @Override public List<OutboundNotification> findPage(String kind, String status, int limit, int offset) {
+      return List.of();
+    }
+    @Override public long count(String kind, String status) { return 0; }
   }
 
   /** 孤儿 shard 回收:租约过期的 RUNNING 被认领方(reconciler)落 FAILED,不可重试 → DLQ。 */

@@ -1,12 +1,13 @@
 package dev.scheduler.server.service;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.scheduler.persistence.NotificationRepository;
 import dev.scheduler.persistence.OutboundNotification;
+import dev.scheduler.persistence.Webhook;
+import dev.scheduler.persistence.WebhookRepository;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -31,13 +32,14 @@ import org.springframework.web.client.RestTemplate;
 /**
  * NotificationDispatcher 纯单测:HMAC 签名、kinds 订阅过滤、退避/重试预算/终态分类。
  * 用 MockRestServiceServer 拦截真实 RestTemplate 的 HTTP,并抓取发出的请求体校验签名。
+ * 端点源为 {@link WebhookRepository}(app_webhook,取代旧配置文件)。
  */
 class NotificationDispatcherTest {
   private static final String URL = "https://hooks.example.com/x";
   private static final String SECRET = "s3cret-key";
 
   private FakeNotifications fake;
-  private NotificationProperties props;
+  private FakeWebhooks hooks;
   private RestTemplate rest;
   private MockRestServiceServer server;
   private ObjectMapper json;
@@ -46,11 +48,11 @@ class NotificationDispatcherTest {
   @BeforeEach
   void setUp() {
     fake = new FakeNotifications();
-    props = new NotificationProperties();
+    hooks = new FakeWebhooks();
     rest = new RestTemplate();
     server = MockRestServiceServer.createServer(rest);
     json = new ObjectMapper();
-    dispatcher = new NotificationDispatcher(fake, props, rest, json);
+    dispatcher = new NotificationDispatcher(fake, hooks, rest, json);
   }
 
   @AfterEach
@@ -58,12 +60,8 @@ class NotificationDispatcherTest {
     server.verify();
   }
 
-  private NotificationProperties.Webhook webhook() {
-    NotificationProperties.Webhook w = new NotificationProperties.Webhook();
-    w.setUrl(URL);
-    w.setSecret(SECRET);
-    w.setEnabled(true);
-    return w;
+  private Webhook webhook() {
+    return new Webhook(1, URL, SECRET, List.of(), true, 5, 1000, Instant.parse("2026-01-01T00:00:00Z"));
   }
 
   private OutboundNotification notif(long id, String kind, int attempts) {
@@ -74,7 +72,7 @@ class NotificationDispatcherTest {
   /** 成功:POST 携带 HMAC-SHA256 签名(kinds 匹配),整行 markSent,不退避不失败。 */
   @Test
   void dispatch_success_signsCorreclyAndMarksSent() {
-    props.getWebhooks().add(webhook());
+    hooks.add(webhook());
     fake.add(notif(1, "execution.failed", 0));
 
     AtomicReference<byte[]> sentBody = new AtomicReference<>();
@@ -98,9 +96,8 @@ class NotificationDispatcherTest {
   /** kinds 不匹配 → 不投递该 webhook,但整行视作完成(无订阅者→已投递)。 */
   @Test
   void dispatch_kindNotSubscribed_skipsAndMarksSent() {
-    NotificationProperties.Webhook w = webhook();
-    w.setKinds(List.of("execution.completed"));
-    props.getWebhooks().add(w);
+    hooks.add(new Webhook(1, URL, SECRET, List.of("execution.completed"), true, 5, 1000,
+        Instant.parse("2026-01-01T00:00:00Z")));
     fake.add(notif(1, "execution.failed", 0)); // 未订阅 kind → 无 HTTP 调用
 
     assertEquals(1, dispatcher.dispatchOnce(), "无订阅 → 仍整体完成");
@@ -118,10 +115,19 @@ class NotificationDispatcherTest {
     assertTrue(fake.failed.isEmpty());
   }
 
+  /** webhook enabled=false → 跳过,整行视作完成。 */
+  @Test
+  void dispatch_disabledWebhook_isSkipped() {
+    hooks.add(new Webhook(1, URL, SECRET, List.of(), false, 5, 1000, Instant.parse("2026-01-01T00:00:00Z")));
+    fake.add(notif(1, "execution.failed", 0));
+    assertEquals(1, dispatcher.dispatchOnce());
+    assertTrue(fake.sent.contains(1L), "禁用 webhook → 不投递,视作完成");
+  }
+
   /** 4xx(非 429)→ 永久失败:markFailed,不重试。 */
   @Test
   void dispatch_clientError_marksPermanentFailed() {
-    props.getWebhooks().add(webhook());
+    hooks.add(webhook());
     fake.add(notif(1, "execution.failed", 0));
     server.expect(MockRestServiceServerHelpers.anyRequest)
         .andRespond(MockRestResponseCreators.withStatus(HttpStatus.BAD_REQUEST));
@@ -136,9 +142,7 @@ class NotificationDispatcherTest {
   /** 5xx → 可重试:markRetry,next_retry_at ≈ now + backoff(attempts=0 → 基数),并携带错误。 */
   @Test
   void dispatch_serverError_schedulesExponentialBackoff() {
-    NotificationProperties.Webhook w = webhook();
-    w.setBackoffMs(1000);
-    props.getWebhooks().add(w);
+    hooks.add(new Webhook(1, URL, SECRET, List.of(), true, 5, 1000, Instant.parse("2026-01-01T00:00:00Z")));
     fake.add(notif(1, "execution.failed", 0));
     server.expect(MockRestServiceServerHelpers.anyRequest)
         .andRespond(MockRestResponseCreators.withStatus(HttpStatus.INTERNAL_SERVER_ERROR));
@@ -156,9 +160,7 @@ class NotificationDispatcherTest {
   /** 已重试 4 次(maxAttempts=5)→ 第 5 次失败不再退避,转 FAILED(retry-exhausted)。 */
   @Test
   void dispatch_retryBudgetExhausted_marksFailed() {
-    NotificationProperties.Webhook w = webhook();
-    w.setMaxAttempts(5);
-    props.getWebhooks().add(w);
+    hooks.add(new Webhook(1, URL, SECRET, List.of(), true, 5, 1000, Instant.parse("2026-01-01T00:00:00Z")));
     fake.add(notif(1, "execution.failed", 4)); // 已 4 次尝试
     server.expect(MockRestServiceServerHelpers.anyRequest)
         .andRespond(MockRestResponseCreators.withStatus(HttpStatus.INTERNAL_SERVER_ERROR));
@@ -172,7 +174,7 @@ class NotificationDispatcherTest {
   /** 429 → 可重试(与 4xx 区分)。 */
   @Test
   void dispatch_http429_retryable() {
-    props.getWebhooks().add(webhook());
+    hooks.add(webhook());
     fake.add(notif(1, "execution.failed", 0));
     server.expect(MockRestServiceServerHelpers.anyRequest)
         .andRespond(MockRestResponseCreators.withStatus(HttpStatus.TOO_MANY_REQUESTS));
@@ -185,11 +187,9 @@ class NotificationDispatcherTest {
   /** 多个订阅 webhook 全部成功 → 整行 markSent。 */
   @Test
   void dispatch_multipleWebhooks_allOk_marksSent() {
-    NotificationProperties.Webhook w1 = webhook();
-    NotificationProperties.Webhook w2 = webhook();
-    w2.setUrl("https://hooks.example.com/y");
-    props.getWebhooks().add(w1);
-    props.getWebhooks().add(w2);
+    hooks.add(webhook());
+    hooks.add(new Webhook(2, "https://hooks.example.com/y", SECRET, List.of(), true, 5, 1000,
+        Instant.parse("2026-01-01T00:00:00Z")));
     fake.add(notif(1, "execution.failed", 0));
     server.expect(MockRestServiceServerHelpers.anyRequest)
         .andRespond(MockRestResponseCreators.withStatus(HttpStatus.OK));
@@ -205,11 +205,9 @@ class NotificationDispatcherTest {
   /** 任一订阅 webhook 失败 → 整行退避重试(下次整批重投)。 */
   @Test
   void dispatch_anyWebhookFails_retriesWholeRow() {
-    NotificationProperties.Webhook w1 = webhook();
-    NotificationProperties.Webhook w2 = webhook();
-    w2.setUrl("https://hooks.example.com/y");
-    props.getWebhooks().add(w1);
-    props.getWebhooks().add(w2);
+    hooks.add(webhook());
+    hooks.add(new Webhook(2, "https://hooks.example.com/y", SECRET, List.of(), true, 5, 1000,
+        Instant.parse("2026-01-01T00:00:00Z")));
     fake.add(notif(1, "execution.failed", 0));
     server.expect(MockRestServiceServerHelpers.anyRequest)
         .andRespond(MockRestResponseCreators.withStatus(HttpStatus.OK));
@@ -237,6 +235,17 @@ class NotificationDispatcherTest {
 
   static final class MockRestServiceServerHelpers {
     static final RequestMatcher anyRequest = request -> { };
+  }
+
+  static final class FakeWebhooks implements WebhookRepository {
+    final List<Webhook> hooks = new ArrayList<>();
+    void add(Webhook w) { hooks.add(w); }
+    @Override public List<Webhook> list() { return new ArrayList<>(hooks); }
+    @Override public long create(String url, String secret, List<String> kinds, boolean enabled,
+                                 int maxAttempts, long backoffMs) { return 1; }
+    @Override public boolean update(long id, String url, String secret, List<String> kinds,
+                                    boolean enabled, int maxAttempts, long backoffMs) { return true; }
+    @Override public boolean delete(long id) { return true; }
   }
 
   static final class FakeNotifications implements NotificationRepository {
@@ -272,5 +281,11 @@ class NotificationDispatcherTest {
       failed.add(id);
       failedErr.put(id, err);
     }
+
+    @Override public List<OutboundNotification> findPage(String kind, String status, int limit, int offset) {
+      return List.of();
+    }
+
+    @Override public long count(String kind, String status) { return 0; }
   }
 }

@@ -13,11 +13,13 @@ import dev.scheduler.persistence.JdbcOperatorRepository;
 import dev.scheduler.persistence.JdbcAuthRepository;
 import dev.scheduler.persistence.JdbcEventRepository;
 import dev.scheduler.persistence.JdbcNotificationRepository;
+import dev.scheduler.persistence.JdbcWebhookRepository;
 import dev.scheduler.persistence.EventRepository;
 import dev.scheduler.persistence.JdbcShardRepository;
 import dev.scheduler.persistence.JdbcTaskRepository;
 import dev.scheduler.persistence.JdbcWorkerRepository;
 import dev.scheduler.persistence.NotificationRepository;
+import dev.scheduler.persistence.WebhookRepository;
 import dev.scheduler.persistence.OperatorRepository;
 import dev.scheduler.persistence.ShardRepository;
 import dev.scheduler.persistence.TaskRepository;
@@ -31,7 +33,6 @@ import dev.scheduler.server.service.AuditRetentionService;
 import dev.scheduler.server.service.NotificationDispatcher;
 import dev.scheduler.server.service.NotificationFirer;
 import dev.scheduler.server.service.NotificationHub;
-import dev.scheduler.server.service.NotificationProperties;
 import dev.scheduler.server.service.OperatorPasswordService;
 import dev.scheduler.server.web.AvailableHandlerRefs;
 import dev.scheduler.persistence.retry.FailureResolver;
@@ -366,13 +367,19 @@ public class Beans {
     return new NotificationHub(notifications, json);
   }
 
+  /** webhook 订阅仓储(app_webhook):投递器轮询的端点来源 + 通知管理 API 的 CRUD 落点。 */
+  @Bean
+  WebhookRepository webhookRepository(JdbcTemplate jdbc) {
+    return new JdbcWebhookRepository(jdbc);
+  }
+
   /** 通知投递器:foreground 拉取到期行、HMAC 签名投递、退避/重试/终态。由 NotificationLoop 周期驱动。 */
   @Bean
   NotificationDispatcher notificationDispatcher(NotificationRepository notifications,
-                                                NotificationProperties props,
+                                                WebhookRepository webhooks,
                                                 RestTemplate notificationRestTemplate,
                                                 ObjectMapper json) {
-    return new NotificationDispatcher(notifications, props, notificationRestTemplate, json);
+    return new NotificationDispatcher(notifications, webhooks, notificationRestTemplate, json);
   }
 
   /** 通知投递循环:leader 门控,周期把到期通知投给已订阅 webhook;失败兜底不杀线程。webhooks 空 → no-op。 */

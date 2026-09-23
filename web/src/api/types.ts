@@ -217,3 +217,40 @@ export interface CreateEventRequest {
   payload?: unknown;
   dedupeKey: string;
 }
+
+// ---- 通知告警闭环(4-1):webhook 订阅 + 投递历史 ----
+/** webhook 订阅行(镜像 persistence.Webhook):kinds 空数组 = 订阅全部 event kind。 */
+export interface OutboundWebhook {
+  id: number;
+  url: string;
+  secret: string | null;
+  kinds: string[];
+  enabled: boolean;
+  maxAttempts: number;
+  backoffMs: number;
+  createdAt: string;
+}
+/** 建/改 webhook 请求体:url 必填;kinds 缺省空(订阅全部);enabled/maxAttempts/backoffMs 缺省由后端给默认 */
+export interface WebhookRequest {
+  url: string;
+  secret?: string;
+  kinds?: string[];
+  enabled?: boolean;
+  maxAttempts?: number;
+  backoffMs?: number;
+}
+/** 出站通知投递历史行(镜像 OutboundNotification):status ∈ PENDING/SENT/FAILED。 */
+export interface OutboundNotification {
+  id: number;
+  kind: string;
+  operator: string | null;
+  targetType: string | null;
+  targetId: number | null;
+  payload: string | null; // JSON 文本(展示时 JSON.parse 前 120 字符)
+  status: 'PENDING' | 'SENT' | 'FAILED';
+  attempts: number;
+  nextRetryAt: string | null;
+  lastError: string | null;
+  createdAt: string;
+  sentAt: string | null;
+}

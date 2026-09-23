@@ -17,6 +17,8 @@ import type {
   LoginResponse,
   MeResponse,
   OperatorEntry,
+  OutboundNotification,
+  OutboundWebhook,
   Page,
   ParsedMetric,
   RunDetail,
@@ -25,6 +27,7 @@ import type {
   Task,
   UpdateTaskRequest,
   UpsertOperatorRequest,
+  WebhookRequest,
 } from './types';
 
 // 清理旧版自报身份的残留 key(原 localStorage 'scheduler.operator');会话身份现由 HttpOnly cookie 承载。
@@ -253,3 +256,20 @@ export const listEvents = (p: ListEventsParams = {}): Promise<Page<InboundEvent>
 /** 提交事件:落 PENDING 待事件引擎分派(dedupeKey 重放幂等,命中既有行)。 */
 export const postEvent = (b: CreateEventRequest) =>
   req<InboundEvent>('/api/v1/events', { method: 'POST', body: JSON.stringify(b) });
+
+// ---- 4-1 通知告警闭环:webhook 订阅 CRUD(写 ADMIN)+ 投递历史(读) ----
+/** 订阅端点列表(读开放)。 */
+export const listWebhooks = () => req<OutboundWebhook[]>('/api/v1/webhooks');
+/** 新建订阅(ADMIN):url 必填;kinds 缺省空 = 订阅全部。 */
+export const createWebhook = (b: WebhookRequest) =>
+  req<OutboundWebhook>('/api/v1/webhooks', { method: 'POST', body: JSON.stringify(b) });
+/** 更新订阅(ADMIN)。 */
+export const updateWebhook = (id: number, b: WebhookRequest) =>
+  req<OutboundWebhook>(`/api/v1/webhooks/${id}`, { method: 'PUT', body: JSON.stringify(b) });
+/** 删除订阅(ADMIN)。 */
+export const deleteWebhook = (id: number) =>
+  req<void>(`/api/v1/webhooks/${id}`, { method: 'DELETE' });
+export interface ListNotificationsParams { kind?: string; status?: string; limit?: number; offset?: number; }
+/** 投递历史分页(读):按 kind/status 过滤,created_at DESC。 */
+export const listNotifications = (p: ListNotificationsParams = {}): Promise<Page<OutboundNotification>> =>
+  req<Page<OutboundNotification>>(`/api/v1/notifications${qstr(p)}`);

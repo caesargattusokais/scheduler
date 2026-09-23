@@ -43,12 +43,15 @@ public class OperatorInterceptor implements HandlerInterceptor {
   private static final String COOKIE = "session";
   private static final String OPERATORS = "/api/v1/operators/**";
 
-  /** 提权到 ADMIN 的敏感写端点:删除 / 取消 / 触发 DAG / 归档审计。其余写端点 OPERATOR 即可。 */
+  /** 提权到 ADMIN 的敏感写端点:删除 / 取消 / 触发 DAG / 归档审计 / webhook 订阅管理。其余写端点 OPERATOR 即可。 */
   private static final List<String[]> ADMIN_WRITES = List.of(
       new String[]{"DELETE", "/api/v1/tasks/{id}"},
       new String[]{"POST", "/api/v1/executions/{id}/cancel"},
       new String[]{"POST", "/api/v1/dags/{id}/trigger"},
-      new String[]{"POST", "/api/v1/audits/archive"});
+      new String[]{"POST", "/api/v1/audits/archive"},
+      new String[]{"POST", "/api/v1/webhooks"},
+      new String[]{"PUT", "/api/v1/webhooks/{id}"},
+      new String[]{"DELETE", "/api/v1/webhooks/{id}"});
 
   private final OperatorRepository operators;
   private final AuditRecorder auditor;
@@ -157,6 +160,7 @@ public class OperatorInterceptor implements HandlerInterceptor {
     if (uri.contains("/tasks")) return TargetType.TASK;
     if (uri.contains("/executions")) return TargetType.EXECUTION;
     if (uri.contains("/dags")) return TargetType.DAG;
+    if (uri.contains("/webhooks")) return TargetType.NONE;
     return TargetType.DAG;
   }
 }

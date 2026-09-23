@@ -1,9 +1,10 @@
 package dev.scheduler.server.service;
 
-import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.scheduler.persistence.NotificationRepository;
 import dev.scheduler.persistence.OutboundNotification;
+import dev.scheduler.persistence.Webhook;
+import dev.scheduler.persistence.WebhookRepository;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.LinkedHashMap;
@@ -35,14 +36,14 @@ public class NotificationDispatcher {
   private static final long BACKOFF_CAP_MS = 3_600_000L; // 退避上限 1h
 
   private final NotificationRepository notifications;
-  private final NotificationProperties props;
+  private final WebhookRepository webhooks;
   private final RestTemplate rest;
   private final ObjectMapper json;
 
-  public NotificationDispatcher(NotificationRepository notifications, NotificationProperties props,
+  public NotificationDispatcher(NotificationRepository notifications, WebhookRepository webhooks,
                                 RestTemplate rest, ObjectMapper json) {
     this.notifications = notifications;
-    this.props = props;
+    this.webhooks = webhooks;
     this.rest = rest;
     this.json = json;
   }
@@ -62,69 +63,69 @@ public class NotificationDispatcher {
 
   /** 对 n 逐 webhook 投递:任一失败即终止整行并转移状态;全成功返回 null。 */
   private Boolean deliverToAll(OutboundNotification n) {
-    for (NotificationProperties.Webhook w : props.getWebhooks()) {
-      if (!w.isEnabled() || w.getUrl() == null || w.getUrl().isBlank()) continue;
+    for (Webhook w : webhooks.list()) {
+      if (!w.enabled() || w.url() == null || w.url().isBlank()) continue;
       if (!subscribed(w, n.kind())) continue;
       DeliveryResult r = deliver(w, n);
       if (r.outcome == Outcome.OK) continue;
       if (r.outcome == Outcome.PERMANENT) {
-        notifications.markFailed(n.id(), "permanent " + w.getUrl() + ": " + r.error());
+        notifications.markFailed(n.id(), "permanent " + w.url() + ": " + r.error());
       } else if (remainingBudget(w, n)) {
         notifications.markRetry(n.id(), Instant.now().plusMillis(backoffMs(w, n.attempts())),
-            "retry " + w.getUrl() + ": " + r.error());
+            "retry " + w.url() + ": " + r.error());
       } else {
-        notifications.markFailed(n.id(), "retry-exhausted " + w.getUrl() + ": " + r.error());
+        notifications.markFailed(n.id(), "retry-exhausted " + w.url() + ": " + r.error());
       }
       return Boolean.TRUE; // 已终止本轮,整行状态已转移
     }
     return null; // 无订阅 webhook 或全部成功 → 整体完成
   }
 
-  private static boolean subscribed(NotificationProperties.Webhook w, String kind) {
-    return w.getKinds().isEmpty() || w.getKinds().contains(kind);
+  private static boolean subscribed(Webhook w, String kind) {
+    return w.kinds().isEmpty() || w.kinds().contains(kind);
   }
 
   /** 是否仍可在 maxAttempts 预算内安排下一次尝试(n.attempts 已完成的尝试次数)。 */
-  private static boolean remainingBudget(NotificationProperties.Webhook w, OutboundNotification n) {
-    return n.attempts() + 1 < w.getMaxAttempts();
+  private static boolean remainingBudget(Webhook w, OutboundNotification n) {
+    return n.attempts() + 1 < w.maxAttempts();
   }
 
-  private static long backoffMs(NotificationProperties.Webhook w, int attempts) {
+  private static long backoffMs(Webhook w, int attempts) {
     long v;
     try {
-      v = w.getBackoffMs() * (1L << Math.min(attempts, 30));
+      v = w.backoffMs() * (1L << Math.min(attempts, 30));
     } catch (ArithmeticException e) {
       v = Long.MAX_VALUE;
     }
     return Math.min(v, BACKOFF_CAP_MS);
   }
 
-  private DeliveryResult deliver(NotificationProperties.Webhook w, OutboundNotification n) {
+  private DeliveryResult deliver(Webhook w, OutboundNotification n) {
     try {
       byte[] body = buildBody(n);
       HttpHeaders headers = new HttpHeaders();
       headers.setContentType(MediaType.APPLICATION_JSON);
       headers.set("X-Schkid-Event", n.kind());
       headers.set("X-Schkid-Notification-Id", Long.toString(n.id()));
-      if (w.getSecret() != null && !w.getSecret().isBlank()) {
-        headers.set("X-Schkid-Signature", hmacSha256(body, w.getSecret()));
+      if (w.secret() != null && !w.secret().isBlank()) {
+        headers.set("X-Schkid-Signature", hmacSha256(body, w.secret()));
       }
       // RestTemplate 默认对 4xx/5xx 抛 HttpStatusCodeException(不会返回错误 ResponseEntity),2xx 则正常返回。
       ResponseEntity<byte[]> resp =
-          rest.exchange(w.getUrl(), HttpMethod.POST, new HttpEntity<>(body, headers), byte[].class);
+          rest.exchange(w.url(), HttpMethod.POST, new HttpEntity<>(body, headers), byte[].class);
       return new DeliveryResult(Outcome.OK, null);
     } catch (HttpStatusCodeException e) {
       int code = e.getStatusCode().value();
-      String err = "http " + code + " " + w.getUrl();
+      String err = "http " + code + " " + w.url();
       log.warn("notification delivery failed: {} (kind={} id={})", err, n.kind(), n.id());
       // 429 与 5xx 可重试;其余 4xx 为永久(重试无望)。
       return new DeliveryResult(code == 429 || code >= 500 ? Outcome.RETRYABLE : Outcome.PERMANENT, err);
     } catch (ResourceAccessException e) {
-      String err = "io " + w.getUrl() + ": " + e.getMessage();
+      String err = "io " + w.url() + ": " + e.getMessage();
       log.warn("notification delivery io failure: {}", err);
       return new DeliveryResult(Outcome.RETRYABLE, err);
     } catch (Exception e) {
-      String err = "bad " + w.getUrl() + ": " + e;
+      String err = "bad " + w.url() + ": " + e;
       log.warn("notification delivery error: {}", err);
       return new DeliveryResult(Outcome.RETRYABLE, e.toString());
     }
