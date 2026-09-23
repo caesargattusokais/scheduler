@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
-import { fetchMetrics } from '../api/client';
-import type { ParsedMetric } from '../api/types';
+import { fetchMetrics, getExecutionSlo } from '../api/client';
+import type { ExecutionSlo, ParsedMetric } from '../api/types';
 import { useInterval } from '../lib/useInterval';
 
 /** 每卡聚合规则:计数类取系列和(DLQ/活跃),最老队龄取最大值。 */
@@ -43,6 +43,8 @@ export default function MetricsPage() {
   const [err, setErr] = useState<string | null>(null);
   // 面板数据源路径:每卡保留末 HISTORY 点画 sparkline(5s 轮询追加)
   const [hist, setHist] = useState<Record<string, number[]>>({});
+  // 4-2 执行 SLO 快照(DB 聚合,与 /actuator/prometheus 并行拉取)。
+  const [slo, setSlo] = useState<ExecutionSlo | null>(null);
 
   const tick = async () => {
     try {
@@ -57,17 +59,24 @@ export default function MetricsPage() {
       });
       setErr(null);
     } catch (e) { setErr(String(e)); }
+    try {
+      setSlo(await getExecutionSlo());
+    } catch (e) {
+      if (err == null) setSlo(null);
+    }
   };
 
   useEffect(() => { tick(); }, []);
   useInterval(tick, 5000);
+
+  const fmtMs = (v: number) => (v >= 1000 ? `${(v / 1000).toFixed(2)}s` : `${Math.round(v)}ms`);
 
   return (
     <div>
       <div className="page-head">
         <div>
           <h1 className="page-title">指标</h1>
-          <p className="page-sub">9 个运维 + SLI gauge · 每 5s 刷新（数据源 /actuator/prometheus）</p>
+          <p className="page-sub">9 个运维 + SLI gauge · 每 5s 刷新（数据源 /actuator/prometheus）+ 执行 SLO 快照（/api/v1/metrics/executions）</p>
         </div>
       </div>
 
@@ -95,6 +104,36 @@ export default function MetricsPage() {
           );
         })}
       </div>
+
+      {slo && (
+        <div className="mt-6 grid grid-cols-2 gap-4 md:grid-cols-4">
+          <div className="metric-card">
+            <div className="text-sm font-medium text-slate-500">父延迟 p50 · p95</div>
+            <div className="metric-value">{fmtMs(slo.parentLatencyP50Ms)} / {fmtMs(slo.parentLatencyP95Ms)}</div>
+            <div className="mt-2 text-xs text-slate-400">近 {slo.windowSeconds / 3600}h 终态父执行(execution)</div>
+          </div>
+          <div className="metric-card">
+            <div className="text-sm font-medium text-slate-500">分片平均时长</div>
+            <div className="metric-value">{fmtMs(slo.shardAvgDurationMs)}</div>
+            <div className="mt-2 text-xs text-slate-400">近窗分片 finished−started</div>
+          </div>
+          <div className="metric-card">
+            <div className="text-sm font-medium text-slate-500">近窗失败</div>
+            <div className="metric-value text-red-600">{slo.recentFailures.failed}</div>
+            <div className="mt-2 text-xs text-slate-400">死信 {slo.recentFailures.deadLettered} · 超时 {slo.recentFailures.timedOut}</div>
+          </div>
+          <div className="metric-card">
+            <div className="text-sm font-medium text-slate-500">任务吞吐 / 成功率</div>
+            <div className="metric-value">
+              {slo.perTask.length === 0 ? '—' : `${slo.perTask.reduce((a, t) => a + t.throughput, 0)} 次`}
+            </div>
+            <div className="mt-2 text-xs text-slate-400">
+              {slo.perTask.length === 0 ? '近窗无终态任务' : slo.perTask.map((t) =>
+                `#${t.taskId} ${t.taskName}:${t.throughput}次 ${(t.successRate * 100).toFixed(0)}%`).join(' · ')}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -239,6 +239,17 @@ export interface WebhookRequest {
   maxAttempts?: number;
   backoffMs?: number;
 }
+// ---- 4-2 执行 SLO 指标(DB 快照聚合) ----
+/** GET /api/v1/metrics/executions 快照:近窗父延迟 p50/p95、分片均长、per-task 吞吐/成功率、近窗失败细分。 */
+export interface ExecutionSlo {
+  windowSeconds: number;
+  parentLatencyP50Ms: number;
+  parentLatencyP95Ms: number;
+  shardAvgDurationMs: number;
+  perTask: { taskId: number; taskName: string; throughput: number; successRate: number }[];
+  recentFailures: { failed: number; deadLettered: number; timedOut: number };
+}
+
 /** 出站通知投递历史行(镜像 OutboundNotification):status ∈ PENDING/SENT/FAILED。 */
 export interface OutboundNotification {
   id: number;

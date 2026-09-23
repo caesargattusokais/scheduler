@@ -13,6 +13,7 @@ import type {
   DlqRow,
   Execution,
   ExecutionDetail,
+  ExecutionSlo,
   InboundEvent,
   LoginResponse,
   MeResponse,
@@ -211,6 +212,9 @@ export const fetchMetrics = async (): Promise<ParsedMetric[]> => {
   if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
   return parsePrometheus(await res.text());
 };
+// ---- 4-2 执行 SLO 快照(DB 聚合,补流式 gauge 没有的维度)——近窗父延迟/分片均长/per-task/失败细分。
+export const getExecutionSlo = (windowSeconds?: number) =>
+  req<ExecutionSlo>(`/api/v1/metrics/executions${windowSeconds ? `?windowSeconds=${windowSeconds}` : ''}`);
 
 // ---- 审计(只读) ----
 export interface ListAuditsParams {

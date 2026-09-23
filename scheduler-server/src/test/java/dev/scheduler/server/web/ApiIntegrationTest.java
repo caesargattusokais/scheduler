@@ -2719,6 +2719,66 @@ class ApiIntegrationTest {
         .andExpect(jsonPath("$.items[0].id").value(delivered));
   }
 
+  // ---- 4-2 执行 SLO 指标:DB 快照聚合(父延迟 p50/p95、分片均长、per-task 吞吐/成功率、近窗失败细分) ----
+
+  /** 空库 → 聚合全 0(无行不 NPE,窗口内无样本)。 */
+  @Test
+  void metrics_executions_emptyIsZeroes() throws Exception {
+    mvc.perform(get("/api/v1/metrics/executions"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.windowSeconds").value(3600))
+        .andExpect(jsonPath("$.parentLatencyP50Ms").value(0))
+        .andExpect(jsonPath("$.parentLatencyP95Ms").value(0))
+        .andExpect(jsonPath("$.shardAvgDurationMs").value(0))
+        .andExpect(jsonPath("$.recentFailures.failed").value(0))
+        .andExpect(jsonPath("$.recentFailures.timedOut").value(0));
+  }
+
+  /** 播种近窗终态 → 聚合出 p50/p95、per-task 吞吐+成功率、failed/deadLettered/timedOut。 */
+  @Test
+  void metrics_executions_seededRowsProduceAggregates() throws Exception {
+    long tid = seedTaskRow("slo-task");
+
+    // 父执行:SUCCESS(100ms)+ FAILED(200ms),finished_at = now()(DB 时钟)。
+    long okParent = jdbc.queryForObject(
+        "INSERT INTO execution (task_id, status, idempotency_key, started_at, finished_at)"
+            + " VALUES (?, 'SUCCESS', 'slo-ok-1', now() - interval '100 milliseconds', now()) RETURNING id",
+        Long.class, tid);
+    jdbc.queryForObject(
+        "INSERT INTO execution (task_id, status, idempotency_key, started_at, finished_at)"
+            + " VALUES (?, 'FAILED', 'slo-bad-1', now() - interval '200 milliseconds', now()) RETURNING id",
+        Long.class, tid);
+    // 分片:ok 父 1 片(50ms 均长样本 + 正分支);bad 父 1 片 dead_letter + 一条 runtime timeout outcome。
+    long okShard = jdbc.queryForObject(
+        "INSERT INTO execution_shard (execution_id, shard_index, status, started_at, finished_at)"
+            + " VALUES (?, 0, 'SUCCESS', now() - interval '1 second', now() - interval '0.95 second') RETURNING id",
+        Long.class, okParent);
+    long badParent = jdbc.queryForObject(
+        "SELECT id FROM execution WHERE task_id=? AND status='FAILED'", Long.class, tid);
+    long badShard = jdbc.queryForObject(
+        "INSERT INTO execution_shard (execution_id, shard_index, status, started_at, finished_at, dead_letter)"
+            + " VALUES (?, 0, 'FAILED', now() - interval '1 second', now() - interval '0.95 second', true) RETURNING id",
+        Long.class, badParent);
+    jdbc.update("INSERT INTO execution_shard_outcome (shard_id, status, detail)"
+        + " VALUES (?, 'FAILED', 'runtime timeout')", badShard);
+
+    mvc.perform(get("/api/v1/metrics/executions"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.perTask.length()").value(1))
+        .andExpect(jsonPath("$.perTask[0].taskId").value(tid))
+        .andExpect(jsonPath("$.perTask[0].throughput").value(2))
+        .andExpect(jsonPath("$.perTask[0].successRate").value(0.5))
+        .andExpect(jsonPath("$.recentFailures.failed").value(1))
+        .andExpect(jsonPath("$.recentFailures.deadLettered").value(1))
+        .andExpect(jsonPath("$.recentFailures.timedOut").value(1))
+        .andExpect(jsonPath("$.shardAvgDurationMs").value(50));
+    // p50/p95:两个父延迟 100ms/200ms → 中位 150ms、p95 200ms;空指针兼容(non-null toString 已由前面断言覆盖)。
+    mvc.perform(get("/api/v1/metrics/executions"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.parentLatencyP50Ms").value(150))
+        .andExpect(jsonPath("$.parentLatencyP95Ms").value(195)); // percentile_cont(0.95) 对 {100,200} 线性内插 = 195
+  }
+
   /** 可复写的皮时钟:instant 由测试控制,getZone 固定 UTC。 */
   static final class MutableClock extends Clock {
     Instant now;
