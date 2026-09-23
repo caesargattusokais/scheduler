@@ -158,6 +158,17 @@ public class JdbcTaskRepository implements TaskRepository {
     jdbc.update("UPDATE app_task SET paused=?, updated_at=now() WHERE id=?", paused, id);
   }
 
+  @Override public Integer dlqMaxReplays(long id) {
+    return jdbc.query(
+        "SELECT dlq_max_replays FROM app_task WHERE id=?",
+        rs -> rs.next() ? rs.getInt(1) : null, id);
+  }
+
+  @Override public boolean setDlqMaxReplays(long id, int maxReplays) {
+    return jdbc.update("UPDATE app_task SET dlq_max_replays=?, updated_at=now() WHERE id=?",
+        maxReplays, id) == 1;
+  }
+
   @Override public long executionCount(long taskId) {
     return jdbc.queryForObject("SELECT count(*) FROM execution WHERE task_id=?", Long.class, taskId);
   }

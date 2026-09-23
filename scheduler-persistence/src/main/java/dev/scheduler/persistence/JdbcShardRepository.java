@@ -472,11 +472,12 @@ public class JdbcShardRepository implements ShardRepository {
   @Override public boolean requeueShard(long shardId) {
     // FAILED → DUE 并重置 attempt/next_retry_at/dead_letter/cancel_requested(MED-2:不清 cancel 标记会让
     //  先前被协作取消标记、后以真实错误失败的片重排后立即又被判取消)。CAS on status='FAILED':0 行=竞态/非 FAILED → false。
+    //  replay_count 自增:手动与自动重放共用本方法,重放即计入项下的自动重放额度消耗。
     final boolean[] ok = {false};
     tx.executeWithoutResult(s -> {
       if (jdbc.update(
           "UPDATE execution_shard SET status='DUE', attempt=0, next_retry_at=NULL, dead_letter=false,"
-              + " cancel_requested=false, queued_at=now()"
+              + " cancel_requested=false, replay_count=replay_count+1, queued_at=now()"
               + " WHERE id=? AND status='FAILED'", shardId) == 1) {
         jdbc.update("INSERT INTO execution_shard_outcome (shard_id, status, detail) VALUES (?,?,?)",
             shardId, "DUE", "requeue");
@@ -484,6 +485,27 @@ public class JdbcShardRepository implements ShardRepository {
       }
     });
     return ok[0];
+  }
+
+  @Override public List<DlqReplayCandidate> findDlqReplayCandidates(int limit) {
+    // 仅对 enabled AND NOT paused 且 dlq_max_replays>0 的任务取其死信分片;0 上限/暂停/禁用任务不在自动重放之列。
+    return jdbc.query(
+        "SELECT s.id, s.replay_count, t.dlq_max_replays"
+            + " FROM execution_shard s"
+            + " JOIN execution e ON e.id = s.execution_id"
+            + " JOIN app_task t ON t.id = e.task_id"
+            + " WHERE s.status='FAILED' AND s.dead_letter AND t.dlq_max_replays > 0"
+            + "   AND t.enabled AND NOT t.paused"
+            + " ORDER BY s.id LIMIT ?",
+        (rs, row) -> new DlqReplayCandidate(
+            rs.getLong("id"), rs.getInt("replay_count"), rs.getInt("dlq_max_replays")),
+        limit);
+  }
+
+  @Override public boolean discardShard(long shardId) {
+    int rows = jdbc.update(
+        "DELETE FROM execution_shard WHERE id=? AND status='FAILED' AND dead_letter", shardId);
+    return rows > 0;
   }
 
   @Override public boolean recordResultPayload(long shardId, String ownerWorkerId, String payload) {

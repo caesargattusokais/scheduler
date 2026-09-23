@@ -389,6 +389,13 @@ public class Beans {
     return new NotificationLoop(dispatcher, leader);
   }
 
+  /** DLQ 自动重放循环:leader 门控,周期把未超限的死信分片重排回队、超限者永久弃。任务 dlq_max_replays=0(缺省)→ 无候选,no-op。 */
+  @Bean
+  @ConditionalOnProperty(name = "scheduler.dlq.enabled", havingValue = "true", matchIfMissing = true)
+  DlqReplayLoop dlqReplayLoop(ShardRepository shards, LeaderElection leader) {
+    return new DlqReplayLoop(shards, leader);
+  }
+
   /** ApplicationRunner + Ordered:使启动引导按 order 升序确定性执行(Spring 的 runner 排序读对象类的
    *  Ordered/@Order,不读 @Bean 工厂方法注解——lambda 无法承载得靠实体包装)。 */
   private static final class OrderedApplicationRunner implements ApplicationRunner, Ordered {
@@ -527,6 +534,35 @@ public class Beans {
         dispatcher.dispatchOnce();
       } catch (Throwable t) {
         log.warn("notification dispatch tick failed; continuing next tick", t);
+      }
+    }
+  }
+
+  /** DLQ 自动重放循环:未超限候选重排回队(requeueShard,replay_count++),超限候选永久弃(discardShard)。
+   *  leader 门控(镜像 ReconcileLoop),避免多副本重复处置同一批死信。 */
+  public static final class DlqReplayLoop {
+    private static final Logger log = LoggerFactory.getLogger(DlqReplayLoop.class);
+    private final ShardRepository shards;
+    private final LeaderElection leader;
+
+    public DlqReplayLoop(ShardRepository shards, LeaderElection leader) {
+      this.shards = shards;
+      this.leader = leader;
+    }
+
+    @Scheduled(fixedDelayString = "${scheduler.dlq.replay-delay-ms:1000}")
+    public void tick() {
+      if (!leader.isLeader()) return;
+      try {
+        for (ShardRepository.DlqReplayCandidate c : shards.findDlqReplayCandidates(100)) {
+          if (c.replayCount() < c.maxReplays()) {
+            shards.requeueShard(c.shardId());
+          } else {
+            shards.discardShard(c.shardId());
+          }
+        }
+      } catch (Throwable t) {
+        log.warn("dlq replay tick failed; continuing next tick", t);
       }
     }
   }

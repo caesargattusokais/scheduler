@@ -138,9 +138,19 @@ public interface ShardRepository {
   /** 与上同过滤条件的 DLQ 全量计数(不含分页)。 */
   long countDeathLetterShards(Long taskId);
 
-  /** 死信分片重排回队:FAILED → DUE 并重置 attempt/next_retry_at/dead_letter(+DUE outcome)。CAS on status='FAILED':
-   *  0 行=竞态/非 FAILED → 返回 false。 */
+  /** 死信分片重排回队:FAILED → DUE 并重置 attempt/next_retry_at/dead_letter(+DUE outcome),replay_count 自增。
+   *  CAS on status='FAILED':0 行=竞态/非 FAILED → 返回 false。 */
   boolean requeueShard(long shardId);
+
+  /** DLQ 自动重放候选:可自动重放的死信分片(FAILED 且 dead_letter,属 enabled AND NOT paused 且 dlq_max_replays>0 的任务),
+   *  按 id 升序,供 leader 门控重放循环逐片决定 requeue(未超限)或弃(超限)。 */
+  List<DlqReplayCandidate> findDlqReplayCandidates(int limit);
+
+  /** 单个自动重放候选:shardId + 当前 replay_count + 所属任务的 dlq_max_replays(判定依据)。 */
+  record DlqReplayCandidate(long shardId, int replayCount, int maxReplays) {}
+
+  /** 永久弃掉一条死信分片(超限):物理删除,仅 FAILED 且 dead_letter 生效(CAS)。返回是否删除。 */
+  boolean discardShard(long shardId);
 
   /** SUCCESS 后写回 result_payload,受 worker_id 归属守卫:行已不归该 owner(且非 SUCCESS)则静默返回 false。
    *  payload 不是 outcome,不落 outcome 行。返回是否写入。 */

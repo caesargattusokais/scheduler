@@ -120,6 +120,13 @@ export const triggerTask = (id: number) => req<Execution>(`/api/v1/tasks/${id}/t
 export const deleteTask = (id: number) =>
   req<void>(`/api/v1/tasks/${id}`, { method: 'DELETE' });
 
+/** DLQ 治理:读某任务的自动重放上限(0=不自动重放)。 */
+export const getTaskDlqReplays = (id: number) =>
+  req<number>(`/api/v1/tasks/${id}/dlq-replays`);
+/** DLQ 治理:写某任务的自动重放上限(≥0),返回写入后的值。 */
+export const setTaskDlqReplays = (id: number, maxReplays: number) =>
+  req<number>(`/api/v1/tasks/${id}/dlq-replays`, { method: 'POST', body: JSON.stringify({ maxReplays }) });
+
 export interface ListExecutionsParams {
   taskId?: number;
   status?: string;

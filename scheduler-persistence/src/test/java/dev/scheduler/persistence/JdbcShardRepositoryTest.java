@@ -782,6 +782,72 @@ class JdbcShardRepositoryTest extends AbstractPostgresTest {
     assertEquals(ExecutionStatus.RUNNING, shardRepo.findShard(shard0).get().status());
   }
 
+  // ---- 3 方向·DLQ 治理强化:replay_count 自增 + 自动重放候选 + 超限弃 ----
+
+  /** requeueShard 重放一次 → replay_count 自增(手动与自动重放共用本方法)。 */
+  @Test void requeueIncrementsReplayCount() {
+    long taskId = newTask(1, 8);
+    long parentId = seedParentAndShards(taskId, 1);
+    long shard0 = shard(parentId, 0).id();
+    claimShard(shard0, taskId, "w1", 8);
+    shardRepo.markStatus(shard0, ExecutionStatus.FAILED, "w1", "boom");
+    jdbc.update("UPDATE execution_shard SET dead_letter=true WHERE id=?", shard0);
+
+    assertEquals(0, (int) jdbc.queryForObject(
+        "SELECT replay_count FROM execution_shard WHERE id=?", Integer.class, shard0));
+    assertTrue(shardRepo.requeueShard(shard0));
+    assertEquals(1, (int) jdbc.queryForObject(
+        "SELECT replay_count FROM execution_shard WHERE id=?", Integer.class, shard0),
+        "requeue 一次 → replay_count=1");
+  }
+
+  /** 候选查询:仅取 dlq_max_replays>0 且 enabled/非 paused 任务的死信分片,带 replay_count 与上限。上限=0 的任务不入选。 */
+  @Test void findDlqReplayCandidates_filtersByCapAndState() {
+    long enabled = newTask(1, 8); // dlq_max_replays 缺省 0
+    jdbc.update("UPDATE app_task SET dlq_max_replays=2 WHERE id=?", enabled);
+    long disabled = newTask(1, 8); // 保持 0 = 不自动重放
+
+    long parentId = seedParentAndShards(enabled, 1);
+    long shard0 = shard(parentId, 0).id();
+    claimShard(shard0, enabled, "w1", 8);
+    shardRepo.markStatus(shard0, ExecutionStatus.FAILED, "w1", "boom");
+    jdbc.update("UPDATE execution_shard SET dead_letter=true WHERE id=?", shard0);
+
+    // 命中前先把其它任务的死信分片也种上:非 0 上限但出现于同一候选集,验证 0 上限任务被排除
+    long parent2 = seedParentAndShards(disabled, 1);
+    long shardDisabled = shard(parent2, 0).id();
+    claimShard(shardDisabled, disabled, "w1", 8);
+    shardRepo.markStatus(shardDisabled, ExecutionStatus.FAILED, "w1", "boom");
+    jdbc.update("UPDATE execution_shard SET dead_letter=true WHERE id=?", shardDisabled);
+
+    var cands = shardRepo.findDlqReplayCandidates(100);
+    assertEquals(1, cands.size(), "仅 0 < replay 的任务(本用例 dlq_max_replays=2)入选;0 上限不自动重放");
+    assertEquals(shard0, cands.get(0).shardId());
+    assertEquals(0, cands.get(0).replayCount());
+    assertEquals(2, cands.get(0).maxReplays());
+  }
+
+  /** discardShard:永久弃(物理删除)一条 FAILED 且 dead_letter 的死信分片;非死信态不动。 */
+  @Test void discardShard_deletesOnlyFailedDeadLettered() {
+    long taskId = newTask(1, 8);
+    long parentId = seedParentAndShards(taskId, 1);
+    long shard0 = shard(parentId, 0).id();
+    claimShard(shard0, taskId, "w1", 8);
+    shardRepo.markStatus(shard0, ExecutionStatus.FAILED, "w1", "boom");
+    jdbc.update("UPDATE execution_shard SET dead_letter=true WHERE id=?", shard0);
+
+    assertTrue(shardRepo.discardShard(shard0));
+    assertEquals(0, shardCount(parentId), "超限弃 → 行物理删除");
+
+    // 已删除行再弃 → false;非死信态(如 SUCCESS)不误删
+    assertFalse(shardRepo.discardShard(shard0), "已删行再弃 → false");
+    long parent2 = seedParentAndShards(taskId, 1);
+    long sOk = shard(parent2, 0).id();
+    claimShard(sOk, taskId, "w1", 8); // RUNNING
+    assertFalse(shardRepo.discardShard(sOk), "非 FAILED+dead_letter 不误删");
+    assertEquals("RUNNING", shardRepo.findShard(sOk).get().status().name());
+  }
+
   // ---- v2 可靠性纵深 §1:findExpiredRunning 双信号 ----
 
   private void seedWorker(String id, int lastSeenSecondsAgo) {

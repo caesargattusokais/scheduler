@@ -20,6 +20,11 @@ public interface TaskRepository {
   long count(String name, Boolean paused);
   boolean update(long id, Task t);
   void setPaused(long id, boolean paused);
+
+  /** 读任务的 DLQ 自动重放上限(dlq_max_replays);任务不存在 → null。 */
+  Integer dlqMaxReplays(long id);
+  /** 写任务的 DLQ 自动重放上限(dlq_max_replays);任务不存在 → 返回 false。 */
+  boolean setDlqMaxReplays(long id, int maxReplays);
   /** 该任务的执行轮数(含全部 execution),用于删除前置检查。 */
   long executionCount(long taskId);
   /** 被 DAG 节点 / 运行快照引用的总数(task_id 外键触及 app_dag_node 与 dag_run_node)。 */

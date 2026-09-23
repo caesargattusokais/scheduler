@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { getDlq, listTasks, requeueShard } from '../api/client';
+import { getDlq, getTaskDlqReplays, listTasks, requeueShard, setTaskDlqReplays } from '../api/client';
 import { useInterval } from '../lib/useInterval';
 import { DlqRow, Task } from '../api/types';
 import StatusBadge from '../components/StatusBadge';
@@ -16,6 +16,32 @@ export default function DlqPage() {
   const [taskId, setTaskId] = useState('');
   const [offset, setOffset] = useState(0);
   const [err, setErr] = useState<string | null>(null);
+  // DLQ 治理:每任务自动重放上限(dlq_max_replays)。input 文本态便于未保存编辑;加载后填入当前值。
+  const [caps, setCaps] = useState<Record<number, string>>({});
+
+  useEffect(() => {
+    listTasks({ limit: 100 }).then((p) => {
+      setTasks(p.items);
+      setCaps({});
+      Promise.all(p.items.map((t) =>
+        getTaskDlqReplays(t.id).then((v) => [t.id, String(v)] as const).catch(() => null)))
+        .then((pairs) => {
+          const next: Record<number, string> = {};
+          for (const pair of pairs) if (pair) next[pair[0]] = pair[1];
+          setCaps(next);
+        }).catch(() => {});
+    }).catch(() => {});
+  }, []);
+
+  const saveCap = useCallback(async (id: number) => {
+    const raw = (caps[id] ?? '').trim();
+    if (!/^\d+$/.test(raw)) { setErr('自动重放上限须为不小于 0 的整数'); return; }
+    try {
+      const v = await setTaskDlqReplays(id, Number(raw));
+      setCaps((prev) => ({ ...prev, [id]: String(v) }));
+      setErr(null);
+    } catch (e) { setErr(String(e)); }
+  }, [caps]);
 
   const load = useCallback(async () => {
     try {
@@ -32,10 +58,6 @@ export default function DlqPage() {
 
   useEffect(() => { load(); }, [load]);
   useInterval(load, 5000);
-
-  useEffect(() => {
-    listTasks({ limit: 100 }).then((p) => setTasks(p.items)).catch(() => {});
-  }, []);
 
   const doRequeue = useCallback(async (id: number) => {
     try { await requeueShard(id); setErr(null); await load(); }
@@ -63,6 +85,27 @@ export default function DlqPage() {
           </select>
         </label>
       </div>
+
+      {tasks.length > 0 && (
+        <div className="card mb-4">
+          <div className="text-sm font-medium text-slate-500 mb-2">DLQ 治理 · 每任务自动重放上限（0 = 不自动重放，超限分片永久弃）</div>
+          <div className="grid grid-cols-1 gap-2 md:grid-cols-2 xl:grid-cols-3">
+            {tasks.map((t) => (
+              <div key={t.id} className="flex items-center gap-2">
+                <span className="flex-1 truncate text-sm">{t.name}</span>
+                <input
+                  className="input w-20 text-right"
+                  type="number" min={0}
+                  value={caps[t.id] ?? ''}
+                  onChange={(e) => setCaps((p) => ({ ...p, [t.id]: e.target.value }))}
+                  placeholder={caps[t.id] === undefined ? '…' : '0'}
+                />
+                <button className="btn-secondary" onClick={() => saveCap(t.id)}>保存</button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {rows.length === 0 ? (
         <div className="card p-10 text-center text-sm text-slate-400">死信队列为空 —— 暂无重试耗尽的失败分片</div>

@@ -79,6 +79,8 @@ import org.testcontainers.junit.jupiter.Testcontainers;
     properties = {
         "scheduler.loop.enabled=false",
         "scheduler.dag.enabled=false", // 关闭 DagLoop,消除异步扫描对同步驱动断言(dagEngine.scanOnce)的竞态
+        "scheduler.dlq.enabled=false", // 关闭 DLQ 自动重放循环:dlqReplayLoop 用例以桩 leader 手动驱动 tick,消除后台周期处理的竞态
+        "scheduler.notifications.enabled=false", // 关闭通知投递循环(同异步竞态考量)
         "management.endpoints.web.exposure.include=health,info,prometheus",
         "management.prometheus.metrics.export.enabled=true",
         // 操作者目录引导:上下文启动时幂等 upsert(OperatorBootstrap);既有写用例经下方默认头 alice 授权零改动。
@@ -1445,6 +1447,55 @@ class ApiIntegrationTest {
 
     // 外部 worker 认领并跑成功(server 无执行器;requeue 控制面已在上方断言 DUE + 不再出现在 /dlq)
     jdbc.update("UPDATE execution_shard SET status='SUCCESS', worker_id='w-demo' WHERE id=?", shardId);
+  }
+
+  /** DLQ 治理:每任务自动重放上限的读/写(缺省 0);负数 → 400,任务不存在 → 404。 */
+  @Test
+  void taskDlqReplays_setAndGet_roundTripAndValidation() throws Exception {
+    long id = postTask("dlq-cap-task");
+
+    mvc.perform(get("/api/v1/tasks/" + id + "/dlq-replays"))
+        .andExpect(status().isOk()).andExpect(jsonPath("$").value(0));
+    mvc.perform(post("/api/v1/tasks/" + id + "/dlq-replays")
+            .contentType(MediaType.APPLICATION_JSON).content("{\"maxReplays\":3}"))
+        .andExpect(status().isOk()).andExpect(jsonPath("$").value(3));
+    mvc.perform(get("/api/v1/tasks/" + id + "/dlq-replays"))
+        .andExpect(status().isOk()).andExpect(jsonPath("$").value(3));
+    mvc.perform(post("/api/v1/tasks/" + id + "/dlq-replays")
+            .contentType(MediaType.APPLICATION_JSON).content("{\"maxReplays\":-1}"))
+        .andExpect(status().isBadRequest());
+    mvc.perform(get("/api/v1/tasks/9999999/dlq-replays"))
+        .andExpect(status().isNotFound());
+  }
+
+  /** DLQ 自动重放循环:未超限(replay_count<上限)死信分片重排回队;超限(==上限)永久弃;0 上限任务不自动重放。 */
+  @Test
+  void dlqReplayLoop_autoReplaysWithinCap_discardsOverCap() throws Exception {
+    long taskId = postTask("dlq-loop-task");
+    jdbc.update("UPDATE app_task SET dlq_max_replays=1 WHERE id=?", taskId);
+    long shardId = seedDeadLetter(taskId).id(); // FAILED + dead_letter,replay_count=0
+    var loop = new dev.scheduler.server.config.Beans.DlqReplayLoop(shards, () -> true);
+
+    loop.tick(); // replay_count(0) < 上限(1) → requeue 回队
+    assertEquals("DUE", jdbc.queryForObject(
+        "SELECT status FROM execution_shard WHERE id=?", String.class, shardId));
+    assertEquals(1, jdbc.queryForObject(
+        "SELECT replay_count FROM execution_shard WHERE id=?", Integer.class, shardId));
+
+    // 再次死信 → replay_count=1 == 上限 → 下轮永久弃(物理删除)
+    jdbc.update("UPDATE execution_shard SET status='FAILED', dead_letter=true WHERE id=?", shardId);
+    loop.tick();
+    assertEquals(0, jdbc.queryForObject(
+        "SELECT count(*) FROM execution_shard WHERE id=?", Integer.class, shardId),
+        "超限 → 永久弃");
+
+    // 任务上限 0 → 不自动重放:死信分片原样保留
+    long zero = postTask("dlq-zero-task");
+    long zShard = seedDeadLetter(zero).id();
+    loop.tick();
+    assertEquals(1, jdbc.queryForObject(
+        "SELECT count(*) FROM execution_shard WHERE id=?", Integer.class, zShard),
+        "0 上限任务不入自动重放候选,分片保持原样");
   }
 
   @Test

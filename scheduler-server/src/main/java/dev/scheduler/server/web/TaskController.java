@@ -167,6 +167,32 @@ public class TaskController {
     return tasks.findById(id).orElseThrow(() -> notFound("task " + id));
   }
 
+  /** 读任务的 DLQ 自动重放上限(0=不自动重放);任务不存在 → 404。 */
+  @GetMapping("/{id}/dlq-replays")
+  public int dlqReplays(@PathVariable long id) {
+    Integer cap = tasks.dlqMaxReplays(id);
+    if (cap == null) throw notFound("task " + id);
+    return cap;
+  }
+
+  /** 写任务的 DLQ 自动重放上限(≥0):DLQ 治理页按任务配置自动重放额度。maxReplays<0 → 400。 */
+  @PostMapping("/{id}/dlq-replays")
+  public int setDlqReplays(@PathVariable long id,
+                           @RequestBody DlqReplaysRequest req) {
+    Task before = requireTask(id);
+    if (req.maxReplays() < 0) {
+      throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+          "maxReplays must be >= 0");
+    }
+    tasks.setDlqMaxReplays(id, req.maxReplays());
+    auditor.record(current.get(), "task.dlq_replays", TargetType.TASK, id,
+        Map.of("maxReplays", req.maxReplays()), null, taskBefore(before));
+    return tasks.dlqMaxReplays(id);
+  }
+
+  /** DLQ 自动重放上限写请求体。 */
+  public record DlqReplaysRequest(int maxReplays) {}
+
   /**
    * 物理删除任务:仅当任务无任何 execution 且未被任何 DAG 节点/运行引用时允许(保留审计历史)。
    * 有子记录 → 409 并说明被什么阻塞;任务不存在 → 404;成功 → 204。
