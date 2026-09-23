@@ -30,8 +30,9 @@ public interface ShardRepository {
   Optional<Shard> findShard(long shardId);
 
   /** 重试闸:某任务下待认领的 DUE shard(并 parent execution 确认 task_id;仅当 next_retry_at 为空或已到期待时才放行)。
-   *  按 shard id 升序取首条。 */
-  Optional<Shard> findCandidate(long taskId);
+   *  4c 选片摊开:在该任务当前可领的 DUE 集合内取稳定 offset(= workerId 哈希对该集合大小的余数),使不同 worker
+   *  认领不同片、避免全员抢同一最低 id 造成竞争;同 worker 两次调用(集合未变时)得同片。workerId 为 null → offset 0(旧行为)。 */
+  Optional<Shard> findCandidate(long taskId, String workerId);
 
   /** 认领单个 DUE shard → RUNNING,并递增 attempt、started_at 无条件重置为 now()(每次认领=本轮运行起点,超时从本轮起算)。
    *  受 task 级 maxConcurrent(CAS on active RUNNING count)闸门:配额已满或已非 DUE(竞态)时返回 false,不落误导性

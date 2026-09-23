@@ -58,7 +58,7 @@ public class ExecutorWorker {
   /** 处理一个分片,返回是否处理了(找到了候选且认领成功)。 */
   public boolean workOne() {
     for (Task t : tasks.findAll()) {
-      var cand = shards.findCandidate(t.id());
+      var cand = shards.findCandidate(t.id(), workerId); // 4c 按 worker 选片摊开,不同 worker 认领不同片
       if (cand.isEmpty()) continue;
       Shard shard = cand.get();
       Instant lease = clock.instant().plusSeconds(60);

@@ -166,14 +166,16 @@ class ExecutorWorkerTest extends AbstractExecutorWorkerTest {
     };
     var registry = new MapHandlerRegistry(List.of(() -> payloadHandler));
     assertTrue(worker(registry).workOne());
-    var s = shard(exec, 0);
-    assertNotNull(s.resultPayload(), "SUCCESS 后 result_payload 应被写回");
-    assertTrue(s.resultPayload().contains("\"workerId\":\"worker-a\""),
+    // 4c 选片摊开:worker 认领的未必是 shard 0,取其实际认领并成功的那枚来校验 payload 回写。
+    var claimed = shards.findShards(exec).stream()
+        .filter(x -> "worker-a".equals(x.workerId()) && x.status() == ExecutionStatus.SUCCESS)
+        .findFirst().orElseThrow(() -> new AssertionError("worker-a 应认领并成功至少一片"));
+    assertNotNull(claimed.resultPayload(), "SUCCESS 后 result_payload 应被写回");
+    assertTrue(claimed.resultPayload().contains("\"workerId\":\"worker-a\""),
         "payload 应含调用方 workerId(经 HandlerContext.workerId)");
-    assertTrue(s.resultPayload().contains("\"shardIndex\":0"),
-        "payload 应含分片下标");
-    assertTrue(shards.findShards(exec).stream()
-        .noneMatch(x -> x.shardIndex() != 0 && x.resultPayload() != null),
+    assertTrue(claimed.resultPayload().contains("\"shardIndex\":" + claimed.shardIndex() + "}"),
+        "payload 应含被认领分片的下标");
+    assertEquals(1, shards.findShards(exec).stream().filter(x -> x.resultPayload() != null).count(),
         "仅被认领执行的 shard 写 payload,其余保持空");
   }
 
@@ -191,6 +193,31 @@ class ExecutorWorkerTest extends AbstractExecutorWorkerTest {
         "RUNNING→FAILED 合法回写");
     assertEquals(1L, shardOutcomeCount(shardId, "FAILED"));
     assertEquals(0, rec.calls.size(), "未命中任何 handler");
+  }
+
+  /** 4c 选片摊开:同一 4 片任务,两 worker 交替 workOne → 4 拍全认领成功,各片归属唯一 worker,两 worker 都分到活(无垄断)。 */
+  @Test void multiWorker_spreadsShardsAndNoWorkerStarves() {
+    var rec = new RecordingHandler(false);
+    var registry = new MapHandlerRegistry(List.of(() -> rec));
+    long taskId = createTask("rec", 4, 8);
+    long parentId = seedParentAndShards(taskId, 4);
+
+    var a = worker(registry, "worker-a");
+    var b = worker(registry, "worker-b");
+    for (int i = 0; i < 4; i++) {
+      assertTrue((i % 2 == 0 ? a : b).workOne(), "第 " + i + " 拍应认领并执行一片");
+    }
+
+    int aOwned = 0, bOwned = 0;
+    for (int i = 0; i < 4; i++) {
+      Shard s = shards.findShards(parentId).get(i);
+      assertEquals(ExecutionStatus.SUCCESS, s.status(), "每片都被唯一 worker 处理");
+      if ("worker-a".equals(s.workerId())) aOwned++;
+      else if ("worker-b".equals(s.workerId())) bOwned++;
+      else throw new AssertionError("shard 归属未知 worker: " + s.workerId());
+    }
+    assertEquals(4, aOwned + bOwned, "全部 4 片认领归属 a 或 b(不相交、无贯穿)");
+    assertTrue(aOwned >= 1 && bOwned >= 1, "两 worker 都分到活,无单 worker 垄断:" + aOwned + "/" + bOwned);
   }
 
   @Test void handlerThrows_failsShard_withoutEscapingThrowable() {
@@ -271,16 +298,17 @@ class ExecutorWorkerTest extends AbstractExecutorWorkerTest {
     long taskId = createTask("rec", 0, 1000, null, 3, 3); // shardCount=3, maxRetries=0 → 耗尽
     long parentId = seedParentAndShards(taskId, 3);
 
-    boolean processed = worker(registry).workOne(); // 认领 id 最小的一枚 → 耗尽 FAILED + DLQ → FAIL_FAST
+    boolean processed = worker(registry).workOne(); // 认领任一枚(选片摊开)→ 耗尽 FAILED + DLQ → FAIL_FAST
 
     assertTrue(processed);
     var ss = shards.findShards(parentId);
     assertEquals(1, ss.stream().filter(s -> s.status() == ExecutionStatus.FAILED).count(), "恰好一条 FAILED");
     assertEquals(2, ss.stream().filter(s -> s.status() == ExecutionStatus.CANCELED).count(),
         "FAIL_FAST:其余 DUE 兄弟被直编 CANCELED");
+    var exhausted = ss.stream().filter(s -> s.status() == ExecutionStatus.FAILED).findFirst().orElseThrow();
     assertEquals(Boolean.TRUE, jdbc.queryForObject(
-        "SELECT dead_letter FROM execution_shard WHERE id=? AND status='FAILED'",
-        Boolean.class, ss.get(0).id()), "耗尽 shard 置死信");
+        "SELECT dead_letter FROM execution_shard WHERE id=?", Boolean.class, exhausted.id()),
+        "耗尽 shard 置死信");
   }
 
   /** M6.3 relocate:重试调度后 next_retry_at 落未来闸,findCandidate 不得再认领;拨回过去闸才放行。
@@ -327,12 +355,13 @@ class ExecutorWorkerTest extends AbstractExecutorWorkerTest {
     long taskId = createTask("rec", 2, 2); // shardCount=2, maxActive=2
     long parentId = seedParentAndShards(taskId, 2);
 
-    worker(registry).workOne(); // 认领 shard index 0
-    worker(registry).workOne(); // 认领 shard index 1
+    worker(registry).workOne(); // 认领第一枚(4c 选片摊开,不固定 index 0)
+    worker(registry).workOne(); // 认领剩下一枚
 
     assertEquals(2, rec.calls.size(), "两次 workOne 各驱动一次 handler");
-    assertEquals(0, rec.calls.get(0).shardIndex(), "第一次运行收 index 0");
-    assertEquals(1, rec.calls.get(1).shardIndex(), "第二次运行收 index 1");
+    assertEquals(Set.of(0, 1),
+        rec.calls.stream().map(HandlerContext::shardIndex).collect(Collectors.toSet()),
+        "两枚 shard 均被运行(认领顺序随选片摊开不固定)");
     assertEquals(2, rec.calls.get(0).shardCount(), "两 shard 任务皆收 shardCount=2");
     assertEquals(2, rec.calls.get(1).shardCount());
     assertEquals(parentId, rec.calls.get(0).executionId(), "两个 shard 同属同一父 execution");

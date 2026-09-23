@@ -147,14 +147,23 @@ public class JdbcShardRepository implements ShardRepository {
         }, shardIds.toArray());
   }
 
-  @Override public Optional<Shard> findCandidate(long taskId) {
+  @Override public Optional<Shard> findCandidate(long taskId, String workerId) {
     // 重试闸:仅当 next_retry_at 为空或已到期待时才视为可领取(否则被重试调度待到点才放行)。
-    // JOIN parent execution 以取 task_id(作用对象为 shard)。
+    // 4c 选片摊开:统计该任务可领集合大小 total,取 workerId 哈希的稳定 offset 落入其中,使不同 worker 认领不同片;
+    // workerId 为 null → offset 0(旧行为)。total 与 SELECT 之间他方认领会让集合收窄,offset 越界 → 本拍 empty,下拍重试(无害)。
+    long seed = workerId == null ? 0 : (workerId.hashCode() & 0x7fffffff);
+    int total = jdbc.queryForObject(
+        "SELECT count(*) FROM execution_shard s JOIN execution e ON e.id = s.execution_id"
+            + " WHERE e.task_id=? AND s.status='DUE'"
+            + " AND (s.next_retry_at IS NULL OR s.next_retry_at <= now())",
+        Integer.class, taskId);
+    if (total == 0) return Optional.empty();
+    int offset = (int) (seed % total);
     return jdbc.query(
         "SELECT s.* FROM execution_shard s JOIN execution e ON e.id = s.execution_id"
             + " WHERE e.task_id=? AND s.status='DUE'"
-            + " AND (s.next_retry_at IS NULL OR s.next_retry_at <= now()) ORDER BY s.id LIMIT 1",
-        MAP, taskId).stream().findFirst();
+            + " AND (s.next_retry_at IS NULL OR s.next_retry_at <= now()) ORDER BY s.id LIMIT 1 OFFSET ?",
+        MAP, taskId, offset).stream().findFirst();
   }
 
   @Override public boolean claim(long shardId, long taskId, String workerId,

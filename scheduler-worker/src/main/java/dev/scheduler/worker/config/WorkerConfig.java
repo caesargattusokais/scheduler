@@ -30,7 +30,6 @@ import org.springframework.boot.ApplicationRunner;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.scheduling.annotation.Scheduled;
 
 @Configuration
 public class WorkerConfig {
@@ -97,10 +96,12 @@ public class WorkerConfig {
     return args -> registrar.heartbeat();
   }
 
-  /** 执行认领环:共享 DB 原子认领,支持多 worker 并发分摊。 */
+  /** 执行认领环:共享 DB 原子认领,支持多 worker 并发分摊;capacity>1 时单进程并行认领多片。 */
   @Bean
-  WorkLoop workLoop(ExecutorWorker worker) {
-    return new WorkLoop(worker);
+  WorkLoop workLoop(ExecutorWorker worker,
+                    @Value("${scheduler.worker.capacity:1}") int capacity,
+                    @Value("${scheduler.worker.idle-ms:200}") long idleMs) {
+    return new WorkLoop(worker, capacity, idleMs);
   }
 
   /** 心跳环:专用守护线程解耦执行环,长运行 handler 阻塞 WorkLoop 时心跳仍推进(见 HeartbeatLoop 注释)。 */
@@ -110,16 +111,39 @@ public class WorkerConfig {
     return new HeartbeatLoop(registrar, intervalMs);
   }
 
-  public static final class WorkLoop {
+  /** 执行环(4c 扩容):capacity 个自持守护调度线程,各自循环认领并阻塞执行一个分片。
+   *   scheduleWithFixedDelay 保证同一执行线程不重叠 → 时刻至多 capacity 分片在途(认领天然不超 capacity——
+   *   只有 capacity 个线程在认领,各领一个);无活时 workOne 旋即返回,经 idleMs 延后重试。
+   *   长运行 handler 会占满其一槽位(少一拍认领能力),符合「capacity=并发在途数」语义。与心跳环解耦
+   *   (见 HeartbeatLoop),长运行期间心跳照常推进,owner 活性不被误判。无 @Scheduled,由本池自持驱动。 */
+  public static final class WorkLoop implements DisposableBean {
     private final ExecutorWorker worker;
-    WorkLoop(ExecutorWorker worker) { this.worker = worker; }
-    @Scheduled(fixedDelayString = "${scheduler.loop.work-delay-ms:100}")
-    public void tick() {
+    /** 专用 daemon 调度池:容量=并发认领数;daemon 不阻塞 JVM 退出。 */
+    private final ScheduledExecutorService pool;
+
+    WorkLoop(ExecutorWorker worker, int capacity, long idleMs) {
+      this.worker = worker;
+      if (capacity < 1) throw new IllegalArgumentException("scheduler.worker.capacity must be >= 1");
+      this.pool = Executors.newScheduledThreadPool(capacity, r -> {
+        Thread t = new Thread(r, "worker-exec");
+        t.setDaemon(true);
+        return t;
+      });
+      for (int i = 0; i < capacity; i++) {
+        pool.scheduleWithFixedDelay(this::tick, 0, idleMs, TimeUnit.MILLISECONDS);
+      }
+    }
+
+    private void tick() {
       try {
         worker.workOne();
       } catch (Throwable t) {
         log.warn("worker claim loop tick failed; continuing next tick", t);
       }
+    }
+
+    @Override public void destroy() {
+      pool.shutdownNow();
     }
   }
 

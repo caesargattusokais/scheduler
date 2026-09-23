@@ -190,7 +190,7 @@ class JdbcShardRepositoryTest extends AbstractPostgresTest {
     long taskId = newTask(3, 8);
     long parentId = seedParentAndShards(taskId, 3);
 
-    var cand = shardRepo.findCandidate(taskId);
+    var cand = shardRepo.findCandidate(taskId, null); // workerId null → offset 0(旧行为)
 
     assertTrue(cand.isPresent());
     assertEquals(parentId, cand.get().executionId());
@@ -204,7 +204,7 @@ class JdbcShardRepositoryTest extends AbstractPostgresTest {
     // 把它标成未来才到期的重试闸:DUE 但未到重试时间 → 不应被 findCandidate 返回
     jdbc.update("UPDATE execution_shard SET next_retry_at = now() + interval '1 hour'");
 
-    assertTrue(shardRepo.findCandidate(taskId).isEmpty(),
+    assertTrue(shardRepo.findCandidate(taskId, null).isEmpty(),
         "a DUE shard with next_retry_at in the future must not be returned by findCandidate");
   }
 
@@ -212,10 +212,30 @@ class JdbcShardRepositoryTest extends AbstractPostgresTest {
     long taskId = newTask(1, 8);
     long parentId = seedParentAndShards(taskId, 1); // next_retry_at 默认 NULL
 
-    var cand = shardRepo.findCandidate(taskId);
+    var cand = shardRepo.findCandidate(taskId, null);
     assertTrue(cand.isPresent());
     assertEquals(0, cand.get().shardIndex());
     assertEquals(parentId, cand.get().executionId());
+  }
+
+  /** 4c 选片摊开:同 task 多 DUE 片,不同 worker 各认领不同 offset 的片(哈希 mod 可领数),避免全员抢同一最低 id。 */
+  @Test void findCandidate_spreadsAcrossWorkersAndIsStablePerWorker() {
+    long taskId = newTask(5, 8);
+    seedParentAndShards(taskId, 5); // shard 0..4,单父按 shard id 升序与 index 对齐
+
+    String a = "worker-alpha", b = "worker-beta";
+    int total = 5;
+    int offA = (int) ((a.hashCode() & 0x7fffffff) % total);
+    int offB = (int) ((b.hashCode() & 0x7fffffff) % total);
+
+    var ca1 = shardRepo.findCandidate(taskId, a).orElseThrow();
+    var ca2 = shardRepo.findCandidate(taskId, a).orElseThrow();
+    var cb = shardRepo.findCandidate(taskId, b).orElseThrow();
+    assertEquals(offA, ca1.shardIndex(), "worker hash 稳定落到可领集内的该 offset");
+    assertEquals(offA, ca2.shardIndex(), "同 worker 集合未变时两次取同片");
+    assertEquals(offB, cb.shardIndex());
+    assertNotEquals(offA, offB, "两 worker 偏移错开,认领不同片");
+    assertEquals(ExecutionStatus.DUE, ca1.status());
   }
 
   @Test void claimThenSecondFailsAndOutcome() {
