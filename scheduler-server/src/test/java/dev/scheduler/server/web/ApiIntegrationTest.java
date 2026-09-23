@@ -2830,6 +2830,67 @@ class ApiIntegrationTest {
         .andExpect(jsonPath("$.parentLatencyP95Ms").value(195)); // percentile_cont(0.95) 对 {100,200} 线性内插 = 195
   }
 
+  // ---- 4 方向·OpenAPI 契约守卫 + api-docs 快照工件 ----
+
+  /** 契约守卫:前端依赖的路径必须在 springdoc 生成的 /v3/api-docs 中出现。
+   *  springdoc 从控制器自动派生(再逐路径断言属重复),故只守卫前端关键集合 + 会话认证安全声明(cookie)。
+   *  端点被移除/改名而前端依赖未同步时,此测试红,防契约静默破坏。 */
+  @Test
+  void openApi_containsFrontendCriticalPaths_andSessionCookieSecurityScheme() throws Exception {
+    String spec = mvc.perform(get("/v3/api-docs"))
+        .andExpect(status().isOk())
+        .andReturn().getResponse().getContentAsString();
+    JsonNode root = objectMapper.readTree(spec);
+    JsonNode paths = root.path("paths");
+    String actual = paths.size() + " 条:" + joinFieldNames(paths);
+
+    List<String> critical = List.of(
+        // 认证与会话
+        "/api/v1/auth/login", "/api/v1/auth/me", "/api/v1/auth/logout",
+        "/api/v1/auth/change-password",
+        // 任务 + DLQ 治理
+        "/api/v1/tasks", "/api/v1/tasks/{id}", "/api/v1/tasks/{id}/pause",
+        "/api/v1/tasks/{id}/trigger", "/api/v1/tasks/{id}/dlq-replays",
+        // 执行 + DLQ
+        "/api/v1/executions", "/api/v1/executions/{id}", "/api/v1/executions/dlq",
+        "/api/v1/executions/shards/{shardId}/requeue",
+        // DAG + 事件
+        "/api/v1/dags", "/api/v1/dags/runs", "/api/v1/dags/runs/{runId}",
+        "/api/v1/events",
+        // 通知告警闭环 + 指标 SLO
+        "/api/v1/webhooks", "/api/v1/notifications", "/api/v1/metrics/executions",
+        // 审计治理 + 操作者
+        "/api/v1/audits", "/api/v1/audits/integrity", "/api/v1/operators");
+    for (String p : critical) {
+      assertTrue(paths.has(p),
+          "OpenAPI /v3/api-docs 应含前端关键路径 " + p + ";实际 paths(" + actual + ")");
+    }
+
+    // 会话认安全声明:securitySchemes 声明 HttpOnly cookie(4b 依赖 SQL/控制面浏览器的鉴权边)。
+    JsonNode schemes = root.path("components").path("securitySchemes");
+    assertTrue(schemes.isObject() && schemes.size() > 0,
+        "/v3/api-docs 应有 components.securitySchemes(会话认证声明)");
+  }
+
+  /** api-docs 快照工件导出:仅显式 {@code -Dscheduler.openapi.dump=<path>} 时把当前规范写入指定文件(提交为契约工件)。
+   *  常规构建不设该属性 → assume 跳过,不触碰工作区;快照与守卫分列:快照给画像/差异审,守卫守运行时关键路径。 */
+  @Test
+  void openApiSnapshot_exportAsCommittableArtifact() throws Exception {
+    String out = System.getProperty("scheduler.openapi.dump");
+    org.junit.jupiter.api.Assumptions.assumeTrue(out != null,
+        "设 -Dscheduler.openapi.dump=<path> 才导出 api-docs 快照工件");
+    String spec = mvc.perform(get("/v3/api-docs")).andExpect(status().isOk())
+        .andReturn().getResponse().getContentAsString();
+    java.nio.file.Files.writeString(java.nio.file.Path.of(out), spec);
+  }
+
+  private static String joinFieldNames(JsonNode node) {
+    StringBuilder sb = new StringBuilder();
+    var it = node.fieldNames();
+    while (it.hasNext()) sb.append(it.next()).append(", ");
+    return sb.length() > 0 ? sb.substring(0, sb.length() - 2) : "";
+  }
+
   /** 可复写的皮时钟:instant 由测试控制,getZone 固定 UTC。 */
   static final class MutableClock extends Clock {
     Instant now;
