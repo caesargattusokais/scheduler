@@ -100,7 +100,7 @@ export default function App() {
             <Route path="/dags" element={<DagsPage />} />
             <Route path="/metrics" element={<MetricsPage />} />
             <Route path="/audits" element={<AuditPage />} />
-            <Route path="/operators" element={<OperatorsPage />} />
+            <Route path="/operators" element={<OperatorsPage meRole={meOp.role} />} />
             <Route path="/notifications" element={<NotificationsPage />} />
             {/* 自助改密页(身份菜单入口;强制改密走上方硬门分支,不经此路由) */}
             <Route path="/force-password" element={<ForcePasswordChange />} />
