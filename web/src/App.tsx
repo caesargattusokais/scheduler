@@ -22,7 +22,7 @@ const NAV = [
   { to: '/dags', label: '工作流', icon: '⌗' },
   { to: '/metrics', label: '指标', icon: '▦' },
   { to: '/audits', label: '审计', icon: '≡' }, // 第 6 入口
-  { to: '/operators', label: '操作者', icon: '☺' }, // 第 7 入口(操作者目录,仅 ADMIN 可管理)
+  { to: '/operators', label: '操作者', icon: '☺', adminOnly: true }, // 第 7 入口(操作者目录,仅 ADMIN 可管理/可见)
   { to: '/notifications', label: '通知', icon: '❐' }, // 4-1 入口(webhook 订阅 + 投递历史)
 ];
 
@@ -49,6 +49,9 @@ export default function App() {
 
   useEffect(() => { void refresh(); }, [refresh]);
 
+  const isAdmin = meOp?.role === 'ADMIN';
+  const visibleNav = NAV.filter((n) => !n.adminOnly || isAdmin);
+
   // BrowserRouter 须包裹整棵被登录门保护的树:LoginPage 内部使用 useNavigate,必须在 Router 上下文内。
   return (
     <BrowserRouter>
@@ -64,7 +67,7 @@ export default function App() {
             Scheduler
           </div>
           <nav className="sidebar-nav">
-            {NAV.map((n) => (
+            {visibleNav.map((n) => (
               <NavLink key={n.to} to={n.to} end={n.to === '/tasks'} className={({ isActive }) => `navlink${isActive ? ' active' : ''}`}>
                 <span className="w-5 text-center text-slate-400">{n.icon}</span>
                 {n.label}
@@ -100,7 +103,7 @@ export default function App() {
             <Route path="/dags" element={<DagsPage />} />
             <Route path="/metrics" element={<MetricsPage />} />
             <Route path="/audits" element={<AuditPage />} />
-            <Route path="/operators" element={<OperatorsPage meRole={meOp.role} />} />
+            <Route path="/operators" element={isAdmin ? <OperatorsPage /> : <Navigate to="/tasks" replace />} />
             <Route path="/notifications" element={<NotificationsPage />} />
             {/* 自助改密页(身份菜单入口;强制改密走上方硬门分支,不经此路由) */}
             <Route path="/force-password" element={<ForcePasswordChange />} />
