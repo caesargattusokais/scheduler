@@ -18,6 +18,8 @@ import dev.scheduler.persistence.EventRepository;
 import dev.scheduler.persistence.JdbcShardRepository;
 import dev.scheduler.persistence.JdbcTaskRepository;
 import dev.scheduler.persistence.JdbcWorkerRepository;
+import dev.scheduler.persistence.JdbcRuntimeConfigRepository;
+import dev.scheduler.persistence.RuntimeConfigRepository;
 import dev.scheduler.persistence.NotificationRepository;
 import dev.scheduler.persistence.WebhookRepository;
 import dev.scheduler.persistence.OperatorRepository;
@@ -35,6 +37,7 @@ import dev.scheduler.server.service.NotificationFirer;
 import dev.scheduler.server.service.NotificationHub;
 import dev.scheduler.server.service.NotificationTaskMatcher;
 import dev.scheduler.server.service.OperatorPasswordService;
+import dev.scheduler.server.service.RuntimeConfigService;
 import dev.scheduler.server.web.AvailableHandlerRefs;
 import dev.scheduler.persistence.retry.FailureResolver;
 import dev.scheduler.persistence.retry.RetryPolicy;
@@ -372,6 +375,19 @@ public class Beans {
   @Bean
   WebhookRepository webhookRepository(JdbcTemplate jdbc) {
     return new JdbcWebhookRepository(jdbc);
+  }
+
+  /** 运行时配置仓储(app_runtime_config):白名单可调项热键的读/写落点。 */
+  @Bean
+  RuntimeConfigRepository runtimeConfigRepository(JdbcTemplate jdbc) {
+    return new JdbcRuntimeConfigRepository(jdbc);
+  }
+
+  /** 运行时配置服务:读走 DB 单行(无缓存),写走白名单 + 类型校验 + 记 runtime-config.update 审计。 */
+  @Bean
+  RuntimeConfigService runtimeConfigService(RuntimeConfigRepository runtimeConfigRepository,
+                                            AuditRecorder auditor) {
+    return new RuntimeConfigService(runtimeConfigRepository, auditor);
   }
 
   /** 通知投递器:foreground 拉取到期行、HMAC 签名投递、退避/重试/终态。由 NotificationLoop 周期驱动。 */
