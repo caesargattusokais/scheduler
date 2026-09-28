@@ -24,8 +24,10 @@ class JdbcEventRepositoryTest extends AbstractPostgresTest {
   /** 入队返回自增 id 且按入队字段落库(payload 以 JSON 文本回读,status PENDING)。 */
   @Test
   void enqueue_persistsRowAndReturnsId() throws Exception {
-    long id = repo.enqueue("order.created", "{\"oid\":7}", "evt-1");
-    assertTrue(id > 0);
+    EventRepository.EnqueueResult r = repo.enqueue("order.created", "{\"oid\":7}", "evt-1");
+    assertTrue(r.id() > 0);
+    assertFalse(r.replayed(), "首次入队非重放");
+    long id = r.id();
 
     InboundEvent e = repo.pending(10).get(0);
     assertEquals(id, e.id());
@@ -40,12 +42,14 @@ class JdbcEventRepositoryTest extends AbstractPostgresTest {
     assertNull(e.dispatchedAt());
   }
 
-  /** 相同 dedupe_key 重复提交 → 不插新行,返回既有行 id。 */
+  /** 相同 dedupe_key 重复提交 → 不插新行,返回既有行 id,并标注 replayed。 */
   @Test
   void enqueue_sameDedupeKey_returnsExistingIdNoDuplicate() {
-    long id1 = repo.enqueue("order.created", "{}", "dup-key");
-    long id2 = repo.enqueue("order.created", "{\"diff\":1}", "dup-key");
-    assertEquals(id1, id2, "幂等命中应返回同一行 id");
+    EventRepository.EnqueueResult r1 = repo.enqueue("order.created", "{}", "dup-key");
+    EventRepository.EnqueueResult r2 = repo.enqueue("order.created", "{\"diff\":1}", "dup-key");
+    assertEquals(r1.id(), r2.id(), "幂等命中应返回同一行 id");
+    assertFalse(r1.replayed(), "首次入队非重放");
+    assertTrue(r2.replayed(), "幂等命中应标注 replayed");
     assertEquals(1L, jdbc.queryForObject("SELECT count(*) FROM app_task_event", Long.class),
         "不得重复插入");
     assertEquals("{}", repo.pending(10).get(0).payload(), "重放不改既有 payload");
@@ -54,8 +58,8 @@ class JdbcEventRepositoryTest extends AbstractPostgresTest {
   /** pending 仅返回 PENDING 行;DISPATCHED 不可见。 */
   @Test
   void pending_filtersByStatus() {
-    long p1 = repo.enqueue("a.b", "{}", "k1");
-    long p2 = repo.enqueue("a.b", "{}", "k2");
+    long p1 = repo.enqueue("a.b", "{}", "k1").id();
+    long p2 = repo.enqueue("a.b", "{}", "k2").id();
     repo.markDispatched(p1, 7L, 11L);
 
     List<InboundEvent> pending = repo.pending(10);
@@ -66,7 +70,7 @@ class JdbcEventRepositoryTest extends AbstractPostgresTest {
   /** markDispatched:回填 task_id/execution_id、置 DISPATCHED、dispatched_at 落库;CAS 幂等(重复调用 0 行)。 */
   @Test
   void markDispatched_backfillsAndIsIdempotent() {
-    long id = repo.enqueue("a.b", "{}", "d1");
+    long id = repo.enqueue("a.b", "{}", "d1").id();
     repo.markDispatched(id, 42L, 99L);
 
     InboundEvent e = repo.findById(id).orElseThrow();
@@ -84,7 +88,7 @@ class JdbcEventRepositoryTest extends AbstractPostgresTest {
   /** markDispatched 可传 null 回填(事件无订阅者,仅标记消费)。 */
   @Test
   void markDispatched_allowsNullBackfill() {
-    long id = repo.enqueue("a.b", "{}", "null1");
+    long id = repo.enqueue("a.b", "{}", "null1").id();
     repo.markDispatched(id, null, null);
     InboundEvent e = repo.findById(id).orElseThrow();
     assertEquals(InboundEvent.STATUS_DISPATCHED, e.status());
@@ -95,9 +99,9 @@ class JdbcEventRepositoryTest extends AbstractPostgresTest {
   /** findPage 按 id 降序分页,count 为全量。 */
   @Test
   void findPage_ordersDescAndCounts() {
-    long e1 = repo.enqueue("a.b", "{}", "p1");
-    long e2 = repo.enqueue("a.b", "{}", "p2");
-    long e3 = repo.enqueue("a.b", "{}", "p3");
+    long e1 = repo.enqueue("a.b", "{}", "p1").id();
+    long e2 = repo.enqueue("a.b", "{}", "p2").id();
+    long e3 = repo.enqueue("a.b", "{}", "p3").id();
 
     assertEquals(3L, repo.count());
     List<InboundEvent> page = repo.findPage(10, 0);
