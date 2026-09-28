@@ -182,21 +182,23 @@ public class WorkerConfig {
       } catch (Throwable t) {
         log.warn("worker.capacity hot-read failed; keeping current capacity {}", target.get(), t);
       }
-      if (activeClaims.incrementAndGet() > target.get()) {
-        activeClaims.decrementAndGet(); // 满了,让位
-        return;
-      }
+      // 进闸先计入在途:stopAndDrain 以 inflight 为排空依据,凡进得本 tick 的认领必被计入待其完成,
+      // 关门瞬间不会漏排一条在途。让位(activeClaims 超 target)的瞬时计数随即在 finally 递减,无害。
+      inflight.incrementAndGet();
       try {
-        inflight.incrementAndGet();
+        if (activeClaims.incrementAndGet() > target.get()) {
+          activeClaims.decrementAndGet(); // 满了,让位
+          return;
+        }
         try {
           worker.workOne();
         } finally {
-          inflight.decrementAndGet();
+          activeClaims.decrementAndGet();
         }
       } catch (Throwable t) {
         log.warn("worker claim loop tick failed; continuing next tick", t);
       } finally {
-        activeClaims.decrementAndGet();
+        inflight.decrementAndGet();
       }
     }
 
