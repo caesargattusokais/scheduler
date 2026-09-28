@@ -57,6 +57,8 @@ public interface DagRepository {
   List<Dag> findEnabledDependents(long upstreamDagId);
   List<DagNode> findNodes(long dagId);
   List<DagEdge> findEdges(long dagId);
+  /** 通知订阅的 DAG 匹配:返回将 taskId 作为节点之一的 DAG id 去重列表(任务维度订阅,按「任务所属 DAG」命中);不在任何 DAG → 空。 */
+  List<Long> findDagIdsContainingTask(long taskId);
   void setPaused(long dagId, boolean paused);
 
   // ---- 运行 ----

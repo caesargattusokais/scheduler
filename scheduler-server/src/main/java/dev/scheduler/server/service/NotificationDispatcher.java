@@ -39,13 +39,16 @@ public class NotificationDispatcher {
   private final WebhookRepository webhooks;
   private final RestTemplate rest;
   private final ObjectMapper json;
+  private final NotificationTaskMatcher taskMatcher;
 
   public NotificationDispatcher(NotificationRepository notifications, WebhookRepository webhooks,
-                                RestTemplate rest, ObjectMapper json) {
+                                RestTemplate rest, ObjectMapper json,
+                                NotificationTaskMatcher taskMatcher) {
     this.notifications = notifications;
     this.webhooks = webhooks;
     this.rest = rest;
     this.json = json;
+    this.taskMatcher = taskMatcher;
   }
 
   /** 单次投递 pass:处理最多 BATCH 条到期行。返回成功 markSent 的行数(供指标/日志)。 */
@@ -66,6 +69,7 @@ public class NotificationDispatcher {
     for (Webhook w : webhooks.list()) {
       if (!w.enabled() || w.url() == null || w.url().isBlank()) continue;
       if (!subscribed(w, n.kind())) continue;
+      if (!taskMatcher.matches(w, n)) continue; // 任务维度(白/黑名单)过滤:不命中的订阅端点不投。
       DeliveryResult r = deliver(w, n);
       if (r.outcome == Outcome.OK) continue;
       if (r.outcome == Outcome.PERMANENT) {

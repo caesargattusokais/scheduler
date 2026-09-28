@@ -33,6 +33,7 @@ import dev.scheduler.server.service.AuditRetentionService;
 import dev.scheduler.server.service.NotificationDispatcher;
 import dev.scheduler.server.service.NotificationFirer;
 import dev.scheduler.server.service.NotificationHub;
+import dev.scheduler.server.service.NotificationTaskMatcher;
 import dev.scheduler.server.service.OperatorPasswordService;
 import dev.scheduler.server.web.AvailableHandlerRefs;
 import dev.scheduler.persistence.retry.FailureResolver;
@@ -374,12 +375,21 @@ public class Beans {
   }
 
   /** 通知投递器:foreground 拉取到期行、HMAC 签名投递、退避/重试/终态。由 NotificationLoop 周期驱动。 */
+  /** 通知订阅任务维度判定(INCLUDE/EXCLUDE × 任务/DAG):投递器过滤 + controller「投递给」推导同源复用。 */
+  @Bean
+  NotificationTaskMatcher notificationTaskMatcher(ExecutionRepository executions,
+                                                  ShardRepository shards, DagRepository dags) {
+    return new NotificationTaskMatcher(executions, shards, dags);
+  }
+
+  /** 通知投递器:foreground 拉取到期行、HMAC 签名投递、退避/重试/终态。由 NotificationLoop 周期驱动。 */
   @Bean
   NotificationDispatcher notificationDispatcher(NotificationRepository notifications,
                                                 WebhookRepository webhooks,
                                                 RestTemplate notificationRestTemplate,
-                                                ObjectMapper json) {
-    return new NotificationDispatcher(notifications, webhooks, notificationRestTemplate, json);
+                                                ObjectMapper json,
+                                                NotificationTaskMatcher taskMatcher) {
+    return new NotificationDispatcher(notifications, webhooks, notificationRestTemplate, json, taskMatcher);
   }
 
   /** 通知投递循环:leader 门控,周期把到期通知投给已订阅 webhook;失败兜底不杀线程。webhooks 空 → no-op。 */

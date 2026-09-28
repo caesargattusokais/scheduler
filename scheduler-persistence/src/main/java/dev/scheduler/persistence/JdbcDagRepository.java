@@ -239,6 +239,10 @@ public class JdbcDagRepository implements DagRepository {
   @Override public List<DagNode> findNodes(long dagId) {
     return jdbc.query("SELECT * FROM app_dag_node WHERE dag_id=? ORDER BY sort_order, id", NODE_MAP, dagId);
   }
+  @Override public List<Long> findDagIdsContainingTask(long taskId) {
+    return jdbc.query("SELECT DISTINCT dag_id FROM app_dag_node WHERE task_id = ? ORDER BY dag_id",
+        (rs, row) -> rs.getLong("dag_id"), taskId);
+  }
   @Override public List<DagEdge> findEdges(long dagId) {
     return jdbc.query("SELECT * FROM dag_edge WHERE dag_id=? ORDER BY id", EDGE_MAP, dagId);
   }

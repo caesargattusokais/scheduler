@@ -6,11 +6,13 @@ import java.util.List;
 public interface WebhookRepository {
   List<Webhook> list();
 
-  long create(String url, String secret, List<String> kinds, boolean enabled, int maxAttempts, long backoffMs);
+  long create(String url, String secret, List<String> kinds, boolean enabled, int maxAttempts, long backoffMs,
+              String scopeMode, List<Long> selectedTaskIds, List<Long> selectedDagIds);
 
   /** 更新;返回是否真的更新到(id 存在)。 */
   boolean update(long id, String url, String secret, List<String> kinds, boolean enabled,
-                 int maxAttempts, long backoffMs);
+                 int maxAttempts, long backoffMs,
+                 String scopeMode, List<Long> selectedTaskIds, List<Long> selectedDagIds);
 
   /** 删除;返回是否真的删到(id 存在)。 */
   boolean delete(long id);

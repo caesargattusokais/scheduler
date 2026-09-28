@@ -219,7 +219,8 @@ export interface CreateEventRequest {
 }
 
 // ---- 通知告警闭环(4-1):webhook 订阅 + 投递历史 ----
-/** webhook 订阅行(镜像 persistence.Webhook):kinds 空数组 = 订阅全部 event kind。 */
+/** webhook 订阅行(镜像 persistence.Webhook):kinds 空数组 = 订阅全部 event kind。
+ *  scopeMode ALL/INCLUDE/EXCLUDE;INCLUDE 时按 selectedTaskIds/selectedDagIds 白名单过滤,EXCLUDE 为黑名单。 */
 export interface OutboundWebhook {
   id: number;
   url: string;
@@ -229,8 +230,12 @@ export interface OutboundWebhook {
   maxAttempts: number;
   backoffMs: number;
   createdAt: string;
+  scopeMode: 'ALL' | 'INCLUDE' | 'EXCLUDE';
+  selectedTaskIds: number[];
+  selectedDagIds: number[];
 }
-/** 建/改 webhook 请求体:url 必填;kinds 缺省空(订阅全部);enabled/maxAttempts/backoffMs 缺省由后端给默认 */
+/** 建/改 webhook 请求体:url 必填;kinds 缺省空(订阅全部);enabled/maxAttempts/backoffMs 缺省由后端给默认;
+ *  scopeMode 缺省 ALL,selectedTaskIds/selectedDagIds 为任务维度选中集。 */
 export interface WebhookRequest {
   url: string;
   secret?: string;
@@ -238,6 +243,9 @@ export interface WebhookRequest {
   enabled?: boolean;
   maxAttempts?: number;
   backoffMs?: number;
+  scopeMode?: 'ALL' | 'INCLUDE' | 'EXCLUDE';
+  selectedTaskIds?: number[];
+  selectedDagIds?: number[];
 }
 // ---- 4-2 执行 SLO 指标(DB 快照聚合) ----
 /** GET /api/v1/metrics/executions 快照:近窗父延迟 p50/p95、分片均长、per-task 吞吐/成功率、近窗失败细分。 */

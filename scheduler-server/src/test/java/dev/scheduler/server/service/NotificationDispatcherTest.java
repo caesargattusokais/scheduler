@@ -4,8 +4,11 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import dev.scheduler.persistence.DagRepository;
+import dev.scheduler.persistence.ExecutionRepository;
 import dev.scheduler.persistence.NotificationRepository;
 import dev.scheduler.persistence.OutboundNotification;
+import dev.scheduler.persistence.ShardRepository;
 import dev.scheduler.persistence.Webhook;
 import dev.scheduler.persistence.WebhookRepository;
 import java.nio.charset.StandardCharsets;
@@ -28,6 +31,8 @@ import org.springframework.test.web.client.MockRestServiceServer;
 import org.springframework.test.web.client.RequestMatcher;
 import org.springframework.test.web.client.response.MockRestResponseCreators;
 import org.springframework.web.client.RestTemplate;
+
+import static org.mockito.Mockito.mock;
 
 /**
  * NotificationDispatcher 纯单测:HMAC 签名、kinds 订阅过滤、退避/重试预算/终态分类。
@@ -52,7 +57,10 @@ class NotificationDispatcherTest {
     rest = new RestTemplate();
     server = MockRestServiceServer.createServer(rest);
     json = new ObjectMapper();
-    dispatcher = new NotificationDispatcher(fake, hooks, rest, json);
+    // 既有用例均 ALL 范围(任务维度不参与判定),matcher 的仓储 mock 不会被触碰。
+    NotificationTaskMatcher matcher = new NotificationTaskMatcher(
+        mock(ExecutionRepository.class), mock(ShardRepository.class), mock(DagRepository.class));
+    dispatcher = new NotificationDispatcher(fake, hooks, rest, json, matcher);
   }
 
   @AfterEach
@@ -242,9 +250,11 @@ class NotificationDispatcherTest {
     void add(Webhook w) { hooks.add(w); }
     @Override public List<Webhook> list() { return new ArrayList<>(hooks); }
     @Override public long create(String url, String secret, List<String> kinds, boolean enabled,
-                                 int maxAttempts, long backoffMs) { return 1; }
+                                 int maxAttempts, long backoffMs, String scopeMode,
+                                 List<Long> selectedTaskIds, List<Long> selectedDagIds) { return 1; }
     @Override public boolean update(long id, String url, String secret, List<String> kinds,
-                                    boolean enabled, int maxAttempts, long backoffMs) { return true; }
+                                    boolean enabled, int maxAttempts, long backoffMs, String scopeMode,
+                                    List<Long> selectedTaskIds, List<Long> selectedDagIds) { return true; }
     @Override public boolean delete(long id) { return true; }
   }
 

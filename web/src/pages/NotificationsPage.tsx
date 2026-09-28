@@ -2,9 +2,9 @@
 import { useEffect, useState } from 'react';
 import Pager from '../components/Pager';
 import {
-  createWebhook, deleteWebhook, listNotifications, listWebhooks, updateWebhook,
+  createWebhook, deleteWebhook, listDags, listNotifications, listTasks, listWebhooks, updateWebhook,
 } from '../api/client';
-import { OutboundNotification, OutboundWebhook, Page } from '../api/types';
+import { Dag, OutboundNotification, OutboundWebhook, Page, Task } from '../api/types';
 
 const KINDS_SAMPLE = 'execution.completed, execution.failed';
 
@@ -50,6 +50,12 @@ export default function NotificationsPage() {
   const [kinds, setKinds] = useState('');
   const [maxAttempts, setMaxAttempts] = useState(5);
   const [statusFilter, setStatusFilter] = useState('');
+  // 任务维度过滤 scope:ALL=全部 / INCLUDE=白名单 / EXCLUDE=黑名单。
+  const [scopeMode, setScopeMode] = useState<'ALL' | 'INCLUDE' | 'EXCLUDE'>('ALL');
+  const [selTasks, setSelTasks] = useState<number[]>([]);
+  const [selDags, setSelDags] = useState<number[]>([]);
+  const [tasks, setTasks] = useState<Task[]>([]);
+  const [dags, setDags] = useState<Dag[]>([]);
 
   const loadHooks = async () => {
     try { setHooks(await listWebhooks()); setErr(null); }
@@ -61,15 +67,26 @@ export default function NotificationsPage() {
       setErr(null);
     } catch (e) { setErr(String(e)); }
   };
-  useEffect(() => { loadHooks(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, []);
+  useEffect(() => {
+    loadHooks();
+    listTasks({ limit: 500 }).then((p) => setTasks(p.items)).catch(() => { /* 任务可选:失败不阻断页面 */ });
+    listDags({ limit: 500 }).then((p) => setDags(p.items)).catch(() => { /* DAG 可选:失败不阻断页面 */ });
+    /* eslint-disable-next-line react-hooks/exhaustive-deps */
+  }, []);
   useEffect(() => { loadNotifs(0, 20); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [statusFilter]);
 
   const submit = async () => {
     if (!url.trim()) { setErr('订阅 URL 必填'); return; }
+    if (scopeMode === 'INCLUDE' && selTasks.length === 0 && selDags.length === 0) {
+      setErr('白名单(INCLUDE)至少选择一个任务或 DAG'); return;
+    }
     const body = {
       url: url.trim(),
       ...(kinds.trim() ? { kinds: kinds.split(',').map((k) => k.trim()).filter(Boolean) } : {}),
       maxAttempts,
+      ...(scopeMode !== 'ALL' ? { scopeMode } : {}),
+      ...(selTasks.length > 0 ? { selectedTaskIds: selTasks } : {}),
+      ...(selDags.length > 0 ? { selectedDagIds: selDags } : {}),
     };
     try {
       if (id == null) await createWebhook(body);
@@ -85,6 +102,7 @@ export default function NotificationsPage() {
       await updateWebhook(h.id, {
         url: h.url, secret: h.secret ?? undefined, kinds: h.kinds,
         enabled: !h.enabled, maxAttempts: h.maxAttempts, backoffMs: h.backoffMs,
+        scopeMode: h.scopeMode, selectedTaskIds: h.selectedTaskIds, selectedDagIds: h.selectedDagIds,
       });
       await loadHooks();
     } catch (e) { setErr(String(e)); }
@@ -96,7 +114,10 @@ export default function NotificationsPage() {
     catch (e) { setErr(String(e)); }
   };
 
-  const resetForm = () => { setId(null); setUrl(''); setKinds(''); setMaxAttempts(5); };
+  const resetForm = () => {
+    setId(null); setUrl(''); setKinds(''); setMaxAttempts(5);
+    setScopeMode('ALL'); setSelTasks([]); setSelDags([]);
+  };
 
   return (
     <div>
@@ -132,6 +153,49 @@ export default function NotificationsPage() {
             {id == null ? '创建' : '保存'}
           </button>
         </div>
+        <div className="mt-3 border-t border-slate-100 pt-3">
+          <span className="label">任务范围</span>
+          <div className="mt-1 flex flex-wrap items-center gap-3">
+            <label className="flex items-center gap-1 text-sm">
+              <input type="radio" checked={scopeMode === 'ALL'} onChange={() => setScopeMode('ALL')} /> 全部(all)
+            </label>
+            <label className="flex items-center gap-1 text-sm">
+              <input type="radio" checked={scopeMode === 'INCLUDE'} onChange={() => setScopeMode('INCLUDE')} /> 白名单(仅选中的任务/DAG)
+            </label>
+            <label className="flex items-center gap-1 text-sm">
+              <input type="radio" checked={scopeMode === 'EXCLUDE'} onChange={() => setScopeMode('EXCLUDE')} /> 黑名单(排除选中的任务/DAG)
+            </label>
+          </div>
+          {scopeMode !== 'ALL' && (
+            <div className="mt-2 flex flex-wrap items-start gap-3">
+              <label className="field grow">
+                <span className="label">{scopeMode === 'INCLUDE' ? '白名单任务' : '黑名单任务'}(多选)</span>
+                <select className="input" multiple
+                  value={selTasks.map(String)}
+                  onChange={(e) => {
+                    const v = Array.from(e.target.selectedOptions, (o) => Number(o.value));
+                    setSelTasks(v);
+                  }}>
+                  {tasks.map((t) => (
+                    <option key={t.id} value={String(t.id)}>{t.name} (#{t.id})</option>
+                  ))}
+                </select>
+                {tasks.length === 0 && <span className="text-xs text-slate-400">暂无任务可选</span>}
+              </label>
+              <label className="field grow">
+                <span className="label">{scopeMode === 'INCLUDE' ? '白名单 DAG' : '黑名单 DAG'}(多选)</span>
+                <select className="input" multiple
+                  value={selDags.map(String)}
+                  onChange={(e) => setSelDags(Array.from(e.target.selectedOptions, (o) => Number(o.value)))}>
+                  {dags.map((d) => (
+                    <option key={d.id} value={String(d.id)}>{d.name} (#{d.id})</option>
+                  ))}
+                </select>
+                {dags.length === 0 && <span className="text-xs text-slate-400">暂无 DAG 可选</span>}
+              </label>
+            </div>
+          )}
+        </div>
       </div>
 
       <div className="card mb-4 p-4">
@@ -142,13 +206,20 @@ export default function NotificationsPage() {
           <div className="table-wrap">
             <table className="table">
               <thead>
-                <tr><th>URL</th><th>Kinds</th><th>状态</th><th>重试</th><th></th></tr>
+                <tr><th>URL</th><th>Kinds</th><th>任务范围</th><th>状态</th><th>重试</th><th></th></tr>
               </thead>
               <tbody>
                 {hooks.map((h) => (
                   <tr key={h.id}>
                     <td className="font-mono text-sm">{h.enabled ? h.url : <span className="text-slate-400">{h.url}</span>}</td>
                     <td className="text-sm">{h.kinds.length === 0 ? <span className="text-slate-400">全部</span> : h.kinds.join(', ')}</td>
+                    <td className="text-sm">
+                      {h.scopeMode === 'INCLUDE'
+                        ? <span className="rounded bg-blue-100 px-1.5 py-0.5 text-xs font-medium text-blue-700">白名单{h.selectedTaskIds.length + h.selectedDagIds.length}项</span>
+                        : h.scopeMode === 'EXCLUDE'
+                        ? <span className="rounded bg-violet-100 px-1.5 py-0.5 text-xs font-medium text-violet-700">黑名单{h.selectedTaskIds.length + h.selectedDagIds.length}项</span>
+                        : <span className="text-slate-400">全部</span>}
+                    </td>
                     <td>{h.enabled
                       ? <span className="rounded bg-emerald-100 px-1.5 py-0.5 text-xs font-medium text-emerald-700">启用</span>
                       : <span className="rounded bg-slate-200 px-1.5 py-0.5 text-xs font-medium text-slate-600">停用</span>}</td>
@@ -157,7 +228,10 @@ export default function NotificationsPage() {
                       <button className="btn btn-secondary" title={h.enabled ? '停用:不再向其投递' : '启用:恢复投递'}
                         onClick={() => toggle(h)}>{h.enabled ? '停用' : '启用'}</button>
                       <button className="btn btn-secondary" title="编辑该订阅"
-                        onClick={() => { setId(h.id); setUrl(h.url); setKinds(h.kinds.join(', ')); setMaxAttempts(h.maxAttempts); }}>编辑</button>
+                        onClick={() => {
+                        setId(h.id); setUrl(h.url); setKinds(h.kinds.join(', ')); setMaxAttempts(h.maxAttempts);
+                        setScopeMode(h.scopeMode); setSelTasks(h.selectedTaskIds); setSelDags(h.selectedDagIds);
+                      }}>编辑</button>
                       <button className="btn btn-secondary" title="删除该订阅(历史保留)"
                         onClick={() => remove(h)}>删除</button>
                     </td>
