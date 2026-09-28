@@ -91,7 +91,8 @@ class WorkerLoopTest extends AbstractExecutorWorkerTest {
     long taskId = createTask(3);
     seedParentAndShards(taskId, 3);
 
-    WorkerConfig.WorkLoop loop = new WorkerConfig.WorkLoop(newWorker("worker-a", registry), 2, 10);
+    WorkerConfig.WorkLoop loop =
+        new WorkerConfig.WorkLoop(newWorker("worker-a", registry), 2, 32, 10, new WorkerRuntimeConfig(jdbc));
     try {
       // 两个执行线程各自认领一片并阻塞在 handle → 恰好 2 片在途,第 3 片无空闲槽位认领。
       assertTrue(entered.await(5, TimeUnit.SECONDS), "2 个槽位各认领一片并进入 handler");

@@ -35,6 +35,12 @@ public class JdbcWorkerRepository implements WorkerRepository {
   }
 
   @Override
+  public void markOffline(String workerId, Instant at) {
+    // last_seen 置为 at(极早)→ findAllAlive(now-30s)不再返回本 worker(除非再刷心跳)
+    jdbc.update("UPDATE worker SET last_seen = ? WHERE id = ?", java.sql.Timestamp.from(at), workerId);
+  }
+
+  @Override
   public List<WorkerRegistration> findAllAlive(Instant lastSeenAtLeast) {
     return jdbc.query("SELECT id, refs, last_seen, status FROM worker "
         + "WHERE status='ALIVE' AND last_seen >= ?", MAP, java.sql.Timestamp.from(lastSeenAtLeast));

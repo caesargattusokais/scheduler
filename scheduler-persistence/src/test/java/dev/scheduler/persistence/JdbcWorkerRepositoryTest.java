@@ -25,6 +25,17 @@ class JdbcWorkerRepositoryTest extends AbstractPostgresTest {
         jdbc.queryForObject("SELECT refs FROM worker WHERE id='w1'", String.class));
   }
 
+  /** 停机退位:markOffline 把 last_seen 置极早,worker 立即离开 findAllAlive(now-30s) 视界(行仍保留)。 */
+  @Test
+  void markOffline_excludesWorkerFromAliveWindow() {
+    repo.upsertHeartbeat(new WorkerRegistration("w1", List.of("demo"), BASE.plusSeconds(60), "ALIVE"));
+    repo.markOffline("w1", BASE.minusSeconds(600));
+    assertTrue(repo.findAllAlive(BASE.minusSeconds(30)).stream().noneMatch(w -> w.id().equals("w1")),
+        "markOffline 后 w1 离开 30s 存活视界");
+    assertEquals("w1", jdbc.queryForObject("SELECT id FROM worker", String.class),
+        "行保留,仅离开存活视界");
+  }
+
   @Test
   void findAllAlive_filtersByStatusAndFreshness() {
     repo.upsertHeartbeat(new WorkerRegistration("fresh", List.of("demo"), BASE.plusSeconds(60), "ALIVE"));

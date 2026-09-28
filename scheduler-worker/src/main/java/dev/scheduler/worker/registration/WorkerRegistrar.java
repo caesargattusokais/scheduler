@@ -27,4 +27,9 @@ public class WorkerRegistrar {
     // 删之零误伤。60s = 2× 读侧 LIVE_WINDOW(AvailableHandlerRefs) + 余量,活行(心跳 ≤10s)永不误删。
     repo.purgeStale(now.minusSeconds(60));
   }
+
+  /** 停机排空完成后调用:把 last_seen 置极早,本 worker 立即离开存活视界,在途分片立可他 worker 认领。幂等。 */
+  public void deregister() {
+    repo.markOffline(workerId, clock.instant().minusSeconds(600));
+  }
 }
