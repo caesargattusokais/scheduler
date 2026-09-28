@@ -215,13 +215,15 @@ public static final class WorkLoop implements DisposableBean {
 
 ## 5. 验收清单(对照 §2)
 
-- [ ] `app_runtime_config` 表 + 仓库 + service + ADMIN 端点 + 前端页齐备,白名单/类型校验 + 审计留痕。
-- [ ] 7 个 server 循环改 `ConfigurableLoop`,`delay` 每拍重读 → 改 DB 值下一拍生效。
-- [ ] worker.capacity 热键增/减认领拍有效。
-- [ ] 全局 suspend:置位全循环停拍,清位恢复。
-- [ ] worker 停机排空:在途执行不被丢;`deregister` 后立即可被认领。
-- [ ] server 停机释放 advisory lock,另一副本立即选主。
-- [ ] 全量 `mvn -o test` BUILD SUCCESS。
+> **实现**:并列各 feat commit(f30a340 V30+仓库 / 5bc4fe5 Service+Keys / 6b0da12 Controller+端点 / 3cbe83c 循环改造+leader 停机 / a326f18 worker 排空+容量热改 + 卫生提交 527c472 / db62912)。全量 `mvn -o test` BUILD SUCCESS、`web npm run build` 绿。
+
+- [✓] `app_runtime_config` 表 + 仓库 + service + ADMIN 端点 + 前端页齐备,白名单/类型校验 + 审计留痕。
+- [✓] 7 个 server 循环改 `ConfigurableLoop`,`delay` 每拍重读 → 改 DB 值下一拍生效。
+- [✓] worker.capacity 热键增/减认领拍有效。
+- [✓] 全局 suspend:置位全循环停拍,清位恢复。
+- [✓] worker 停机排空:在途执行不被丢;`deregister` 后立即可被认领。
+- [✓] server 停机释放 advisory lock,另一副本立即选主。
+- [✓] 全量 `mvn -o test` BUILD SUCCESS。
 
 ---
 
