@@ -1,5 +1,6 @@
 // web/src/pages/NotificationsPage.tsx —— 通知告警闭环(4-1):webhook 订阅管理(写 ADMIN)+ 投递历史(读)。
 import { useEffect, useState } from 'react';
+import MultiSelect from '../components/MultiSelect';
 import Pager from '../components/Pager';
 import {
   createWebhook, deleteWebhook, listDags, listNotifications, listTasks, listWebhooks, updateWebhook,
@@ -168,31 +169,20 @@ export default function NotificationsPage() {
           </div>
           {scopeMode !== 'ALL' && (
             <div className="mt-2 flex flex-wrap items-start gap-3">
-              <label className="field grow">
-                <span className="label">{scopeMode === 'INCLUDE' ? '白名单任务' : '黑名单任务'}(多选)</span>
-                <select className="input" multiple
-                  value={selTasks.map(String)}
-                  onChange={(e) => {
-                    const v = Array.from(e.target.selectedOptions, (o) => Number(o.value));
-                    setSelTasks(v);
-                  }}>
-                  {tasks.map((t) => (
-                    <option key={t.id} value={String(t.id)}>{t.name} (#{t.id})</option>
-                  ))}
-                </select>
-                {tasks.length === 0 && <span className="text-xs text-slate-400">暂无任务可选</span>}
-              </label>
-              <label className="field grow">
-                <span className="label">{scopeMode === 'INCLUDE' ? '白名单 DAG' : '黑名单 DAG'}(多选)</span>
-                <select className="input" multiple
-                  value={selDags.map(String)}
-                  onChange={(e) => setSelDags(Array.from(e.target.selectedOptions, (o) => Number(o.value)))}>
-                  {dags.map((d) => (
-                    <option key={d.id} value={String(d.id)}>{d.name} (#{d.id})</option>
-                  ))}
-                </select>
-                {dags.length === 0 && <span className="text-xs text-slate-400">暂无 DAG 可选</span>}
-              </label>
+              <MultiSelect
+                label={scopeMode === 'INCLUDE' ? '白名单任务' : '黑名单任务'}
+                options={tasks.map((t) => ({ id: t.id, name: t.name }))}
+                selected={selTasks}
+                onChange={setSelTasks}
+                empty="暂无可选任务(创建任务后出现)"
+              />
+              <MultiSelect
+                label={scopeMode === 'INCLUDE' ? '白名单 DAG' : '黑名单 DAG'}
+                options={dags.map((d) => ({ id: d.id, name: d.name }))}
+                selected={selDags}
+                onChange={setSelDags}
+                empty="暂无可选 DAG(创建工作流后出现)"
+              />
             </div>
           )}
         </div>
