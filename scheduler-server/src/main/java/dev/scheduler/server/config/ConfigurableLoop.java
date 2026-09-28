@@ -39,12 +39,26 @@ public abstract class ConfigurableLoop implements DisposableBean {
   }
 
   private void schedule() {
-    pool.schedule(this::tick, currentDelay(), TimeUnit.MILLISECONDS);
+    long delay = fallbackMs;
+    try {
+      delay = currentDelay(); // DB 值优先;延迟读取失败(如宕库)回落兜底,不杀线程
+    } catch (Throwable t) {
+      log.warn("loop {} delay read failed; using fallback {}ms", delayKey, fallbackMs, t);
+    }
+    pool.schedule(this::tick, delay > 0 ? delay : fallbackMs, TimeUnit.MILLISECONDS);
   }
 
   private void tick() {
     if (!running) return;
-    if (settings.isSuspended()) {
+    // 任一拍异常都不许杀线程:挂起查询 / loopOnce / 延迟读取各自回落兜底,下一拍照常排定。
+    boolean suspended;
+    try {
+      suspended = settings.isSuspended();
+    } catch (Throwable t) {
+      log.warn("loop {} suspend check failed; continuing as active", delayKey, t);
+      suspended = false;
+    }
+    if (suspended) {
       pool.schedule(this::tick, SUSPEND_HEARTBEAT_MS, TimeUnit.MILLISECONDS);
       return;
     }

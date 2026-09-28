@@ -1549,6 +1549,7 @@ class ApiIntegrationTest {
     assertEquals(1, jdbc.queryForObject(
         "SELECT count(*) FROM execution_shard WHERE id=?", Integer.class, zShard),
         "0 上限任务不入自动重放候选,分片保持原样");
+    loop.destroy(); // 停掉构造时自启的后台调度线程,避免整套 suite 残留真实 DLQ 处置环
   }
 
   @Test

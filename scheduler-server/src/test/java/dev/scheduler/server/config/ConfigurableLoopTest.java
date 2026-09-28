@@ -97,4 +97,24 @@ class ConfigurableLoopTest {
     assertTrue(loop.runs.get() >= 1, "异常后仍执行 loopOnce:runs=" + loop.runs.get());
     loop.destroy();
   }
+
+  @Test void dbOutage_doesNotKillLoop() throws InterruptedException {
+    // settings(DB)不可读(读抛异常)→ 挂起查询回落为「非挂起」+ 延迟读取回落 fallback,循环线程不死亡仍持续排拍。
+    RuntimeConfigRepository throwing = new RuntimeConfigRepository() {
+      @Override public Optional<RuntimeConfigRow> find(String key) {
+        throw new IllegalStateException("db down");
+      }
+      @Override public java.util.List<RuntimeConfigRow> findAll() {
+        throw new IllegalStateException("db down");
+      }
+      @Override public void upsert(String key, String value, String operator) {
+        throw new IllegalStateException("db down");
+      }
+    };
+    RuntimeConfigService svc = new RuntimeConfigService(throwing, null);
+    CountingLoop loop = new CountingLoop(svc);
+    Thread.sleep(200);
+    assertTrue(loop.runs.get() >= 1, "DB 不可读时循环仍执行 loopOnce(回落非挂起 + 回落延迟):runs=" + loop.runs.get());
+    loop.destroy();
+  }
 }
