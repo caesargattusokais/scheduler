@@ -20,6 +20,9 @@ type TrigType = 'cron' | 'interval' | 'event';
 
 const CRON_DEFAULT = '0 */5 * * * *';
 
+/** 事件路由的常用建议项(下拉可点选;未收录的自定义路由走「✎ 自定义」填入)。 */
+const EVENT_ROUTE_SUGGESTIONS = ['order.created', 'order.updated', 'order.cancelled'];
+
 export default function TasksPage() {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [total, setTotal] = useState(0);
@@ -31,6 +34,7 @@ export default function TasksPage() {
   const [editId, setEditId] = useState<number | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [trigType, setTrigType] = useState<TrigType>('cron');
+  const [routePick, setRoutePick] = useState(''); // 事件路由下拉的暂存选中值(选中即加入标签并复位)
 
   const refresh = useCallback(() => {
     listTasks({
@@ -207,9 +211,45 @@ export default function TasksPage() {
               </label>
             ) : trigType === 'event' ? (
               <label className="field">
-                <span className="label">事件路由 (逗号分隔的 route key,入站事件据此触发每事件一轮)</span>
-                <input className="input font-mono" placeholder="order.created, order.updated" value={(form.eventRoutes ?? []).join(', ')}
-                  onChange={(e) => setForm({ ...form, eventRoutes: e.target.value.split(',').map((s) => s.trim()).filter(Boolean) })} />
+                <span className="label">事件路由 (入站事件据此触发、每事件一轮;可多选)</span>
+                {form.eventRoutes && form.eventRoutes.length > 0 && (
+                  <div className="mb-1.5 flex flex-wrap items-center gap-1.5">
+                    {form.eventRoutes.map((r) => (
+                      <span key={r} className="inline-flex items-center gap-1 rounded bg-indigo-50 px-2 py-0.5 font-mono text-xs text-indigo-700">
+                        {r}
+                        <button type="button" className="text-indigo-400 hover:text-indigo-700" title={`移除 ${r}`}
+                          onClick={() => setForm({ ...form, eventRoutes: form.eventRoutes!.filter((x) => x !== r) })}>✕</button>
+                      </span>
+                    ))}
+                  </div>
+                )}
+                <select className="input font-mono" value={routePick}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    setRoutePick(''); // 选中即消费:复位占位,避免同一项无法再次选择
+                    if (!v) return;
+                    if (v === '__custom__') {
+                      const custom = window.prompt('输入自定义 route key:');
+                      const trimmed = custom?.trim();
+                      if (!trimmed) return;
+                      if (!(form.eventRoutes ?? []).includes(trimmed)) {
+                        setForm({ ...form, eventRoutes: [...(form.eventRoutes ?? []), trimmed] });
+                      }
+                      return;
+                    }
+                    if (!(form.eventRoutes ?? []).includes(v)) {
+                      setForm({ ...form, eventRoutes: [...(form.eventRoutes ?? []), v] });
+                    }
+                  }}>
+                  <option value="">+ 添加路由…</option>
+                  {EVENT_ROUTE_SUGGESTIONS
+                    .filter((s) => !form.eventRoutes?.includes(s))
+                    .map((s) => <option key={s} value={s}>{s}</option>)}
+                  {form.eventRoutes
+                    ?.filter((r) => !EVENT_ROUTE_SUGGESTIONS.includes(r))
+                    .map((r) => <option key={r} value={r}>{r}</option>)}
+                  <option value="__custom__">✎ 自定义…</option>
+                </select>
               </label>
             ) : (
               <CronEditor value={form.cron ?? ''} onChange={(v) => setForm({ ...form, cron: v })} />
