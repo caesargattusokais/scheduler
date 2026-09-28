@@ -1,12 +1,19 @@
 package dev.scheduler.server.web;
 
+import dev.scheduler.core.Execution;
+import dev.scheduler.core.Shard;
+import dev.scheduler.core.Task;
 import dev.scheduler.core.TargetType;
+import dev.scheduler.persistence.ExecutionRepository;
 import dev.scheduler.persistence.NotificationRepository;
 import dev.scheduler.persistence.OutboundNotification;
+import dev.scheduler.persistence.ShardRepository;
+import dev.scheduler.persistence.TaskRepository;
 import dev.scheduler.persistence.Webhook;
 import dev.scheduler.persistence.WebhookRepository;
 import dev.scheduler.server.security.CurrentOperator;
 import dev.scheduler.server.service.AuditRecorder;
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import org.springframework.http.HttpStatus;
@@ -31,13 +38,21 @@ import org.springframework.web.server.ResponseStatusException;
 public class NotificationsController {
   private final WebhookRepository webhooks;
   private final NotificationRepository notifications;
+  private final ExecutionRepository executions;
+  private final TaskRepository tasks;
+  private final ShardRepository shards;
   private final AuditRecorder auditor;
   private final CurrentOperator current;
 
   public NotificationsController(WebhookRepository webhooks, NotificationRepository notifications,
+                                 ExecutionRepository executions, TaskRepository tasks,
+                                 ShardRepository shards,
                                  AuditRecorder auditor, CurrentOperator current) {
     this.webhooks = webhooks;
     this.notifications = notifications;
+    this.executions = executions;
+    this.tasks = tasks;
+    this.shards = shards;
     this.auditor = auditor;
     this.current = current;
   }
@@ -89,15 +104,47 @@ public class NotificationsController {
     return Map.of("deleted", id);
   }
 
+  /**
+   * 投递历史每行回答「哪个执行完成 + 结果是什么」:通知行仅存 target_type/target_id 与 firer 落库的
+   * 轻量 payload{parentId, terminal, ...},不带任务名/真实结果。此处对 execution 类通知 join 补全
+   * taskName(经 execution→task)与 resultPayload(执行真实回写)。执行已删除/回收则两项为 null,UI 回落轻量 payload。
+   */
+  public record NotificationView(long id, String kind, String status, String operator, int attempts,
+                                 String lastError, Instant createdAt, Instant sentAt,
+                                 String targetType, Long targetId, String payload,
+                                 String taskName, String resultPayload) {}
+
   @GetMapping("/notifications")
-  public Page<OutboundNotification> listNotifications(
+  public Page<NotificationView> listNotifications(
       @RequestParam(required = false) String kind,
       @RequestParam(required = false) String status,
       @RequestParam(required = false) Integer limit,
       @RequestParam(required = false) Integer offset) {
     Paging p = Paging.of(limit, offset);
-    return new Page<>(notifications.findPage(kind, status, p.limit(), p.offset()),
-        notifications.count(kind, status), p.offset(), p.limit());
+    List<OutboundNotification> rows = notifications.findPage(kind, status, p.limit(), p.offset());
+    List<NotificationView> items = rows.stream()
+        .map(n -> {
+          String taskName = null;
+          String resultPayload = null;
+          if ("execution".equals(n.targetType()) && n.targetId() != null) {
+            Execution ex = executions.findById(n.targetId()).orElse(null);
+            if (ex != null) {
+              Task t = ex.taskId() == null ? null : tasks.findById(ex.taskId()).orElse(null);
+              taskName = t == null ? null : t.name();
+              // 父 execution 仅作 header(结果写于分片),resultPayload 常为 null → 回落首个非空分片结果。
+              resultPayload = ex.resultPayload();
+              if (resultPayload == null) {
+                resultPayload = shards.findShards(ex.id()).stream()
+                    .map(Shard::resultPayload).filter(java.util.Objects::nonNull)
+                    .findFirst().orElse(null);
+              }
+            }
+          }
+          return new NotificationView(n.id(), n.kind(), n.status(), n.operator(), n.attempts(),
+              n.lastError(), n.createdAt(), n.sentAt(),
+              n.targetType(), n.targetId(), n.payload(), taskName, resultPayload);
+        }).toList();
+    return new Page<>(items, notifications.count(kind, status), p.offset(), p.limit());
   }
 
   private Webhook find(long id) {

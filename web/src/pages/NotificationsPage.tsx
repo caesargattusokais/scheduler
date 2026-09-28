@@ -16,6 +16,24 @@ function statusBadge(s: string): string {
     : 'rounded bg-amber-100 px-1.5 py-0.5 text-xs font-medium text-amber-700';
 }
 
+/** 事件类型 → 人话(颜色随语义;未知类型回落为 kind 原文)。 */
+const KIND_LABELS: Record<string, { text: string; cls: string }> = {
+  'execution.completed': { text: '执行完成', cls: 'bg-emerald-100 text-emerald-700' },
+  'execution.failed': { text: '执行失败', cls: 'bg-red-100 text-red-700' },
+  'execution.timeout': { text: '执行超时', cls: 'bg-orange-100 text-orange-700' },
+  'execution.dead_letter': { text: '落入死信', cls: 'bg-slate-200 text-slate-700' },
+};
+const TERMINAL_TEXT: Record<string, string> = {
+  SUCCESS: '成功', FAILED: '失败', TIMEOUT: '超时', DEAD_LETTER: '死信',
+};
+const STATUS_TEXT: Record<string, string> = { SENT: '已送达', PENDING: '待投递', FAILED: '投递失败' };
+
+/** 幂等解析通知 payload(payload JSON 文本 → 对象;解析失败返回 null)。 */
+function parsePayload(s: string | null): Record<string, unknown> | null {
+  if (!s) return null;
+  try { return JSON.parse(s) as Record<string, unknown>; } catch { return null; }
+}
+
 export default function NotificationsPage() {
   const [hooks, setHooks] = useState<OutboundWebhook[]>([]);
   const [notifs, setNotifs] = useState<Page<OutboundNotification>>({ items: [], total: 0, offset: 0, limit: 20 });
@@ -163,19 +181,54 @@ export default function NotificationsPage() {
           <div className="table-wrap">
             <table className="table">
               <thead>
-                <tr><th>Kind</th><th>目标</th><th>状态</th><th>尝试</th><th>错误</th><th>时间</th></tr>
+                <tr><th>事件</th><th>任务 · 执行</th><th>结果</th><th>状态</th><th>错误/说明</th><th>时间</th></tr>
               </thead>
               <tbody>
-                {notifs.items.map((n) => (
-                  <tr key={n.id}>
-                    <td className="font-mono text-sm">{n.kind}</td>
-                    <td className="text-sm">#{n.targetId ?? '—'}</td>
-                    <td><span className={statusBadge(n.status)}>{n.status}</span></td>
-                    <td className="text-sm">{n.attempts}</td>
-                    <td className="max-w-xs truncate text-xs text-slate-500" title={n.lastError ?? ''}>{n.lastError ?? ''}</td>
-                    <td className="whitespace-nowrap text-xs text-slate-500">{new Date(n.createdAt).toLocaleString()}</td>
-                  </tr>
-                ))}
+                {notifs.items.map((n) => {
+                  const p = parsePayload(n.payload);
+                  const terminal = p && typeof p.terminal === 'string'
+                    ? p.terminal as string : null;
+                  const failed = typeof p?.failedShards === 'number' ? p.failedShards as number : null;
+                  const total = typeof p?.shardCount === 'number' ? p.shardCount as number : null;
+                  const kind = KIND_LABELS[n.kind] ?? { text: n.kind, cls: 'bg-slate-100 text-slate-600' };
+                  // 人话任务定位:先 controller join 的任务名,回落「targetType #id」。
+                  const target =
+                    n.taskName
+                      ? <>{n.taskName} <span className="hidden text-slate-400 sm:inline">执行</span><span className="font-mono text-slate-500">#{n.targetId}</span></>
+                      : n.targetType && n.targetId != null
+                        ? <span className="text-slate-500">{n.targetType} #{n.targetId}</span>
+                        : <span className="text-slate-400">—</span>;
+                  return (
+                    <tr key={n.id}>
+                      <td><span className={`rounded px-1.5 py-0.5 text-xs font-medium ${kind.cls}`}>{kind.text}</span></td>
+                      <td className="text-sm font-medium text-slate-700">{target}</td>
+                      <td className="max-w-xs text-sm">
+                        {terminal != null && (
+                          <div>
+                            <span className="font-medium text-slate-700">
+                              {TERMINAL_TEXT[terminal] ?? terminal}
+                              {failed != null && total != null && failed > 0 && (
+                                <span className="ml-1 text-xs font-normal text-slate-500">(失败 {failed}/{total})</span>
+                              )}
+                            </span>
+                            {n.resultPayload && (
+                              <div className="mt-0.5 truncate font-mono text-xs text-slate-500"
+                                title={`结果 payload:${n.resultPayload}`}>结果:{n.resultPayload}</div>
+                            )}
+                          </div>
+                        )}
+                        {terminal == null && <span className="text-slate-400">—</span>}
+                      </td>
+                      <td className="max-w-xs truncate text-xs text-slate-500" title={n.lastError ?? ''}>{n.lastError || '—'}</td>
+                      <td>
+                        <span className={statusBadge(n.status)} title={n.status === 'PENDING' ? '待 leader 投递' : n.status === 'FAILED' ? '重试耗尽仍失败' : '接收端已回 200'}>
+                          {STATUS_TEXT[n.status] ?? n.status}{n.attempts > 1 ? `(${n.attempts} 次)` : ''}
+                        </span>
+                      </td>
+                      <td className="whitespace-nowrap text-xs text-slate-500">{n.createdAt ? new Date(n.createdAt).toLocaleString() : '—'}</td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>

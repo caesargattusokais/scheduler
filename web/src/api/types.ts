@@ -250,18 +250,20 @@ export interface ExecutionSlo {
   recentFailures: { failed: number; deadLettered: number; timedOut: number };
 }
 
-/** 出站通知投递历史行(镜像 OutboundNotification):status ∈ PENDING/SENT/FAILED。 */
+/** 出站通知投递历史行(镜像 NotificationView):status ∈ PENDING/SENT/FAILED。
+ *  taskName/resultPayload 为 controller 对 execution 类通知 join 补全;执行已回收则 null。 */
 export interface OutboundNotification {
   id: number;
   kind: string;
   operator: string | null;
-  targetType: string | null;
-  targetId: number | null;
-  payload: string | null; // JSON 文本(展示时 JSON.parse 前 120 字符)
   status: 'PENDING' | 'SENT' | 'FAILED';
   attempts: number;
-  nextRetryAt: string | null;
   lastError: string | null;
   createdAt: string;
   sentAt: string | null;
+  targetType: string | null;
+  targetId: number | null;
+  payload: string | null; // JSON 文本(展示时 JSON.parse)
+  taskName: string | null;
+  resultPayload: string | null;
 }
