@@ -34,6 +34,11 @@ function parsePayload(s: string | null): Record<string, unknown> | null {
   try { return JSON.parse(s) as Record<string, unknown>; } catch { return null; }
 }
 
+/** 投递信封 JSON 缩进美化(悬浮看全文);原始文本则原样返回。 */
+function prettyBody(s: string): string {
+  try { return JSON.stringify(JSON.parse(s), null, 2); } catch { return s; }
+}
+
 export default function NotificationsPage() {
   const [hooks, setHooks] = useState<OutboundWebhook[]>([]);
   const [notifs, setNotifs] = useState<Page<OutboundNotification>>({ items: [], total: 0, offset: 0, limit: 20 });
@@ -181,7 +186,7 @@ export default function NotificationsPage() {
           <div className="table-wrap">
             <table className="table">
               <thead>
-                <tr><th>事件</th><th>任务 · 执行</th><th>结果</th><th>状态</th><th>错误/说明</th><th>时间</th></tr>
+                <tr><th>事件</th><th>任务 · 执行</th><th>结果</th><th>通知内容</th><th>状态</th><th>错误/说明</th><th>时间</th></tr>
               </thead>
               <tbody>
                 {notifs.items.map((n) => {
@@ -218,6 +223,16 @@ export default function NotificationsPage() {
                           </div>
                         )}
                         {terminal == null && <span className="text-slate-400">—</span>}
+                      </td>
+                      <td className="max-w-xs text-xs">
+                        {n.deliveredBody ? (
+                          <span className="block truncate font-mono text-slate-500"
+                            title={`投递内容(HMAC-SHA256 签名即此字节):\n${prettyBody(n.deliveredBody)}`}>
+                            {n.deliveredBody}
+                          </span>
+                        ) : (
+                          <span className="text-slate-400">—</span>
+                        )}
                       </td>
                       <td className="max-w-xs truncate text-xs text-slate-500" title={n.lastError ?? ''}>{n.lastError || '—'}</td>
                       <td>

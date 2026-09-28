@@ -266,4 +266,5 @@ export interface OutboundNotification {
   payload: string | null; // JSON 文本(展示时 JSON.parse)
   taskName: string | null;
   resultPayload: string | null;
+  deliveredBody: string | null; // 投递时 HTTP POST 实际发出的完整 JSON 信封
 }

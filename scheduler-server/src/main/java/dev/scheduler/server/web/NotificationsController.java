@@ -1,5 +1,6 @@
 package dev.scheduler.server.web;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.scheduler.core.Execution;
 import dev.scheduler.core.Shard;
 import dev.scheduler.core.Task;
@@ -14,6 +15,7 @@ import dev.scheduler.persistence.WebhookRepository;
 import dev.scheduler.server.security.CurrentOperator;
 import dev.scheduler.server.service.AuditRecorder;
 import java.time.Instant;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import org.springframework.http.HttpStatus;
@@ -41,18 +43,20 @@ public class NotificationsController {
   private final ExecutionRepository executions;
   private final TaskRepository tasks;
   private final ShardRepository shards;
+  private final ObjectMapper json;
   private final AuditRecorder auditor;
   private final CurrentOperator current;
 
   public NotificationsController(WebhookRepository webhooks, NotificationRepository notifications,
                                  ExecutionRepository executions, TaskRepository tasks,
-                                 ShardRepository shards,
+                                 ShardRepository shards, ObjectMapper json,
                                  AuditRecorder auditor, CurrentOperator current) {
     this.webhooks = webhooks;
     this.notifications = notifications;
     this.executions = executions;
     this.tasks = tasks;
     this.shards = shards;
+    this.json = json;
     this.auditor = auditor;
     this.current = current;
   }
@@ -109,10 +113,15 @@ public class NotificationsController {
    * 轻量 payload{parentId, terminal, ...},不带任务名/真实结果。此处对 execution 类通知 join 补全
    * taskName(经 execution→task)与 resultPayload(执行真实回写)。执行已删除/回收则两项为 null,UI 回落轻量 payload。
    */
+  /**
+   * deliveredBody:投递时经 HTTP POST 实际发出的完整 JSON 信封(与 NotificationDispatcher.buildBody 同构,
+   * 签 HMAC 的就是这份字节)——「通知的内容是什么」的直接答案。
+   */
   public record NotificationView(long id, String kind, String status, String operator, int attempts,
                                  String lastError, Instant createdAt, Instant sentAt,
                                  String targetType, Long targetId, String payload,
-                                 String taskName, String resultPayload) {}
+                                 String taskName, String resultPayload,
+                                 String deliveredBody) {}
 
   @GetMapping("/notifications")
   public Page<NotificationView> listNotifications(
@@ -142,9 +151,27 @@ public class NotificationsController {
           }
           return new NotificationView(n.id(), n.kind(), n.status(), n.operator(), n.attempts(),
               n.lastError(), n.createdAt(), n.sentAt(),
-              n.targetType(), n.targetId(), n.payload(), taskName, resultPayload);
+              n.targetType(), n.targetId(), n.payload(), taskName, resultPayload,
+              deliveredBody(n));
         }).toList();
     return new Page<>(items, notifications.count(kind, status), p.offset(), p.limit());
+  }
+
+  /** 重建投递出去的完整请求体(与 NotificationDispatcher.buildBody 字段/顺序一致);序列化失败回落 null。 */
+  private String deliveredBody(OutboundNotification n) {
+    try {
+      Map<String, Object> m = new LinkedHashMap<>();
+      m.put("id", n.id());
+      m.put("kind", n.kind());
+      m.put("operator", n.operator());
+      m.put("targetType", n.targetType());
+      m.put("targetId", n.targetId());
+      m.put("payload", json.readTree(n.payload() == null ? "{}" : n.payload()));
+      m.put("occurredAt", n.createdAt().toString());
+      return json.writeValueAsString(m);
+    } catch (Exception e) {
+      return null;
+    }
   }
 
   private Webhook find(long id) {
