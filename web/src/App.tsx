@@ -13,6 +13,7 @@ import AuditPage from './pages/AuditPage';
 import OperatorsPage from './pages/OperatorsPage';
 import EventsPage from './pages/EventsPage';
 import NotificationsPage from './pages/NotificationsPage';
+import SettingsPage from './pages/SettingsPage';
 
 const NAV = [
   { to: '/tasks', label: '任务', icon: '▤' },
@@ -24,6 +25,7 @@ const NAV = [
   { to: '/audits', label: '审计', icon: '≡' }, // 第 6 入口
   { to: '/operators', label: '操作者', icon: '☺', adminOnly: true }, // 第 7 入口(操作者目录,仅 ADMIN 可管理/可见)
   { to: '/notifications', label: '通知', icon: '❐' }, // 4-1 入口(webhook 订阅 + 投递历史)
+  { to: '/settings', label: '运行时设置', icon: '⚙' }, // 热键:DB 运行时热更新(写 ADMIN)
 ];
 
 export default function App() {
@@ -105,6 +107,7 @@ export default function App() {
             <Route path="/audits" element={<AuditPage />} />
             <Route path="/operators" element={isAdmin ? <OperatorsPage /> : <Navigate to="/tasks" replace />} />
             <Route path="/notifications" element={<NotificationsPage />} />
+            <Route path="/settings" element={<SettingsPage />} />
             {/* 自助改密页(身份菜单入口;强制改密走上方硬门分支,不经此路由) */}
             <Route path="/force-password" element={<ForcePasswordChange />} />
           </Routes>

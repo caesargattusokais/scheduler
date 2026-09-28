@@ -218,6 +218,15 @@ export interface CreateEventRequest {
   dedupeKey: string;
 }
 
+// ---- 运行时设置(热键,DB 覆盖)——GET 列出全部热键;PUT 改值(ADMIN,写记审计) ----
+export interface RuntimeConfigEntry {
+  key: string;
+  value: string;
+  source: 'default' | 'db';
+  updatedBy: string | null;
+  updatedAt: string | null;
+}
+
 // ---- 通知告警闭环(4-1):webhook 订阅 + 投递历史 ----
 /** webhook 订阅行(镜像 persistence.Webhook):kinds 空数组 = 订阅全部 event kind。
  *  scopeMode ALL/INCLUDE/EXCLUDE;INCLUDE 时按 selectedTaskIds/selectedDagIds 白名单过滤,EXCLUDE 为黑名单。 */

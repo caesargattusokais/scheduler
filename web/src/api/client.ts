@@ -23,6 +23,7 @@ import type {
   Page,
   ParsedMetric,
   RunDetail,
+  RuntimeConfigEntry,
   SessionsRevokeResult,
   Shard,
   Task,
@@ -286,3 +287,14 @@ export interface ListNotificationsParams { kind?: string; status?: string; limit
 /** 投递历史分页(读):按 kind/status 过滤,created_at DESC。 */
 export const listNotifications = (p: ListNotificationsParams = {}): Promise<Page<OutboundNotification>> =>
   req<Page<OutboundNotification>>(`/api/v1/notifications${qstr(p)}`);
+
+// ---- 运行时设置(热键,DB 覆盖重载):GET 列全部;PUT 改值(ADMIN,写记审计) ----
+/** 列出全部运行时热键:包含默认值与 DB 覆盖来源/操作者/时间(读侧全量展示)。 */
+export const listRuntimeConfig = (): Promise<RuntimeConfigEntry[]> =>
+  req<RuntimeConfigEntry[]>('/api/v1/runtime-config');
+/** 改某热键 DB 值(ADMIN;写经审计,下一调度拍生效,无需重启)。返回写入后的完整条目。 */
+export const setRuntimeConfig = (key: string, value: string): Promise<RuntimeConfigEntry> =>
+  req<RuntimeConfigEntry>(`/api/v1/runtime-config/${encodeURIComponent(key)}`, {
+    method: 'PUT',
+    body: JSON.stringify({ value }),
+  });
