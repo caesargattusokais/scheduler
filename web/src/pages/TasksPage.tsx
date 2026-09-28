@@ -181,21 +181,18 @@ export default function TasksPage() {
           <div className="mt-3">
             <div className="mb-2 flex flex-wrap items-center gap-3 text-xs text-slate-600">
               <span className="shrink-0 text-slate-400">触发方式</span>
-              <label className="inline-flex cursor-pointer items-center gap-1">
-                <input type="radio" checked={trigType === 'cron'}
-                  onChange={() => { setTrigType('cron'); setForm((f) => ({ ...f, cron: f.cron ?? CRON_DEFAULT, intervalSeconds: null, eventRoutes: [] })); }} />
-                Cron
-              </label>
-              <label className="inline-flex cursor-pointer items-center gap-1">
-                <input type="radio" checked={trigType === 'interval'}
-                  onChange={() => { setTrigType('interval'); setForm((f) => ({ ...f, cron: null, intervalSeconds: f.intervalSeconds ?? 60, eventRoutes: [] })); }} />
-                间隔 (秒)
-              </label>
-              <label className="inline-flex cursor-pointer items-center gap-1">
-                <input type="radio" checked={trigType === 'event'}
-                  onChange={() => { setTrigType('event'); setForm((f) => ({ ...f, cron: null, intervalSeconds: null, eventRoutes: f.eventRoutes && f.eventRoutes.length ? f.eventRoutes : ['order.created'] })); }} />
-                事件
-              </label>
+              <select className="input w-40" value={trigType}
+                onChange={(e) => {
+                  const v = e.target.value as TrigType;
+                  setTrigType(v);
+                  setForm((f) => v === 'cron' ? { ...f, cron: f.cron ?? CRON_DEFAULT, intervalSeconds: null, eventRoutes: [] }
+                    : v === 'interval' ? { ...f, cron: null, intervalSeconds: f.intervalSeconds ?? 60, eventRoutes: [] }
+                    : { ...f, cron: null, intervalSeconds: null, eventRoutes: f.eventRoutes && f.eventRoutes.length ? f.eventRoutes : ['order.created'] });
+                }}>
+                <option value="cron">Cron</option>
+                <option value="interval">间隔 (秒)</option>
+                <option value="event">事件</option>
+              </select>
               <label className="inline-flex items-center gap-1">
                 <span className="text-slate-400">时区</span>
                 <input className="input w-40 font-mono" value={form.timezone ?? 'UTC'}
