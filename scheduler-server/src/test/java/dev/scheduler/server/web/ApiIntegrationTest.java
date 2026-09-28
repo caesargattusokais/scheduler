@@ -376,6 +376,28 @@ class ApiIntegrationTest {
     assertEquals(1, routes.stream().filter(route::equals).count(), "同一 route_key 只出现一次");
   }
 
+  /** 3b:事件投递记 event.submit 审计(who=当前操作者;重放命中既有行标 replayed=true,不记 payload)。 */
+  @Test
+  void postEvent_recordsAudit_withReplayFlag() throws Exception {
+    String route = "route.audit." + System.nanoTime();
+    String dedupe = "audit-dedupe-" + System.nanoTime();
+    mvc.perform(post("/api/v1/events").contentType(MediaType.APPLICATION_JSON)
+        .content("{\"routeKey\":\"" + route + "\",\"payload\":{\"x\":1},\"dedupeKey\":\"" + dedupe + "\"}"))
+        .andExpect(status().isCreated());
+    // 重放同 dedupeKey → 命中既有行(replayed=true)。
+    mvc.perform(post("/api/v1/events").contentType(MediaType.APPLICATION_JSON)
+        .content("{\"routeKey\":\"" + route + "\",\"payload\":{\"x\":1},\"dedupeKey\":\"" + dedupe + "\"}"))
+        .andExpect(status().isCreated());
+    Long newRow = jdbc.queryForObject(
+        "SELECT count(1) FROM app_audit WHERE action='event.submit' AND meta->>'routeKey'=? AND meta->>'replayed'='false'",
+        Long.class, route);
+    Long replayRow = jdbc.queryForObject(
+        "SELECT count(1) FROM app_audit WHERE action='event.submit' AND meta->>'routeKey'=? AND meta->>'replayed'='true'",
+        Long.class, route);
+    assertEquals(1L, newRow, "新投递记一条非重放审计");
+    assertEquals(1L, replayRow, "重放记一条 replayed=true 审计");
+  }
+
   /** M6.3:表单下拉框的数据源 = 纯存活 worker 注册表并集(与 create/update 校验同源;无进程内 handler)。 */
   @Test
   void handlersEndpoint_listsRegisteredRefs() throws Exception {

@@ -3,7 +3,11 @@ package dev.scheduler.server.web;
 import com.fasterxml.jackson.databind.JsonNode;
 import dev.scheduler.persistence.EventRepository;
 import dev.scheduler.persistence.InboundEvent;
+import dev.scheduler.core.TargetType;
+import dev.scheduler.server.security.CurrentOperator;
+import dev.scheduler.server.service.AuditRecorder;
 import java.util.List;
+import java.util.Map;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -25,9 +29,13 @@ public class EventController {
   public record CreateEventRequest(String routeKey, JsonNode payload, String dedupeKey) {}
 
   private final EventRepository events;
+  private final AuditRecorder auditor;
+  private final CurrentOperator current;
 
-  public EventController(EventRepository events) {
+  public EventController(EventRepository events, AuditRecorder auditor, CurrentOperator current) {
     this.events = events;
+    this.auditor = auditor;
+    this.current = current;
   }
 
   @PostMapping
@@ -38,10 +46,16 @@ public class EventController {
     if (req.dedupeKey() == null || req.dedupeKey().isBlank()) {
       throw new IllegalArgumentException("dedupeKey is required"); // 幂等/防重放源不可缺
     }
-    long id = events.enqueue(req.routeKey(),
+    EventRepository.EnqueueResult res = events.enqueue(req.routeKey(),
         req.payload() == null || req.payload().isNull() ? "{}" : req.payload().toString(), req.dedupeKey());
+    // 事件投递审计:who+路由+幂等键+(是否重放命中既有行);不记 payload(可能敏感/偏大)。
+    auditor.record(current.get(), "event.submit", TargetType.NONE, 0L, Map.of(
+        "eventId", res.id(),
+        "routeKey", req.routeKey(),
+        "dedupeKey", req.dedupeKey(),
+        "replayed", res.replayed()));
     return ResponseEntity.status(HttpStatus.CREATED)
-        .body(events.findById(id).orElseThrow());
+        .body(events.findById(res.id()).orElseThrow());
   }
 
   /** 事件详情:按 id 直读单条(事件页展示分派结果)。 */

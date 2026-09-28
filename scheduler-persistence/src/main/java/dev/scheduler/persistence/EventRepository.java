@@ -6,8 +6,11 @@ import java.util.Optional;
 /** 入站事件 outbox(app_task_event):PENDING 落库 → leader 门控 EventEngine 分派。 */
 public interface EventRepository {
 
-  /** 幂等入队:dedupe_key 唯一(重复提交 → 命中既有行);返回实际落库/以存行的 id。 */
-  long enqueue(String routeKey, String payloadJson, String dedupeKey);
+  /** 入队结果:replayed=true 表示同 dedupeKey 命中既有行(幂等重放,未新建)。 */
+  record EnqueueResult(long id, boolean replayed) {}
+
+  /** 幂等入队:dedupe_key 唯一(重复提交 → 命中既有行);返回落库/以存行 id 及是否为新行。 */
+  EnqueueResult enqueue(String routeKey, String payloadJson, String dedupeKey);
 
   /** 按 id 读单条(供 POST 回显、事件详情)。 */
   Optional<InboundEvent> findById(long id);

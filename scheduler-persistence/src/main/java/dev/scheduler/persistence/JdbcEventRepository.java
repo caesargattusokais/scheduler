@@ -16,14 +16,14 @@ public class JdbcEventRepository implements EventRepository {
       + " task_id, execution_id, created_at, dispatched_at";
 
   @Override
-  public long enqueue(String routeKey, String payloadJson, String dedupeKey) {
+  public EnqueueResult enqueue(String routeKey, String payloadJson, String dedupeKey) {
     String sql = "INSERT INTO app_task_event (route_key, payload_json, dedupe_key)"
         + " VALUES (?, ?::jsonb, ?) ON CONFLICT (dedupe_key) DO NOTHING RETURNING id";
     List<Long> newId = jdbc.query(sql, (rs, i) -> rs.getLong(1), routeKey, payloadJson, dedupeKey);
-    if (!newId.isEmpty()) return newId.get(0);
+    if (!newId.isEmpty()) return new EnqueueResult(newId.get(0), false);
     // 幂等命中既有行 → 返回其 id(重放不新建)。
-    return jdbc.queryForObject("SELECT id FROM app_task_event WHERE dedupe_key = ?",
-        Long.class, dedupeKey);
+    return new EnqueueResult(jdbc.queryForObject("SELECT id FROM app_task_event WHERE dedupe_key = ?",
+        Long.class, dedupeKey), true);
   }
 
   @Override

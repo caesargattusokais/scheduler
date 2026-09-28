@@ -47,7 +47,7 @@ class EventEngineTest extends AbstractTriggerEngineTest {
     var leader = new AdvisoryLockLeaderElection(jdbc);
     try {
       long taskId = createEventTask("order.created");
-      long evtId = events.enqueue("order.created", "{\"oid\":7}", "evt-1");
+      long evtId = events.enqueue("order.created", "{\"oid\":7}", "evt-1").id();
       new EventEngine(events, tasks, shards, leader, 100).scanOnce();
 
       assertEquals(1, countExecutions(taskId), "一条事件 → 一次 run");
@@ -66,7 +66,7 @@ class EventEngineTest extends AbstractTriggerEngineTest {
     var leader = new AdvisoryLockLeaderElection(jdbc);
     try {
       long taskId = createEventTask("order.created");
-      long evtId = events.enqueue("order.created", "{}", "evt-dup");
+      long evtId = events.enqueue("order.created", "{}", "evt-dup").id();
       new EventEngine(events, tasks, shards, leader, 100).scanOnce();
 
       new EventEngine(events, tasks, shards, leader, 100).scanOnce(); // 再扫已 DISPATCHED 行
@@ -78,7 +78,7 @@ class EventEngineTest extends AbstractTriggerEngineTest {
   @Test void dispatch_consumesEventWithoutSubscriber() {
     var leader = new AdvisoryLockLeaderElection(jdbc);
     try {
-      long evtId = events.enqueue("no.subscriber", "{}", "evt-orphan");
+      long evtId = events.enqueue("no.subscriber", "{}", "evt-orphan").id();
       new EventEngine(events, tasks, shards, leader, 100).scanOnce();
 
       InboundEvent e = events.findById(evtId).orElseThrow();
