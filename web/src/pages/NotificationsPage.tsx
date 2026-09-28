@@ -186,7 +186,7 @@ export default function NotificationsPage() {
           <div className="table-wrap">
             <table className="table">
               <thead>
-                <tr><th>事件</th><th>任务 · 执行</th><th>结果</th><th>通知内容</th><th>状态</th><th>错误/说明</th><th>时间</th></tr>
+                <tr><th>事件</th><th>任务 · 执行</th><th>结果</th><th>通知内容</th><th>投递给</th><th>状态</th><th>错误/说明</th><th>时间</th></tr>
               </thead>
               <tbody>
                 {notifs.items.map((n) => {
@@ -232,6 +232,15 @@ export default function NotificationsPage() {
                           </span>
                         ) : (
                           <span className="text-slate-400">—</span>
+                        )}
+                      </td>
+                      <td className="max-w-xs text-xs">
+                        {n.deliveredTo.length > 0 ? (
+                          <span className="block truncate font-mono text-slate-500" title={n.deliveredTo.join('、')}>
+                            {n.deliveredTo.join('、')}
+                          </span>
+                        ) : (
+                          <span className="text-slate-400">无订阅</span>
                         )}
                       </td>
                       <td className="max-w-xs truncate text-xs text-slate-500" title={n.lastError ?? ''}>{n.lastError || '—'}</td>

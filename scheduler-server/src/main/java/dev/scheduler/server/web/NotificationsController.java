@@ -114,6 +114,8 @@ public class NotificationsController {
    * taskName(经 execution→task)与 resultPayload(执行真实回写)。执行已删除/回收则两项为 null,UI 回落轻量 payload。
    */
   /**
+   * deliveredTo:该通知投往的 webhook 端点列表。投递是「一条 outbox 行广播给所有 kinds 匹配的启用 webhook,
+   * 全部收到 200 才标 SENT」,故 SENT 行此列表即实际收到者;PENDING/FAILED 行为投递目标(未达的端点由 lastError 指出)。
    * deliveredBody:投递时经 HTTP POST 实际发出的完整 JSON 信封(与 NotificationDispatcher.buildBody 同构,
    * 签 HMAC 的就是这份字节)——「通知的内容是什么」的直接答案。
    */
@@ -121,7 +123,7 @@ public class NotificationsController {
                                  String lastError, Instant createdAt, Instant sentAt,
                                  String targetType, Long targetId, String payload,
                                  String taskName, String resultPayload,
-                                 String deliveredBody) {}
+                                 String deliveredBody, List<String> deliveredTo) {}
 
   @GetMapping("/notifications")
   public Page<NotificationView> listNotifications(
@@ -131,6 +133,7 @@ public class NotificationsController {
       @RequestParam(required = false) Integer offset) {
     Paging p = Paging.of(limit, offset);
     List<OutboundNotification> rows = notifications.findPage(kind, status, p.limit(), p.offset());
+    List<Webhook> webhookTargets = webhooks.list();
     List<NotificationView> items = rows.stream()
         .map(n -> {
           String taskName = null;
@@ -152,9 +155,18 @@ public class NotificationsController {
           return new NotificationView(n.id(), n.kind(), n.status(), n.operator(), n.attempts(),
               n.lastError(), n.createdAt(), n.sentAt(),
               n.targetType(), n.targetId(), n.payload(), taskName, resultPayload,
-              deliveredBody(n));
+              deliveredBody(n), subscribedUrls(webhookTargets, n.kind()));
         }).toList();
     return new Page<>(items, notifications.count(kind, status), p.offset(), p.limit());
+  }
+
+  /** 该 kind 的投递目标:启用且订阅了该 kind 的 webhook URL(kinds 为空 = 订阅全部,语义同 dispatcher.subscribed)。 */
+  private static List<String> subscribedUrls(List<Webhook> ws, String kind) {
+    return ws.stream()
+        .filter(w -> w.enabled() && w.url() != null && !w.url().isBlank())
+        .filter(w -> w.kinds().isEmpty() || w.kinds().contains(kind))
+        .map(Webhook::url)
+        .toList();
   }
 
   /** 重建投递出去的完整请求体(与 NotificationDispatcher.buildBody 字段/顺序一致);序列化失败回落 null。 */

@@ -267,4 +267,5 @@ export interface OutboundNotification {
   taskName: string | null;
   resultPayload: string | null;
   deliveredBody: string | null; // 投递时 HTTP POST 实际发出的完整 JSON 信封
+  deliveredTo: string[];        // 投往的 webhook URL 列表(SENT=实际收到者)
 }
