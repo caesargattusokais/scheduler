@@ -388,7 +388,7 @@ public class RuntimeConfigService {
 
 - [ ] **Step 4: 写单测 `RuntimeConfigServiceTest`**
 
-用假 repo(fake)与假 auditor。fake repo 用 map 内存:
+用假 repo(fake)与假 auditor。fake repo 用 map 内存;审计用 Mockito mock。需补 import:`import static org.mockito.Mockito.mock;`、`import static org.mockito.Mockito.verify;`、`import static org.mockito.ArgumentMatchers.eq;`、`import static org.mockito.ArgumentMatchers.any;`、`import dev.scheduler.server.service.AuditRecorder;`。
 ```java
 package dev.scheduler.server.service;
 
@@ -420,10 +420,6 @@ class RuntimeConfigServiceTest {
     }
   }
 
-  补 import(在已有 import 后):`import static org.mockito.Mockito.mock;`、`import static org.mockito.Mockito.verify;`、`import dev.scheduler.server.service.AuditRecorder;`。
-
-测试方法:
-```java
   /** 空审计:set_string 用不着的场合传 null 即可;set_valid 用 Mockito mock 断言 audit 调用。 */
   @Test void getLong_fallsBackWhenMissing() {
     assertEquals(5000L, new RuntimeConfigService(new FakeRepo(), null).getLong("loop.scan-delay-ms", 5000L));
