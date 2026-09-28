@@ -5,6 +5,7 @@ import java.sql.SQLException;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import jakarta.annotation.PreDestroy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -90,6 +91,11 @@ public class AdvisoryLockLeaderElection implements LeaderElection {
   }
 
   @Override public boolean isLeader() { return leader; }
+
+  @Override public void shutdown() { close(); }
+
+  /** Spring 容器关闭时释放领导锁(幂等 close)。 */
+  @PreDestroy public void preDestroy() { close(); }
 
   /** Release the session advisory lock and its dedicated connection. Idempotent: second call no-ops. */
   public void close() {

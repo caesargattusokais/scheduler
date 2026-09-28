@@ -28,7 +28,11 @@ import dev.scheduler.persistence.WorkerRegistration;
 import dev.scheduler.persistence.WorkerRepository;
 import dev.scheduler.server.reconcile.Reconciler;
 import dev.scheduler.server.service.AuthService;
+import dev.scheduler.server.service.RuntimeConfigService;
 import dev.scheduler.server.trigger.TriggerEngine;
+import dev.scheduler.persistence.RuntimeConfigRepository;
+import dev.scheduler.persistence.RuntimeConfigRow;
+import java.util.Optional;
 import jakarta.servlet.http.Cookie;
 import java.time.Clock;
 import java.time.Instant;
@@ -1515,9 +1519,17 @@ class ApiIntegrationTest {
     long taskId = postTask("dlq-loop-task");
     jdbc.update("UPDATE app_task SET dlq_max_replays=1 WHERE id=?", taskId);
     long shardId = seedDeadLetter(taskId).id(); // FAILED + dead_letter,replay_count=0
-    var loop = new dev.scheduler.server.config.Beans.DlqReplayLoop(shards, () -> true);
+    // 直接驱动单拍(禁用 suspend 的 settings + 恒 leader),同步断言 DLQ 处置逻辑(ConfigurableLoop 每拍即 loopOnce)。
+    var loop = new dev.scheduler.server.config.Beans.DlqReplayLoop(
+        new RuntimeConfigService(new RuntimeConfigRepository() {
+          @Override public Optional<RuntimeConfigRow> find(String key) { return Optional.empty(); }
+          @Override public java.util.List<RuntimeConfigRow> findAll() { return java.util.List.of(); }
+          @Override public void upsert(String key, String value, String operator) {}
+        }, null), shards, () -> true) {
+      public void runOnce() { loopOnce(); }
+    };
 
-    loop.tick(); // replay_count(0) < 上限(1) → requeue 回队
+    loop.runOnce(); // replay_count(0) < 上限(1) → requeue 回队
     assertEquals("DUE", jdbc.queryForObject(
         "SELECT status FROM execution_shard WHERE id=?", String.class, shardId));
     assertEquals(1, jdbc.queryForObject(
@@ -1525,7 +1537,7 @@ class ApiIntegrationTest {
 
     // 再次死信 → replay_count=1 == 上限 → 下轮永久弃(物理删除)
     jdbc.update("UPDATE execution_shard SET status='FAILED', dead_letter=true WHERE id=?", shardId);
-    loop.tick();
+    loop.runOnce();
     assertEquals(0, jdbc.queryForObject(
         "SELECT count(*) FROM execution_shard WHERE id=?", Integer.class, shardId),
         "超限 → 永久弃");
@@ -1533,7 +1545,7 @@ class ApiIntegrationTest {
     // 任务上限 0 → 不自动重放:死信分片原样保留
     long zero = postTask("dlq-zero-task");
     long zShard = seedDeadLetter(zero).id();
-    loop.tick();
+    loop.runOnce();
     assertEquals(1, jdbc.queryForObject(
         "SELECT count(*) FROM execution_shard WHERE id=?", Integer.class, zShard),
         "0 上限任务不入自动重放候选,分片保持原样");

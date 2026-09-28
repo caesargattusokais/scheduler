@@ -58,7 +58,6 @@ import org.springframework.core.Ordered;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
-import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.web.client.RestTemplate;
 
 /** 装配 Task 1-9 的既有零件为可运行 Bean 集。 */
@@ -310,8 +309,8 @@ public class Beans {
   /** 固定周期触发扫描;#5:每 tick 均兜底,DB 抖动只杀一拍不杀调度线程。 */
   @Bean
   @ConditionalOnProperty(name = "scheduler.loop.enabled", havingValue = "true", matchIfMissing = true)
-  ScanLoop scanLoop(TriggerEngine engine) {
-    return new ScanLoop(engine);
+  ScanLoop scanLoop(RuntimeConfigService runtimeConfigService, TriggerEngine engine) {
+    return new ScanLoop(runtimeConfigService, engine);
   }
 
   /** 对账器:单例,复用共享 FailureResolver(同一重试判定,worker 与 reconciler 无漂移)。M3:作用对象为 shard。 */
@@ -324,30 +323,30 @@ public class Beans {
 
   @Bean
   @ConditionalOnProperty(name = "scheduler.reconcile.enabled", havingValue = "true", matchIfMissing = true)
-  ReconcileLoop reconcileLoop(Reconciler reconciler, LeaderElection leader) {
-    return new ReconcileLoop(reconciler, leader);
+  ReconcileLoop reconcileLoop(RuntimeConfigService runtimeConfigService, Reconciler reconciler, LeaderElection leader) {
+    return new ReconcileLoop(runtimeConfigService, reconciler, leader);
   }
 
   @Bean
   @ConditionalOnProperty(name = "scheduler.dag.enabled", havingValue = "true", matchIfMissing = true)
-  DagLoop dagLoop(DagEngine engine) {
-    return new DagLoop(engine);
+  DagLoop dagLoop(RuntimeConfigService runtimeConfigService, DagEngine engine) {
+    return new DagLoop(runtimeConfigService, engine);
   }
 
   /** 3b 事件触发循环:固定周期驱动 EventEngine.scanOnce();失败兜底不杀线程(镜像 ScanLoop)。 */
   @Bean
   @ConditionalOnProperty(name = "scheduler.event.enabled", havingValue = "true", matchIfMissing = true)
-  EventLoop eventLoop(EventEngine engine) {
-    return new EventLoop(engine);
+  EventLoop eventLoop(RuntimeConfigService runtimeConfigService, EventEngine engine) {
+    return new EventLoop(runtimeConfigService, engine);
   }
 
   /** 审计保留循环:leader 门控,按 {@code scheduler.audit.retention-days} 定期归档过期审计行。
    *  retention-days<=0 → 不归档(不开策略)。operator 以 'retention' 占位,追记一条 audit.archive。 */
   @Bean
   @ConditionalOnProperty(name = "scheduler.audit.retention.enabled", havingValue = "true", matchIfMissing = true)
-  AuditRetentionLoop auditRetentionLoop(AuditRetentionService retention, LeaderElection leader,
-                                        @Value("${scheduler.audit.retention-days:0}") int retentionDays) {
-    return new AuditRetentionLoop(retention, leader, retentionDays);
+  AuditRetentionLoop auditRetentionLoop(RuntimeConfigService runtimeConfigService,
+                                        AuditRetentionService retention, LeaderElection leader) {
+    return new AuditRetentionLoop(runtimeConfigService, retention, leader);
   }
 
   /** 通知底座:outbox 仓储。当期 fire 落库由 NotificationHub(非阻断)驱动,投递由 NotificationLoop 拉取。 */
@@ -411,15 +410,16 @@ public class Beans {
   /** 通知投递循环:leader 门控,周期把到期通知投给已订阅 webhook;失败兜底不杀线程。webhooks 空 → no-op。 */
   @Bean
   @ConditionalOnProperty(name = "scheduler.notifications.enabled", havingValue = "true", matchIfMissing = true)
-  NotificationLoop notificationLoop(NotificationDispatcher dispatcher, LeaderElection leader) {
-    return new NotificationLoop(dispatcher, leader);
+  NotificationLoop notificationLoop(RuntimeConfigService runtimeConfigService,
+                                    NotificationDispatcher dispatcher, LeaderElection leader) {
+    return new NotificationLoop(runtimeConfigService, dispatcher, leader);
   }
 
   /** DLQ 自动重放循环:leader 门控,周期把未超限的死信分片重排回队、超限者永久弃。任务 dlq_max_replays=0(缺省)→ 无候选,no-op。 */
   @Bean
   @ConditionalOnProperty(name = "scheduler.dlq.enabled", havingValue = "true", matchIfMissing = true)
-  DlqReplayLoop dlqReplayLoop(ShardRepository shards, LeaderElection leader) {
-    return new DlqReplayLoop(shards, leader);
+  DlqReplayLoop dlqReplayLoop(RuntimeConfigService runtimeConfigService, ShardRepository shards, LeaderElection leader) {
+    return new DlqReplayLoop(runtimeConfigService, shards, leader);
   }
 
   /** ApplicationRunner + Ordered:使启动引导按 order 升序确定性执行(Spring 的 runner 排序读对象类的
@@ -438,157 +438,128 @@ public class Beans {
     @Override public void run(ApplicationArguments args) throws Exception { delegate.run(args); }
   }
 
-  public static final class ScanLoop {
-    private static final Logger log = LoggerFactory.getLogger(ScanLoop.class);
+  public static final class ScanLoop extends ConfigurableLoop {
     private final TriggerEngine engine;
 
-    ScanLoop(TriggerEngine engine) {
+    ScanLoop(RuntimeConfigService settings, TriggerEngine engine) {
+      super(settings, RuntimeConfigKeys.SCAN_DELAY, 5000L);
       this.engine = engine;
+      start();
     }
 
-    @Scheduled(fixedDelayString = "${scheduler.loop.scan-delay-ms:5000}")
-    public void tick() {
-      try {
-        engine.scanOnce();
-      } catch (Throwable t) {
-        log.warn("trigger scan loop tick failed; continuing next tick", t);
-      }
+    @Override protected void loopOnce() {
+      engine.scanOnce();
     }
   }
 
   /** 对账循环:leader 门控在 scan 之前(与 TriggerEngine 同),失败兜底不杀线程。 */
-  public static final class ReconcileLoop {
-    private static final Logger log = LoggerFactory.getLogger(ReconcileLoop.class);
+  public static final class ReconcileLoop extends ConfigurableLoop {
     private final Reconciler reconciler;
     private final LeaderElection leader;
 
-    ReconcileLoop(Reconciler reconciler, LeaderElection leader) {
+    ReconcileLoop(RuntimeConfigService settings, Reconciler reconciler, LeaderElection leader) {
+      super(settings, RuntimeConfigKeys.RECONCILE_DELAY, 15000L);
       this.reconciler = reconciler;
       this.leader = leader;
+      start();
     }
 
-    @Scheduled(fixedDelayString = "${scheduler.reconcile.delay-ms:15000}")
-    public void tick() {
+    @Override protected void loopOnce() {
       if (!leader.isLeader()) return;
-      try {
-        reconciler.scanOnce();
-      } catch (Throwable t) {
-        log.warn("reconcile loop tick failed; continuing next tick", t);
-      }
+      reconciler.scanOnce();
     }
   }
 
   /** 审计保留循环:按 retention-days 归档 occurred_at 早于 now-days 的行,单次 1000 条。leader 门控 + 失败兜底。 */
-  public static final class AuditRetentionLoop {
-    private static final Logger log = LoggerFactory.getLogger(AuditRetentionLoop.class);
+  public static final class AuditRetentionLoop extends ConfigurableLoop {
     private final AuditRetentionService retention;
     private final LeaderElection leader;
-    private final int retentionDays;
 
-    AuditRetentionLoop(AuditRetentionService retention, LeaderElection leader, int retentionDays) {
+    AuditRetentionLoop(RuntimeConfigService settings, AuditRetentionService retention, LeaderElection leader) {
+      super(settings, RuntimeConfigKeys.AUDIT_RETENTION_DELAY, 3600000L);
       this.retention = retention;
       this.leader = leader;
-      this.retentionDays = retentionDays;
+      start();
     }
 
-    @Scheduled(fixedDelayString = "${scheduler.audit.retention.delay-ms:3600000}")
-    public void tick() {
-      if (retentionDays <= 0) return;
+    @Override protected void loopOnce() {
       if (!leader.isLeader()) return;
-      try {
-        retention.archiveOlderThan("retention",
-            java.time.Instant.now().minus(java.time.Duration.ofDays(retentionDays)), 1000);
-      } catch (Throwable t) {
-        log.warn("audit retention tick failed; continuing next tick", t);
-      }
+      long days = settings.getLong(RuntimeConfigKeys.AUDIT_RETENTION_DAYS, 0L);
+      if (days <= 0) return;
+      retention.archiveOlderThan("retention",
+          java.time.Instant.now().minus(java.time.Duration.ofDays(days)), 1000);
     }
   }
 
   /** DAG 调度循环:固定周期触发 DagEngine.scanOnce();失败兜底不杀线程(镜像 ScanLoop)。 */
-  public static final class DagLoop {
-    private static final Logger log = LoggerFactory.getLogger(DagLoop.class);
+  public static final class DagLoop extends ConfigurableLoop {
     private final DagEngine engine;
 
-    DagLoop(DagEngine engine) {
+    DagLoop(RuntimeConfigService settings, DagEngine engine) {
+      super(settings, RuntimeConfigKeys.DAG_DELAY, 5000L);
       this.engine = engine;
+      start();
     }
 
-    @Scheduled(fixedDelayString = "${scheduler.dag.delay-ms:5000}")
-    public void tick() {
-      try {
-        engine.scanOnce();
-      } catch (Throwable t) {
-        log.warn("dag scan loop tick failed; continuing next tick", t);
-      }
+    @Override protected void loopOnce() {
+      engine.scanOnce();
     }
   }
 
   /** 3b 入站事件触发循环:固定周期驱动 EventEngine.scanOnce();失败兜底不杀线程(镜像 ScanLoop)。 */
-  public static final class EventLoop {
-    private static final Logger log = LoggerFactory.getLogger(EventLoop.class);
+  public static final class EventLoop extends ConfigurableLoop {
     private final EventEngine engine;
 
-    EventLoop(EventEngine engine) {
+    EventLoop(RuntimeConfigService settings, EventEngine engine) {
+      super(settings, RuntimeConfigKeys.EVENT_DELAY, 5000L);
       this.engine = engine;
+      start();
     }
 
-    @Scheduled(fixedDelayString = "${scheduler.event.scan-delay-ms:5000}")
-    public void tick() {
-      try {
-        engine.scanOnce();
-      } catch (Throwable t) {
-        log.warn("event scan loop tick failed; continuing next tick", t);
-      }
+    @Override protected void loopOnce() {
+      engine.scanOnce();
     }
   }
 
   /** 通知投递循环:leader 门控,周期把到期通知投给已订阅 webhook;失败兜底不杀线程(镜像 ReconcileLoop)。 */
-  public static final class NotificationLoop {
-    private static final Logger log = LoggerFactory.getLogger(NotificationLoop.class);
+  public static final class NotificationLoop extends ConfigurableLoop {
     private final NotificationDispatcher dispatcher;
     private final LeaderElection leader;
 
-    NotificationLoop(NotificationDispatcher dispatcher, LeaderElection leader) {
+    NotificationLoop(RuntimeConfigService settings, NotificationDispatcher dispatcher, LeaderElection leader) {
+      super(settings, RuntimeConfigKeys.NOTIFICATION_DELAY, 1000L);
       this.dispatcher = dispatcher;
       this.leader = leader;
+      start();
     }
 
-    @Scheduled(fixedDelayString = "${scheduler.notifications.dispatch-delay-ms:1000}")
-    public void tick() {
+    @Override protected void loopOnce() {
       if (!leader.isLeader()) return;
-      try {
-        dispatcher.dispatchOnce();
-      } catch (Throwable t) {
-        log.warn("notification dispatch tick failed; continuing next tick", t);
-      }
+      dispatcher.dispatchOnce();
     }
   }
 
   /** DLQ 自动重放循环:未超限候选重排回队(requeueShard,replay_count++),超限候选永久弃(discardShard)。
    *  leader 门控(镜像 ReconcileLoop),避免多副本重复处置同一批死信。 */
-  public static final class DlqReplayLoop {
-    private static final Logger log = LoggerFactory.getLogger(DlqReplayLoop.class);
+  public static class DlqReplayLoop extends ConfigurableLoop {
     private final ShardRepository shards;
     private final LeaderElection leader;
 
-    public DlqReplayLoop(ShardRepository shards, LeaderElection leader) {
+    public DlqReplayLoop(RuntimeConfigService settings, ShardRepository shards, LeaderElection leader) {
+      super(settings, RuntimeConfigKeys.DLQ_DELAY, 1000L);
       this.shards = shards;
       this.leader = leader;
+      start();
     }
 
-    @Scheduled(fixedDelayString = "${scheduler.dlq.replay-delay-ms:1000}")
-    public void tick() {
+    @Override protected void loopOnce() {
       if (!leader.isLeader()) return;
-      try {
-        for (ShardRepository.DlqReplayCandidate c : shards.findDlqReplayCandidates(100)) {
-          if (c.replayCount() < c.maxReplays()) {
-            shards.requeueShard(c.shardId());
-          } else {
-            shards.discardShard(c.shardId());
-          }
+      for (ShardRepository.DlqReplayCandidate c : shards.findDlqReplayCandidates(100)) {
+        if (c.replayCount() < c.maxReplays()) {
+          shards.requeueShard(c.shardId());
+        } else {
+          shards.discardShard(c.shardId());
         }
-      } catch (Throwable t) {
-        log.warn("dlq replay tick failed; continuing next tick", t);
       }
     }
   }
