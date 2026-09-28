@@ -358,6 +358,24 @@ class ApiIntegrationTest {
     assertEquals(1L, jdbc.queryForObject("SELECT count(*) FROM app_task_event", Long.class));
   }
 
+  /** 3b:GET /events/routes 返回系统真实出现过的 route key 去重(含本次投递;不重复)。 */
+  @Test
+  void eventRoutes_listsDistinctKnownRouteKeys() throws Exception {
+    String route = "route.routes.test" + System.nanoTime();
+    mvc.perform(post("/api/v1/events").contentType(MediaType.APPLICATION_JSON)
+        .content("{\"routeKey\":\"" + route + "\",\"payload\":{},\"dedupeKey\":\"" + route + "\"}"))
+        .andExpect(status().isCreated());
+    mvc.perform(post("/api/v1/events").contentType(MediaType.APPLICATION_JSON)
+        .content("{\"routeKey\":\"" + route + "\",\"payload\":{},\"dedupeKey\":\"" + route + "-2\"}"))
+        .andExpect(status().isCreated());
+    String json = mvc.perform(get("/api/v1/events/routes"))
+        .andExpect(status().isOk())
+        .andReturn().getResponse().getContentAsString();
+    java.util.List<String> routes = java.util.Arrays.asList(
+        objectMapper.readValue(json, String[].class));
+    assertEquals(1, routes.stream().filter(route::equals).count(), "同一 route_key 只出现一次");
+  }
+
   /** M6.3:表单下拉框的数据源 = 纯存活 worker 注册表并集(与 create/update 校验同源;无进程内 handler)。 */
   @Test
   void handlersEndpoint_listsRegisteredRefs() throws Exception {

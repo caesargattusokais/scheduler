@@ -59,6 +59,14 @@ public class JdbcEventRepository implements EventRepository {
     return c == null ? 0 : c;
   }
 
+  @Override
+  public List<String> distinctRouteKeys() {
+    // 按最新入队(max id)倒序,最近用过的路由排在前面。
+    return jdbc.query("SELECT route_key FROM app_task_event"
+            + " GROUP BY route_key ORDER BY max(id) DESC",
+        (rs, row) -> rs.getString("route_key"));
+  }
+
   private static InboundEvent row(ResultSet rs) throws java.sql.SQLException {
     return new InboundEvent(
         rs.getLong("id"),

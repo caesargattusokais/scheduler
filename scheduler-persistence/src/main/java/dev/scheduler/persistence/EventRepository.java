@@ -25,4 +25,7 @@ public interface EventRepository {
 
   /** 全部事件计数(事件页表头)。 */
   long count();
+
+  /** 系统真实出现过的 route key 去重(按最近入队倒序),供任务表单事件路由点选。 */
+  List<String> distinctRouteKeys();
 }

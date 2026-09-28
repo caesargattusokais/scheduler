@@ -3,6 +3,7 @@ package dev.scheduler.server.web;
 import com.fasterxml.jackson.databind.JsonNode;
 import dev.scheduler.persistence.EventRepository;
 import dev.scheduler.persistence.InboundEvent;
+import java.util.List;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -56,5 +57,11 @@ public class EventController {
       @RequestParam(required = false) Integer offset) {
     Paging p = Paging.of(limit, offset);
     return new Page<>(events.findPage(p.limit(), p.offset()), events.count(), p.offset(), p.limit());
+  }
+
+  /** 真实出现过的 route key 去重列表(任务表单事件路由下拉候选;字面路径优先于 /{id})。 */
+  @GetMapping("/routes")
+  public List<String> routes() {
+    return events.distinctRouteKeys();
   }
 }

@@ -1,6 +1,6 @@
 import { FormEvent, useCallback, useEffect, useMemo, useState } from 'react';
 import {
-  createTask, deleteTask, listHandlerRefs, listTasks, pauseTask, resumeTask, triggerTask, updateTask,
+  createTask, deleteTask, listEventRoutes, listHandlerRefs, listTasks, pauseTask, resumeTask, triggerTask, updateTask,
 } from '../api/client';
 import type { CreateTaskRequest, Task } from '../api/types';
 import CronEditor from '../components/CronEditor';
@@ -20,9 +20,6 @@ type TrigType = 'cron' | 'interval' | 'event';
 
 const CRON_DEFAULT = '0 */5 * * * *';
 
-/** 事件路由的常用建议项(下拉可点选;未收录的自定义路由走「✎ 自定义」填入)。 */
-const EVENT_ROUTE_SUGGESTIONS = ['order.created', 'order.updated', 'order.cancelled'];
-
 export default function TasksPage() {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [total, setTotal] = useState(0);
@@ -35,6 +32,7 @@ export default function TasksPage() {
   const [err, setErr] = useState<string | null>(null);
   const [trigType, setTrigType] = useState<TrigType>('cron');
   const [routePick, setRoutePick] = useState(''); // 事件路由下拉的暂存选中值(选中即加入标签并复位)
+  const [routeOptions, setRouteOptions] = useState<string[]>([]); // 系统真实出现过的 route key 候选
 
   const refresh = useCallback(() => {
     listTasks({
@@ -54,6 +52,11 @@ export default function TasksPage() {
       setHandlerRefs(refs);
       setForm((f) => (f.handlerRef === '' ? { ...f, handlerRef: refs[0] ?? '' } : f));
     }).catch((e) => setErr(String(e)));
+  }, []);
+
+  // 事件路由下拉候选 = 系统真实出现过的 route key(去重)。
+  useEffect(() => {
+    listEventRoutes().then(setRouteOptions).catch(() => { /* 候选拉不到只是默认空,不影响任务表单 */ });
   }, []);
 
   async function handleSubmit(e: FormEvent) {
@@ -242,11 +245,11 @@ export default function TasksPage() {
                     }
                   }}>
                   <option value="">+ 添加路由…</option>
-                  {EVENT_ROUTE_SUGGESTIONS
+                  {routeOptions
                     .filter((s) => !form.eventRoutes?.includes(s))
                     .map((s) => <option key={s} value={s}>{s}</option>)}
                   {form.eventRoutes
-                    ?.filter((r) => !EVENT_ROUTE_SUGGESTIONS.includes(r))
+                    ?.filter((r) => !routeOptions.includes(r))
                     .map((r) => <option key={r} value={r}>{r}</option>)}
                   <option value="__custom__">✎ 自定义…</option>
                 </select>

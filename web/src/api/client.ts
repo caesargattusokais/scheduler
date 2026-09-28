@@ -267,6 +267,8 @@ export const listEvents = (p: ListEventsParams = {}): Promise<Page<InboundEvent>
 /** 提交事件:落 PENDING 待事件引擎分派(dedupeKey 重放幂等,命中既有行)。 */
 export const postEvent = (b: CreateEventRequest) =>
   req<InboundEvent>('/api/v1/events', { method: 'POST', body: JSON.stringify(b) });
+/** 系统真实出现过的 route key 去重列表(任务表单事件路由下拉候选)。 */
+export const listEventRoutes = (): Promise<string[]> => req<string[]>('/api/v1/events/routes');
 
 // ---- 4-1 通知告警闭环:webhook 订阅 CRUD(写 ADMIN)+ 投递历史(读) ----
 /** 订阅端点列表(读开放)。 */
