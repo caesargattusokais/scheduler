@@ -126,4 +126,36 @@ class WorkLoopGraceTest extends AbstractExecutorWorkerTest {
       loop.destroy();
     }
   }
+
+  /** 全局 suspend:置位后 worker 停新认领(DUE 保持不被领),心跳/在途不受扰;清位后下一拍自动恢复认领。 */
+  @Test void suspend_haltsClaims_thenResumes() throws Exception {
+    CountDownLatch entered = new CountDownLatch(1);
+    CountDownLatch release = new CountDownLatch(1);
+    var registry = new MapHandlerRegistry(
+        List.of(() -> new WorkerLoopTest.BlockingHandler(entered, release)));
+
+    // 先置 suspend=true(在 loop 起动前),再铺 DUE 分片 → 起动即处挂起,不认领。
+    jdbc.update("INSERT INTO app_runtime_config (key, value, updated_by) VALUES ('suspend','true','test') "
+        + "ON CONFLICT (key) DO UPDATE SET value='true'");
+    WorkerConfig.WorkLoop loop =
+        new WorkerConfig.WorkLoop(newWorker("worker-a", registry), 1, 32, 10, new WorkerRuntimeConfig(jdbc));
+    try {
+      long taskId = createTask(1);
+      seedParentAndShards(taskId, 1);
+      Thread.sleep(300); // 给足拍子时间;若 suspend 未生效,此刻应已认领
+      assertEquals(0, count("status='RUNNING' AND worker_id='worker-a'"), "suspend 期间不认领新分片");
+      assertTrue(entered.getCount() == 1, "suspend 期间 handler 未进入");
+
+      // 清位 → 下一拍恢复认领 → RUNNING → handler 进入阻塞;放行后至 SUCCESS。
+      jdbc.update("UPDATE app_runtime_config SET value='false' WHERE key='suspend'");
+      assertTrue(entered.await(5, TimeUnit.SECONDS), "清位后恢复认领并进入 handler");
+      release.countDown();
+      awaitCount("status='SUCCESS'", 1);
+      assertEquals(1, count("status='SUCCESS'"), "清位后正常执行到 SUCCESS");
+    } finally {
+      release.countDown();
+      loop.destroy();
+      jdbc.update("DELETE FROM app_runtime_config WHERE key='suspend'");
+    }
+  }
 }

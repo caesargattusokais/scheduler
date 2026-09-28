@@ -63,13 +63,13 @@ CREATE TABLE app_runtime_config (
 | `dlq.replay-delay-ms` | 1000 | DlqReplayLoop |
 | `audit.retention.delay-ms` | 3600000 | AuditRetentionLoop 调度间隔(原 `@Scheduled` 注入)|
 | `audit.retention.days` | 0 | AuditRetentionLoop 归档阈值(原 `@Value`,=0 不归档)|
-| `worker.capacity` | 1 | WorkLoop(worker 侧)|
-| `worker.idle-ms` | 200 | WorkLoop(worker 侧)|
-| `worker.heartbeat.interval-ms` | 10000 | HeartbeatLoop(worker 侧)|
+| `worker.capacity` | 1 | WorkLoop(worker 侧,每拍热读)|
 | `worker.shutdown-grace-sec` | 30 | WorkLoop 排空上限(worker 侧)|
-| `suspend` | false | 全部循环(全局暂停开关)|
+| `suspend` | false | 全部循环(server 7 循环 + worker 认领环,全局暂停开关)|
 
-> **刻意排除在热键外**:`lease.seconds` / `dlq.max-replays` / `audit.retention` 等 —— lease 与活性判定强耦合、热改更易诱发误判(现配 `-D` 启动参数可控,保持重启级);`dlq.max-replays` 已有每任务 `dlq_max_replays` 独立控制,无需全局热键。`audit.retention.days` 保留在表但注释为「低优先,可使可启」,见 3.2 改造时确认。
+> **热键白名单 = 「每拍/每点真热读」**,凡未落成运行时读的一律不列入;否则改了拿 200 + 审计却不生效是「幽灵热键」。据此:
+> - `worker.idle-ms` / `worker.heartbeat.interval-ms` 为 worker **重启级** `@Value`(各自 `scheduleWithFixedDelay` 周期绑定一次),**不入热键表**;调它们需重启,避免「改了没反应」的假热键。
+> - **刻意排除**:`lease.seconds` / `dlq.max-replays` —— lease 与活性判定强耦合、热改更易诱发误判(现配 `-D` 启动参数可控,保持重启级);`dlq.max-replays` 已有每任务 `dlq_max_replays` 独立控制,无需全局热键。`audit.retention.days` 保留在表但注释为「低优先,可使可启」,见 3.2 改造时确认。
 
 #### 3.1.2 持久层
 

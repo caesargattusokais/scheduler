@@ -31,6 +31,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.ApplicationRunner;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.DependsOn;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 @Configuration
@@ -119,8 +120,11 @@ public class WorkerConfig {
   }
 
   /** 停机编排:容器关闭时 排空 → 停心跳 → deregister(WorkerConfig 内引用 workLoop/heartbeatLoop)。
-   *   gracefulSec 读自运行时热键 worker.shutdown-grace-sec(默认 30)。 */
+   *   gracefulSec 读自运行时热键 worker.shutdown-grace-sec(默认 30)。
+   *   @DependsOn 把创建顺序钉死在 workLoop/heartbeatLoop 之后 → 销毁顺序在其之前:先排空+停心跳+deregister,
+   *   再轮到二者 destroy()(幂等 no-op)。避免中途心跳先死、server 活性在排空期误回收在途分片的双重执行。 */
   @Bean
+  @DependsOn({"workLoop", "heartbeatLoop"})
   DisposableBean gracefulShutdown(WorkLoop workLoop, HeartbeatLoop heartbeatLoop,
                                   WorkerRegistrar registrar, WorkerRuntimeConfig runtime,
                                   String schedulerWorkerId) {
@@ -142,6 +146,8 @@ public class WorkerConfig {
    *   行为变更:旧构造 capacity<1 抛 IllegalArgumentException;现在 capacity<=0 不排 tick(0 槽 idle),
    *   与「capacity=0 暂停认领」语义一致。 */
   public static final class WorkLoop implements DisposableBean {
+    /** 全局暂停热键(与 server RuntimeConfigKeys.SUSPEND 同 key;worker 独立上下文不 import server,故本地定义)。 */
+    private static final String SUSPEND_KEY = "suspend";
     private final ExecutorWorker worker;
     /** 专用 daemon 调度池:定长 max-capacity(上界);daemon 不阻塞 JVM 退出。 */
     private final ScheduledExecutorService pool;
@@ -177,10 +183,12 @@ public class WorkerConfig {
     private void tick() {
       if (!running.get()) return;
       try {
+        // 全局 suspend:停新认领(server 与 worker 一致),心跳环独立继续 → 在途不被活性误回收;清位后下一拍自动恢复。
+        if (runtime.getFlag(SUSPEND_KEY, false)) return;
         // 每 tick 前自读容量热键并 self-resize;DB 宕机读到异常 → 降级保持当前容量,不杀执行线程。
         this.resize(Math.toIntExact(runtime.getLong("worker.capacity", target.get())));
       } catch (Throwable t) {
-        log.warn("worker.capacity hot-read failed; keeping current capacity {}", target.get(), t);
+        log.warn("worker.capacity/suspend hot-read failed; keeping current capacity {}", target.get(), t);
       }
       // 进闸先计入在途:stopAndDrain 以 inflight 为排空依据,凡进得本 tick 的认领必被计入待其完成,
       // 关门瞬间不会漏排一条在途。让位(activeClaims 超 target)的瞬时计数随即在 finally 递减,无害。

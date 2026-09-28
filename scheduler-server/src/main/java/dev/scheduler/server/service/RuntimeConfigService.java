@@ -64,9 +64,14 @@ public class RuntimeConfigService {
     }
     String value = (rawValue == null ? "" : rawValue.trim());
     validateValue(key, value);
+    // 审计记 prior:此前 DB 值(无则 null = 改前走 fallback/默认),取证「从哪改到哪」。
+    String prior = repo.find(key).map(RuntimeConfigRow::value).orElse(null);
     repo.upsert(key, value, operator);
-    auditor.record(operator, "runtime-config.update", TargetType.NONE, 0L,
-        java.util.Map.of("key", key, "value", value));
+    java.util.Map<String, Object> meta = new java.util.LinkedHashMap<>();
+    meta.put("key", key);
+    meta.put("value", value);
+    meta.put("prior", prior);
+    auditor.record(operator, "runtime-config.update", TargetType.NONE, 0L, meta);
   }
 
   private void validateValue(String key, String value) {
