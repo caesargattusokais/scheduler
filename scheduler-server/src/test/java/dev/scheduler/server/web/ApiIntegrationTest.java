@@ -194,7 +194,8 @@ class ApiIntegrationTest {
   void resetDb() {
     jdbc.execute("TRUNCATE app_dag CASCADE; TRUNCATE execution, execution_outcome, execution_shard,"
         + " execution_shard_outcome, app_task, app_audit, app_audit_archive, worker,"
-        + " app_auth_session, app_login_attempt, app_notification, app_task_event, app_webhook RESTART IDENTITY CASCADE");
+        + " app_auth_session, app_login_attempt, app_notification, app_task_event, app_webhook,"
+        + " app_runtime_config RESTART IDENTITY CASCADE");
     // app_operator 不在 TRUNCATE 之列(写端授权依赖其在引导/测试期间恒在;且不清 password_hash,保留上下文
     // 启动时 boot-pass 引导的口令,login(boot-pass) 恒可用):幂等确保 alice/bob/carol/dave 每用例都在,
     //  即便某用例 deactivate 过也不会让后续用例缺人。
@@ -2374,6 +2375,76 @@ class ApiIntegrationTest {
         "SELECT operator, action FROM app_audit WHERE action='access.denied'");
     assertFalse(denied.isEmpty(), "403 应落一条 access.denied 审计");
     assertEquals("bob", denied.get(0).get("operator"));
+  }
+
+  // ---- 运行时配置:GET 读开放,PUT 写 ADMIN(白名单 + 类型校验 + 审计) ----
+
+  /** GET /api/v1/runtime-config:读开放。列出白名单全部 key;loop.scan-delay-ms 未写 → source=default。 */
+  @Test
+  void runtimeConfig_list_readOpen_showsDefaultSource() throws Exception {
+    String body = mvc.perform(get("/api/v1/runtime-config").cookie(session(MALLORY_TOKEN)))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$[*].key", hasItem("loop.scan-delay-ms")))
+        .andReturn().getResponse().getContentAsString();
+    for (JsonNode e : objectMapper.readTree(body)) {
+      if ("loop.scan-delay-ms".equals(e.get("key").asText())) {
+        assertEquals("default", e.get("source").asText());
+        assertEquals("5000", e.get("value").asText());
+        return;
+      }
+    }
+    throw new AssertionError("GET /runtime-config 未返回 loop.scan-delay-ms 条目:\n" + body);
+  }
+
+  /** PUT 具名 key(alice·ADMIN)→ 200 + 回读 source=db / value=2500 / updatedBy=alice;再 GET 确认已持久化。 */
+  @Test
+  void runtimeConfig_set_byAdmin_persistsDb_roundTrips() throws Exception {
+    mvc.perform(put("/api/v1/runtime-config/loop.scan-delay-ms")
+            .contentType(MediaType.APPLICATION_JSON).content("{\"value\":\"2500\"}"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.key").value("loop.scan-delay-ms"))
+        .andExpect(jsonPath("$.value").value("2500"))
+        .andExpect(jsonPath("$.source").value("db"))
+        .andExpect(jsonPath("$.updatedBy").value("alice"))
+        .andExpect(jsonPath("$.updatedAt").isNotEmpty());
+    // 持久化确认:GET 回读 DB 命中(source=db、value=2500),不再回落 default。
+    String body = mvc.perform(get("/api/v1/runtime-config").cookie(session(MALLORY_TOKEN)))
+        .andExpect(status().isOk()).andReturn().getResponse().getContentAsString();
+    for (JsonNode e : objectMapper.readTree(body)) {
+      if ("loop.scan-delay-ms".equals(e.get("key").asText())) {
+        assertEquals("db", e.get("source").asText());
+        assertEquals("2500", e.get("value").asText());
+        return;
+      }
+    }
+    throw new AssertionError("GET /runtime-config 未回读已写入的 loop.scan-delay-ms:\n" + body);
+  }
+
+  /** PUT 校验失败路径:非法类型值(abc 非 long)→ 400;未知 key(nope 非白名单)→ 400;OPERATOR bob → 403(ADMIN 门禁)。 */
+  @Test
+  void runtimeConfig_set_invalidValueAndUnknownKeyRejected_operatorDenied() throws Exception {
+    // 非法 typed 值:loop.scan-delay-ms 是 long 型,"abc" → IllegalArgumentException → 400。
+    mvc.perform(put("/api/v1/runtime-config/loop.scan-delay-ms")
+            .contentType(MediaType.APPLICATION_JSON).content("{\"value\":\"abc\"}"))
+        .andExpect(status().isBadRequest());
+    // 未知 key(白名单拒绝)→ 400。
+    mvc.perform(put("/api/v1/runtime-config/nope")
+            .contentType(MediaType.APPLICATION_JSON).content("{\"value\":\"1\"}"))
+        .andExpect(status().isBadRequest());
+    // OPERATOR bob PUT → 403(interceptor ADMIN_WRITES 收口)。
+    mvc.perform(put("/api/v1/runtime-config/loop.scan-delay-ms").cookie(session(BOB_TOKEN))
+            .contentType(MediaType.APPLICATION_JSON).content("{\"value\":\"2500\"}"))
+        .andExpect(status().isForbidden());
+    // 被拒路径未落库:loop.scan-delay-ms 仍回落 default。
+    String body = mvc.perform(get("/api/v1/runtime-config"))
+        .andExpect(status().isOk()).andReturn().getResponse().getContentAsString();
+    for (JsonNode e : objectMapper.readTree(body)) {
+      if ("loop.scan-delay-ms".equals(e.get("key").asText())) {
+        assertEquals("default", e.get("source").asText());
+        return;
+      }
+    }
+    throw new AssertionError("GET /runtime-config 未返回 loop.scan-delay-ms 条目:\n" + body);
   }
 
   // ---- 强认证:登录 / me / 登出 / 轮换 / 写授权 ----

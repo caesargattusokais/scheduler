@@ -51,7 +51,8 @@ public class OperatorInterceptor implements HandlerInterceptor {
       new String[]{"POST", "/api/v1/audits/archive"},
       new String[]{"POST", "/api/v1/webhooks"},
       new String[]{"PUT", "/api/v1/webhooks/{id}"},
-      new String[]{"DELETE", "/api/v1/webhooks/{id}"});
+      new String[]{"DELETE", "/api/v1/webhooks/{id}"},
+      new String[]{"PUT", "/api/v1/runtime-config/{key}"});
 
   private final OperatorRepository operators;
   private final AuditRecorder auditor;
