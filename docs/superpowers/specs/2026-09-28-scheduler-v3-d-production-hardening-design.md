@@ -61,7 +61,8 @@ CREATE TABLE app_runtime_config (
 | `event.scan-delay-ms` | 5000 | EventLoop |
 | `notifications.dispatch-delay-ms` | 1000 | NotificationLoop |
 | `dlq.replay-delay-ms` | 1000 | DlqReplayLoop |
-| `audit.retention.days` | 30 | AuditRetentionLoop(现由 `@Value` 注入)|
+| `audit.retention.delay-ms` | 3600000 | AuditRetentionLoop 调度间隔(原 `@Scheduled` 注入)|
+| `audit.retention.days` | 0 | AuditRetentionLoop 归档阈值(原 `@Value`,=0 不归档)|
 | `worker.capacity` | 1 | WorkLoop(worker 侧)|
 | `worker.idle-ms` | 200 | WorkLoop(worker 侧)|
 | `worker.heartbeat.interval-ms` | 10000 | HeartbeatLoop(worker 侧)|
