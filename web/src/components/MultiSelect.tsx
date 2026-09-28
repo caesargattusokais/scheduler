@@ -2,11 +2,11 @@
 import { useEffect, useRef, useState } from 'react';
 
 /** 下拉多选;选项 id 为 number,已选项在闭合态以徽章呈现。由 NotificationsPage(任务/DAG)复用。 */
-export default function MultiSelect({ label, options, selected, onChange, empty }: {
+export default function MultiSelect<T extends string | number>({ label, options, selected, onChange, empty }: {
   label: string;
-  options: { id: number; name: string }[];
-  selected: number[];
-  onChange: (ids: number[]) => void;
+  options: { id: T; name: string }[];
+  selected: T[];
+  onChange: (ids: T[]) => void;
   empty: string;
 }) {
   const [open, setOpen] = useState(false);
@@ -25,7 +25,7 @@ export default function MultiSelect({ label, options, selected, onChange, empty 
 
   const q = query.trim().toLowerCase();
   const visible = options.filter((o) => !q || o.name.toLowerCase().includes(q));
-  const toggle = (id: number) =>
+  const toggle = (id: T) =>
     onChange(selected.includes(id) ? selected.filter((x) => x !== id) : [...selected, id]);
 
   return (
@@ -39,7 +39,7 @@ export default function MultiSelect({ label, options, selected, onChange, empty 
               <span className="flex flex-wrap gap-1">
                 {options.filter((o) => selected.includes(o.id)).map((o) => (
                   <span key={o.id} className="rounded bg-blue-100 px-1.5 py-0.5 text-xs font-medium text-blue-700">
-                    {o.name}<span className="ml-0.5 text-blue-400">#{o.id}</span>
+                    {o.name}{typeof o.id === 'number' && <span className="ml-0.5 text-blue-400">#{o.id}</span>}
                   </span>
                 ))}
               </span>
@@ -60,7 +60,7 @@ export default function MultiSelect({ label, options, selected, onChange, empty 
                   <input type="checkbox" checked={selected.includes(o.id)}
                     onChange={() => toggle(o.id)} />
                   <span className="flex-1 truncate">{o.name}</span>
-                  <span className="font-mono text-xs text-slate-400">#{o.id}</span>
+                  {typeof o.id === 'number' && <span className="font-mono text-xs text-slate-400">#{o.id}</span>}
                 </label>
               ))}
             </div>

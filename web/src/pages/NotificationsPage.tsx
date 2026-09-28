@@ -7,8 +7,6 @@ import {
 } from '../api/client';
 import { Dag, OutboundNotification, OutboundWebhook, Page, Task } from '../api/types';
 
-const KINDS_SAMPLE = 'execution.completed, execution.failed';
-
 function statusBadge(s: string): string {
   return s === 'SENT'
     ? 'rounded bg-emerald-100 px-1.5 py-0.5 text-xs font-medium text-emerald-700'
@@ -24,6 +22,8 @@ const KIND_LABELS: Record<string, { text: string; cls: string }> = {
   'execution.timeout': { text: '执行超时', cls: 'bg-orange-100 text-orange-700' },
   'execution.dead_letter': { text: '落入死信', cls: 'bg-slate-200 text-slate-700' },
 };
+/** 可订阅的 event kind(下拉选项,镜像 KIND_LABELS 键)。 */
+const KINDS_OPTIONS = Object.keys(KIND_LABELS).map((k) => ({ id: k, name: `${KIND_LABELS[k].text} (${k})` }));
 const TERMINAL_TEXT: Record<string, string> = {
   SUCCESS: '成功', FAILED: '失败', TIMEOUT: '超时', DEAD_LETTER: '死信',
 };
@@ -48,7 +48,7 @@ export default function NotificationsPage() {
   // 订阅编辑表单:id=null → 新建;否则更新。
   const [id, setId] = useState<number | null>(null);
   const [url, setUrl] = useState('');
-  const [kinds, setKinds] = useState('');
+  const [kinds, setKinds] = useState<string[]>([]);
   const [maxAttempts, setMaxAttempts] = useState(5);
   const [statusFilter, setStatusFilter] = useState('');
   // 任务维度过滤 scope:ALL=全部 / INCLUDE=白名单 / EXCLUDE=黑名单。
@@ -83,7 +83,7 @@ export default function NotificationsPage() {
     }
     const body = {
       url: url.trim(),
-      ...(kinds.trim() ? { kinds: kinds.split(',').map((k) => k.trim()).filter(Boolean) } : {}),
+      ...(kinds.length > 0 ? { kinds } : {}),
       maxAttempts,
       ...(scopeMode !== 'ALL' ? { scopeMode } : {}),
       ...(selTasks.length > 0 ? { selectedTaskIds: selTasks } : {}),
@@ -116,7 +116,7 @@ export default function NotificationsPage() {
   };
 
   const resetForm = () => {
-    setId(null); setUrl(''); setKinds(''); setMaxAttempts(5);
+    setId(null); setUrl(''); setKinds([]); setMaxAttempts(5);
     setScopeMode('ALL'); setSelTasks([]); setSelDags([]);
   };
 
@@ -139,11 +139,13 @@ export default function NotificationsPage() {
             <input className="input" placeholder="https://hooks.example.com/x" value={url}
               onChange={(e) => setUrl(e.target.value)} />
           </label>
-          <label className="field grow">
-            <span className="label">Kinds(逗号分隔,空 = 订阅全部)</span>
-            <input className="input" placeholder={KINDS_SAMPLE} value={kinds}
-              onChange={(e) => setKinds(e.target.value)} />
-          </label>
+          <MultiSelect
+            label="Kinds(不选 = 订阅全部)"
+            options={KINDS_OPTIONS}
+            selected={kinds}
+            onChange={setKinds}
+            empty="订阅全部"
+          />
           <label className="field" style={{ maxWidth: 110 }}>
             <span className="label">最大尝试</span>
             <input className="input" type="number" min={1} value={maxAttempts}
@@ -219,7 +221,7 @@ export default function NotificationsPage() {
                         onClick={() => toggle(h)}>{h.enabled ? '停用' : '启用'}</button>
                       <button className="btn btn-secondary" title="编辑该订阅"
                         onClick={() => {
-                        setId(h.id); setUrl(h.url); setKinds(h.kinds.join(', ')); setMaxAttempts(h.maxAttempts);
+                        setId(h.id); setUrl(h.url); setKinds(h.kinds); setMaxAttempts(h.maxAttempts);
                         setScopeMode(h.scopeMode); setSelTasks(h.selectedTaskIds); setSelDags(h.selectedDagIds);
                       }}>编辑</button>
                       <button className="btn btn-secondary" title="删除该订阅(历史保留)"
