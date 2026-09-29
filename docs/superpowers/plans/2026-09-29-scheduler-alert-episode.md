@@ -155,7 +155,13 @@ git add -A && git commit -m "feat(alert): V31 alert_episode + AlertRepository/Jd
 
 - [ ] **Step 1: 建 `ExecutionMetrics` service**
 
-把 `MetricsController` 的 `snapshots` / `parentPct` / `perTask` 三方法 + 三个嵌套 record(`ExecutionSlo`/`TaskMetric`/`RecentFailures`)原样迁到 `scheduler-server` 的 `dev.scheduler.server.service.ExecutionMetrics`,保留 `JdbcTemplate jdbc` 构造注入、`@Component` 标注、`snapshots(executionSlo)(Integer windowSeconds)` 公开方法、字段名/JSON 输出逐字节不变(前端 `ExecutionSlo` 类型零改动)。
+把 `MetricsController` 的 `snapshots` / `parentPct` / `perTask` 三方法 + 三个嵌套 record(`ExecutionSlo`/`TaskMetric`/`RecentFailures`)原样迁到 `scheduler-server` 的 `dev.scheduler.server.service.ExecutionMetrics`,保留 `JdbcTemplate jdbc` 构造注入,`snapshots(Integer windowSeconds)` 公开方法,字段名/JSON 输出逐字节不变(前端 `ExecutionSlo` 类型零改动)。**不加 @Component**(镜像 `RuntimeConfigService` 的 plain{`@Bean` 装配)模式,本 Task 即在 `Beans.java` 补 @Bean(见 Step 1b),避免与未来 @Bean 重复定义。
+
+- [ ] **Step 1b: `Beans.java` 加 `ExecutionMetrics` bean**(供 MetricsController 注入)
+
+```java
+@Bean ExecutionMetrics executionMetrics(JdbcTemplate jdbc) { return new ExecutionMetrics(jdbc); }
+```
 
 - [ ] **Step 2: `MetricsController` 改为委托**
 
@@ -292,7 +298,7 @@ git add -A && git commit -m "feat(config): scheduler.alert.* hot keys + getDoubl
 
 - [ ] **Step 1: 写 `AlertEngine`(含完整状态机)**
 
-`@Component`,`MIN_TOTAL = 3` 常量。私有 record `Signal(String rule, String targetType, Long targetId, String severity, String value, boolean active)` 与 `Rule(String ruleId, String severity, String targetType)`。
+**纯类,不加 @Component**(`MIN_TOTAL = 3` 常量;bean 由 Task 6 `@Bean` 装配,避免与 Task 6 重复定义)。私有 record `Signal(String rule, String targetType, Long targetId, String severity, String value, boolean active)` 与 `Rule(String ruleId, String severity, String targetType)`。
 
 `evaluateOnce()`:
 ```java
@@ -383,14 +389,13 @@ git add -A && git commit -m "feat(alert): AlertEngine episode state machine"
 ```java
 @Bean AlertRepository alertRepository(JdbcTemplate jdbc) { return new JdbcAlertRepository(jdbc); }
 
-@Bean ExecutionMetrics executionMetrics(JdbcTemplate jdbc) { return new ExecutionMetrics(jdbc); }
-
 @Bean AlertEngine alertEngine(ExecutionMetrics metrics, ShardRepository shards,
     NotificationRepository notifs, AuditRepository audits, WorkerRepository workers,
     DagRepository dags, RuntimeConfigService settings, AlertRepository alertRepo) {
   return new AlertEngine(metrics, shards, notifs, audits, workers, dags, settings, alertRepo);
 }
 ```
+(`ExecutionMetrics` 已在 Task 2 Step 1b 装配,此处不复选,避免同依赖两 bean。)`AlertLoop` 内嵌类 + bean:
 `AlertLoop` 内嵌类 + bean:
 ```java
 /** 告警评价循环:leader 门控,周期驱动 AlertEngine.evaluateOnce();失败兜底不杀线程(镜像 NotificationLoop)。 */
