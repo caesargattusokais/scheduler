@@ -87,6 +87,7 @@ import org.testcontainers.junit.jupiter.Testcontainers;
         "scheduler.event.enabled=false", // 关闭 EventLoop,消除后台 scanOnce 消费 PENDING 事件行对 postEvent_* 断言(app_task_event 行数/event.submit 审计)的竞态(flaky)
         "scheduler.dlq.enabled=false", // 关闭 DLQ 自动重放循环:dlqReplayLoop 用例以桩 leader 手动驱动 tick,消除后台周期处理的竞态
         "scheduler.notifications.enabled=false", // 关闭通知投递循环(同异步竞态考量)
+        "scheduler.alert.enabled=false", // 关闭告警评价循环:防 AlertLoop 测试期后台评价产生非预期 alert_episode 行(同异步竞态考量)
         "management.endpoints.web.exposure.include=health,info,prometheus",
         "management.prometheus.metrics.export.enabled=true",
         // 操作者目录引导:上下文启动时幂等 upsert(OperatorBootstrap);既有写用例经下方默认头 alice 授权零改动。

@@ -2,11 +2,13 @@ package dev.scheduler.server.config;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.scheduler.core.OperatorRole;
+import dev.scheduler.persistence.AlertRepository;
 import dev.scheduler.persistence.AuditRepository;
 import dev.scheduler.persistence.AuthRepository;
 import dev.scheduler.persistence.DagRepository;
 import dev.scheduler.persistence.ExecutionRepository;
 import dev.scheduler.persistence.JdbcAuditRepository;
+import dev.scheduler.persistence.JdbcAlertRepository;
 import dev.scheduler.persistence.JdbcDagRepository;
 import dev.scheduler.persistence.JdbcExecutionRepository;
 import dev.scheduler.persistence.JdbcOperatorRepository;
@@ -30,6 +32,7 @@ import dev.scheduler.server.dag.DagEngine;
 import dev.scheduler.server.leader.AdvisoryLockLeaderElection;
 import dev.scheduler.server.leader.LeaderElection;
 import dev.scheduler.server.reconcile.Reconciler;
+import dev.scheduler.server.service.AlertEngine;
 import dev.scheduler.server.service.AuditRecorder;
 import dev.scheduler.server.service.AuditRetentionService;
 import dev.scheduler.server.service.ExecutionMetrics;
@@ -429,6 +432,27 @@ public class Beans {
     return new DlqReplayLoop(runtimeConfigService, shards, leader);
   }
 
+  /** 告警仓储(alert_episode):AlertEngine 读/写状态机的持久层落点。 */
+  @Bean
+  AlertRepository alertRepository(JdbcTemplate jdbc) {
+    return new JdbcAlertRepository(jdbc);
+  }
+
+  /** 告警引擎:消费 ExecutionMetrics/各仓储/runtime 热键,支持 8 条规则的状态机;由 AlertLoop 每拍驱动。 */
+  @Bean
+  AlertEngine alertEngine(ExecutionMetrics metrics, ShardRepository shards,
+      NotificationRepository notifs, AuditRepository audits, WorkerRepository workers,
+      DagRepository dags, RuntimeConfigService settings, AlertRepository alertRepo) {
+    return new AlertEngine(metrics, shards, notifs, audits, workers, dags, settings, alertRepo);
+  }
+
+  /** 告警评价循环:leader 门控,周期驱动 AlertEngine.evaluateOnce();失败兜底不杀线程(镜像 NotificationLoop)。 */
+  @Bean
+  @ConditionalOnProperty(name = "scheduler.alert.enabled", havingValue = "true", matchIfMissing = true)
+  AlertLoop alertLoop(RuntimeConfigService runtimeConfigService, AlertEngine engine, LeaderElection leader) {
+    return new AlertLoop(runtimeConfigService, engine, leader);
+  }
+
   /** ApplicationRunner + Ordered:使启动引导按 order 升序确定性执行(Spring 的 runner 排序读对象类的
    *  Ordered/@Order,不读 @Bean 工厂方法注解——lambda 无法承载得靠实体包装)。 */
   private static final class OrderedApplicationRunner implements ApplicationRunner, Ordered {
@@ -568,6 +592,24 @@ public class Beans {
           shards.discardShard(c.shardId());
         }
       }
+    }
+  }
+
+  /** 告警评价循环:leader 门控,周期驱动 AlertEngine.evaluateOnce();失败兜底不杀线程(镜像 NotificationLoop)。 */
+  public static final class AlertLoop extends ConfigurableLoop {
+    private final AlertEngine engine;
+    private final LeaderElection leader;
+
+    AlertLoop(RuntimeConfigService settings, AlertEngine engine, LeaderElection leader) {
+      super(settings, RuntimeConfigKeys.ALERT_DELAY, 15000L);
+      this.engine = engine;
+      this.leader = leader;
+      start();
+    }
+
+    @Override protected void loopOnce() {
+      if (!leader.isLeader()) return;
+      engine.evaluateOnce();
     }
   }
 

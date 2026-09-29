@@ -86,4 +86,8 @@ class LoopWiringTest {
   @Test void dlqReplayLoop_wiredToDlqDelay() {
     assertWiring(new Beans.DlqReplayLoop(EMPTY, null, null), RuntimeConfigKeys.DLQ_DELAY);
   }
+
+  @Test void alertLoop_wiredToAlertDelay() {
+    assertWiring(new Beans.AlertLoop(EMPTY, null, null), RuntimeConfigKeys.ALERT_DELAY);
+  }
 }
