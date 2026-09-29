@@ -286,3 +286,20 @@ export interface OutboundNotification {
   deliveredBody: string | null; // 投递时 HTTP POST 实际发出的完整 JSON 信封
   deliveredTo: string[];        // 投往的 webhook URL 列表(SENT=实际收到者)
 }
+
+// ---- 告警 episode(alert_episode):AlertEngine PENDING→OPEN→RESOLVED 后端迁移,前端只读渲染 ----
+/** 告警 episode 视图(镜像后端 AlertEpisodeView)。targetId/targetName/*_At/*_Value 可空。 */
+export interface AlertEpisodeView {
+  id: number;
+  rule: string;
+  targetType: string;
+  targetId: number | null;
+  targetName: string | null;
+  severity: 'critical' | 'high' | 'medium';
+  status: 'PENDING' | 'OPEN' | 'RESOLVED';
+  value: string;
+  openedAt: string | null;
+  openedValue: string | null;
+  resolvedAt: string | null;
+  resolvedValue: string | null;
+}

@@ -1,5 +1,6 @@
 import type {
   ActiveSession,
+  AlertEpisodeView,
   AuditArchiveResult,
   AuditEntry,
   AuditIntegrity,
@@ -289,6 +290,14 @@ export interface ListNotificationsParams { kind?: string; status?: string; limit
 /** 投递历史分页(读):按 kind/status 过滤,created_at DESC。 */
 export const listNotifications = (p: ListNotificationsParams = {}): Promise<Page<OutboundNotification>> =>
   req<Page<OutboundNotification>>(`/api/v1/notifications${qstr(p)}`);
+
+// ---- 告警 episode(只读,AlertEngine 后端迁移):OPEN 活动列表 + RESOLVED 历史分页 ----
+/** 当前打开的告警 episode(status='OPEN',小量非分页列表,可为空)。 */
+export const listAlertEpisodes = (): Promise<AlertEpisodeView[]> =>
+  req<AlertEpisodeView[]>('/api/v1/alerts/active');
+/** 已解决告警历史分页(status='RESOLVED')。 */
+export const listAlertHistory = (p: { limit?: number; offset?: number } = {}): Promise<Page<AlertEpisodeView>> =>
+  req<Page<AlertEpisodeView>>(`/api/v1/alerts/history${qstr(p)}`);
 
 // ---- 运行时设置(热键,DB 覆盖重载):GET 列全部;PUT 改值(ADMIN,写记审计) ----
 /** 列出全部运行时热键:包含默认值与 DB 覆盖来源/操作者/时间(读侧全量展示)。 */
