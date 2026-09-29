@@ -9,6 +9,7 @@ import ExecutionsPage from './pages/ExecutionsPage';
 import DlqPage from './pages/DlqPage';
 import DagsPage from './pages/DagsPage';
 import MetricsPage from './pages/MetricsPage';
+import AlertsPage from './pages/AlertsPage';
 import AuditPage from './pages/AuditPage';
 import OperatorsPage from './pages/OperatorsPage';
 import EventsPage from './pages/EventsPage';
@@ -22,6 +23,7 @@ const NAV = [
   { to: '/dlq', label: 'DLQ', icon: '⚠' },
   { to: '/dags', label: '工作流', icon: '⌗' },
   { to: '/metrics', label: '指标', icon: '▦' },
+  { to: '/alerts', label: '告警', icon: '⚡' }, // 治理·健康 landing(聚合各页不健康信号,可下钻)
   { to: '/audits', label: '审计', icon: '≡' }, // 第 6 入口
   { to: '/operators', label: '操作者', icon: '☺', adminOnly: true }, // 第 7 入口(操作者目录,仅 ADMIN 可管理/可见)
   { to: '/notifications', label: '通知', icon: '❐' }, // 4-1 入口(webhook 订阅 + 投递历史)
@@ -104,6 +106,7 @@ export default function App() {
             <Route path="/dlq" element={<DlqPage />} />
             <Route path="/dags" element={<DagsPage />} />
             <Route path="/metrics" element={<MetricsPage />} />
+            <Route path="/alerts" element={<AlertsPage />} />
             <Route path="/audits" element={<AuditPage />} />
             <Route path="/operators" element={isAdmin ? <OperatorsPage currentName={meOp.name} /> : <Navigate to="/tasks" replace />} />
             <Route path="/notifications" element={<NotificationsPage />} />
