@@ -2374,6 +2374,10 @@ class ApiIntegrationTest {
     String hash = jdbc.queryForObject(
         "SELECT password_hash FROM app_operator WHERE name='bob'", String.class);
     assertTrue(hash != null && hash.startsWith("$2"), "改密后应落 BCrypt 哈希,got: " + hash);
+    // 改密留痕:admin 修改他人口令亦须入库 operator.password.set 审计(治理:管理员改密可追溯,不能静默)。
+    assertEquals(1L, jdbc.queryForObject(
+        "SELECT count(*) FROM app_audit WHERE action='operator.password.set' AND operator='alice'"
+            + " AND meta->>'operator'='bob'", Long.class));
     // 既有会话被撤销(revoked_at 非空),token 不再可解析。
     assertEquals(1L, jdbc.queryForObject(
         "SELECT count(*) FROM app_auth_session WHERE operator_name='bob' AND revoked_at IS NOT NULL",

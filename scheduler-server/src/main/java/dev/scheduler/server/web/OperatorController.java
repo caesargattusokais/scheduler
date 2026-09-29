@@ -63,6 +63,9 @@ public class OperatorController {
     rejectSelf(name, "/api/v1/operators/" + name + "/password",
         "cannot manage your own account here; use /auth/change-password");
     passwords.setPassword(name, body.get("password"));
+    // 治理:admin 改他人口令须留痕(操作者可追溯);自助改密走 /auth/change-password 另有 auth.change_password 审计。
+    auditor.record(current.get(), "operator.password.set", TargetType.NONE, 0L,
+        Map.of("operator", name));
   }
 
   /** 停用操作者(整体 ADMIN)。同样拒绝停用自己(自锁后无人能救),记 access.denied 并抛 400。 */
