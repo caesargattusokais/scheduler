@@ -101,8 +101,9 @@ export default function AlertsPage() {
 
       {activeTab === 'active' ? (
         <>
-          {/* 总览横幅:active 为空 → 全绿;否则「{n} 项需要关注」 */}
-          {active.length === 0 ? (
+          {/* 总览横幅:active 为空 → 全绿;否则「{n} 项需要关注」。
+              加载失败时(activeErr 置位)抑制整个横幅——绝不出现「全绿」的假健康信号,仅留红色错误横幅 + 降级空态卡。 */}
+          {!activeErr && (active.length === 0 ? (
             <div className="mb-4 flex items-center gap-3 rounded-md border border-emerald-200 bg-emerald-50 px-4 py-3">
               <span className="h-2.5 w-2.5 rounded-full bg-emerald-500" />
               <div className="text-sm text-emerald-700">
@@ -115,7 +116,7 @@ export default function AlertsPage() {
               <span className="h-2.5 w-2.5 animate-pulse rounded-full bg-red-500" />
               <div className="text-sm text-red-700"><span className="font-semibold">{active.length} 项需要关注</span></div>
             </div>
-          )}
+          ))}
 
           {/* 分诊列表 */}
           {active.length === 0 ? (
