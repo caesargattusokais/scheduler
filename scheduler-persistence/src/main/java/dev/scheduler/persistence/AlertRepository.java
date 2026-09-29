@@ -11,6 +11,9 @@ public interface AlertRepository {
   /** 按 key 找活跃行(PENDING/OPEN),即 WHERE key=? AND status<>'RESOLVED'。 */
   Optional<AlertEpisode> findActiveByKey(String key);
 
+  /** 全量活跃行(PENDING/OPEN),供引擎 reconcile 逐键判定(无 join,与 findActiveByKey 同映射)。 */
+  List<AlertEpisode> findAllActive();
+
   /** 插入并返回含自增 id 的行(id 由 DB 回填)。同 key 已存在活跃(PENDING/OPEN)行时插入将抛
    *  DuplicateKeyException(alert_episode_active_key_uq partial unique 生效)。 */
   AlertEpisode insert(AlertEpisode e);

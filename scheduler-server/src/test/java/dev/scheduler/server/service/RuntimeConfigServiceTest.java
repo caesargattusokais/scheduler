@@ -148,4 +148,17 @@ class RuntimeConfigServiceTest {
     new RuntimeConfigService(repo, auditor).set(RuntimeConfigKeys.ALERT_OPEN_SAMPLES, "3", "alice");
     assertEquals("3", repo.find(RuntimeConfigKeys.ALERT_OPEN_SAMPLES).orElseThrow().value());
   }
+
+  @Test void set_recoverSamples_invalidValue_rejects() {
+    assertThrows(IllegalArgumentException.class,
+        () -> new RuntimeConfigService(new FakeRepo(), null)
+            .set(RuntimeConfigKeys.ALERT_RECOVER_SAMPLES, "abc", "alice"));
+  }
+
+  @Test void set_recoverSamples_valid_persists() {
+    FakeRepo repo = new FakeRepo();
+    AuditRecorder auditor = mock(AuditRecorder.class);
+    new RuntimeConfigService(repo, auditor).set(RuntimeConfigKeys.ALERT_RECOVER_SAMPLES, "2", "alice");
+    assertEquals("2", repo.find(RuntimeConfigKeys.ALERT_RECOVER_SAMPLES).orElseThrow().value());
+  }
 }

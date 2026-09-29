@@ -36,6 +36,23 @@ class JdbcAlertRepositoryTest extends AbstractPostgresTest {
     assertEquals(1, f.sampleCount());
   }
 
+  @Test void findAllActive_returnsOnlyNonTerminalRows() {
+    repo.insert(episode("active:pending"));
+    repo.insert(new AlertEpisode(0, "active:open", "cpu-high", "none", null, "warning",
+        "OPEN", 5, "98", Instant.now(), "98", null, null));
+    AlertEpisode doomed = repo.insert(episode("prune:resolved"));
+    repo.update(new AlertEpisode(doomed.id(), doomed.key(), doomed.rule(), doomed.targetType(),
+        doomed.targetId(), doomed.severity(), "RESOLVED", doomed.sampleCount(), doomed.value(),
+        doomed.openedAt(), doomed.openedValue(), Instant.now(), "97"));
+
+    var active = repo.findAllActive();
+    assertEquals(2, active.size(), "only PENDING/OPEN rows, not RESOLVED");
+    assertTrue(active.stream().anyMatch(e -> e.key().equals("active:pending")));
+    assertTrue(active.stream().anyMatch(a -> a.key().equals("active:open")));
+    assertTrue(active.stream().noneMatch(a -> a.status().equals("RESOLVED")),
+        "RESOLVED row must be excluded");
+  }
+
   @Test void secondNonTerminalSameKeyThrowsDuplicateKey() {
     repo.insert(episode("dup:key"));
     assertThrows(DuplicateKeyException.class,

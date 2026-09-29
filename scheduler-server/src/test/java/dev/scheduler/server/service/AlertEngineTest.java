@@ -81,6 +81,7 @@ class AlertEngineTest {
     long nextId = 1;
 
     public Optional<AlertEpisode> findActiveByKey(String key) { return Optional.ofNullable(active.get(key)); }
+    public List<AlertEpisode> findAllActive() { return new ArrayList<>(active.values()); }
 
     public AlertEpisode insert(AlertEpisode e) {
       AlertEpisode withId = new AlertEpisode(nextId++, e.key(), e.rule(), e.targetType(), e.targetId(),
@@ -283,6 +284,75 @@ class AlertEngineTest {
     h.engine.evaluateOnce();
     assertEquals(1, h.alerts.active.size());
     assertTrue(h.alerts.findActiveByKey("dag-run-failed:dag:10").isPresent());
+  }
+
+  // ---- reconcile:发射器停发信号时 OPEN/PENDING episode 必须被兜底回落 ----
+
+  @Test void reconcile_closesDagEpisodeWhenDagStopsFailing() {
+    Harness h = new Harness(base(3, 3, 0).put(RuntimeConfigKeys.ALERT_DAG_RUN_FAILED, "1"));
+    h.alerts.active.put("dag-run-failed:dag:10",
+        new AlertEpisode(7, "dag-run-failed:dag:10", "dag-run-failed", "dag", 10L, "high",
+            "OPEN", 3, "2", Instant.now(), "2", null, null));
+    when(h.dags.perDagFailedRunsSince(any())).thenReturn(List.of()); // 窗口无失败 → GROUP BY 缺行,无信号
+    h.engine.evaluateOnce(); // reconcile 合成 inactive:OPEN s=-1
+    h.engine.evaluateOnce(); // s=-2
+    h.engine.evaluateOnce(); // s=-3 → RESOLVED
+    assertTrue(h.alerts.findActiveByKey("dag-run-failed:dag:10").isEmpty(),
+        "失联的 OPEN episode 必须回落,不得永挂钩红");
+    AlertEpisode r = h.alerts.resolved.get("dag-run-failed:dag:10");
+    assertNotNull(r);
+    assertEquals("RESOLVED", r.status());
+    assertEquals(-3, r.sampleCount());
+    assertEquals("2", r.resolvedValue());
+    assertNotNull(r.resolvedAt());
+  }
+
+  @Test void reconcile_closesTaskEpisodeWhenThroughputDropsBelowMinTotal() {
+    Harness h = new Harness(base(3, 3, 0).put(RuntimeConfigKeys.ALERT_TASK_FAILURE_RATE, "0.2"));
+    h.alerts.active.put("task-failure-rate:task:1",
+        new AlertEpisode(9, "task-failure-rate:task:1", "task-failure-rate", "task", 1L, "high",
+            "OPEN", 3, "90%", Instant.now(), "90%", null, null));
+    h.slo(slo(0, List.of(new TaskMetric(1, "a", 1, 0.5)))); // throughput 1 < MIN_TOTAL → continue,无信号该键
+    h.engine.evaluateOnce();
+    h.engine.evaluateOnce();
+    h.engine.evaluateOnce();
+    assertTrue(h.alerts.findActiveByKey("task-failure-rate:task:1").isEmpty(),
+        "吞吐跌破 MIN_TOTAL 停发信号后 OPEN episode 必须回落");
+    AlertEpisode r = h.alerts.resolved.get("task-failure-rate:task:1");
+    assertNotNull(r);
+    assertEquals("RESOLVED", r.status());
+  }
+
+  @Test void reconcile_closesGlobalFailureRateWhenTotalDropsBelowMinTotal() {
+    Harness h = new Harness(base(3, 3, 0).put(RuntimeConfigKeys.ALERT_FAILURE_RATE, "0.05"));
+    h.alerts.active.put("failure-rate",
+        new AlertEpisode(11, "failure-rate", "failure-rate", null, null, "medium",
+            "OPEN", 3, "10%", Instant.now(), "10%", null, null));
+    h.slo(slo(0, List.of(new TaskMetric(1, "a", 1, 0.5)))); // total=1 < MIN_TOTAL → gate 跳过无信号
+    h.engine.evaluateOnce();
+    h.engine.evaluateOnce();
+    h.engine.evaluateOnce();
+    assertTrue(h.alerts.findActiveByKey("failure-rate").isEmpty(),
+        "总量跌破 MIN_TOTAL 停发信号后全局 OPEN 必须回落");
+    assertNotNull(h.alerts.resolved.get("failure-rate"));
+  }
+
+  @Test void reconcile_closesEpisodeWhenRuleDisabled() {
+    Config cfg = base(3, 3, 0).put(RuntimeConfigKeys.ALERT_P95_LATENCY_MS, "100");
+    Harness h = new Harness(cfg);
+    h.alerts.active.put("p95-latency",
+        new AlertEpisode(13, "p95-latency", "p95-latency", null, null, "medium",
+            "OPEN", 3, "999", Instant.now(), "999", null, null));
+    h.slo(slo(200, List.of()));
+    h.engine.evaluateOnce(); // 规则启用 → 常态信号保 OPEN
+    assertEquals("OPEN", h.episode("p95-latency").status());
+    cfg.put(RuntimeConfigKeys.ALERT_P95_LATENCY_MS, "0"); // 禁用 → 无信号该键,reconcile 兜底
+    h.engine.evaluateOnce();
+    h.engine.evaluateOnce();
+    h.engine.evaluateOnce();
+    assertTrue(h.alerts.findActiveByKey("p95-latency").isEmpty(),
+        "规则禁用停发信号后 OPEN episode 必须由 reconcile 回落");
+    assertNotNull(h.alerts.resolved.get("p95-latency"));
   }
 
   // ---- 剪枝与额外规则 ----

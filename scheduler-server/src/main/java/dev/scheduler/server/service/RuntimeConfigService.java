@@ -104,6 +104,7 @@ public class RuntimeConfigService {
                 || key.equals(RuntimeConfigKeys.ALERT_TASK_FAILURE_RATE)) {
           Double.parseDouble(value);
         } else if (key.equals(RuntimeConfigKeys.ALERT_OPEN_SAMPLES)
+                || key.equals(RuntimeConfigKeys.ALERT_RECOVER_SAMPLES)
                 || key.equals(RuntimeConfigKeys.ALERT_DLQ_DEPTH)
                 || key.equals(RuntimeConfigKeys.ALERT_AUDIT_TAMPER)
                 || key.equals(RuntimeConfigKeys.ALERT_DELIVERY_FAILED)

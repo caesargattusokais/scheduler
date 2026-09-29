@@ -15,8 +15,10 @@ import dev.scheduler.server.service.ExecutionMetrics.TaskMetric;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 
 /**
  * 告警引擎(五方向·2):每评估拍读热键阈值,跨 8 条规则(全局 + per-task + per-DAG)汇聚信号,
@@ -60,13 +62,38 @@ public class AlertEngine {
 
   private record Rule(String ruleId, String severity, String targetType) {}
 
-  /** 单拍评估:剪枝过期 RESOLVED 历史,再逐信号走状态机。Task 6 AlertLoop 每拍调。 */
+  /**
+   * 单拍评估:剪枝过期 RESOLVED 历史,再逐信号走状态机,最后 reconcile 兜底 —— 对「本拍不再产出信号」的活跃
+   * 行(见下)以合成 inactive 信号强制回落,堵死第 3 类栅控发射器(dag-run-failed GROUP BY 缺行、
+   * task-failure-rate/failure-rate 的 MIN_TOTAL `continue`)由此缺失信号致 episode 永 OPEN 的恢复漏洞。Task 6
+   * AlertLoop 每拍调。
+   */
   public void evaluateOnce() {
-    int open = Math.max(Math.toIntExact(settings.getLong(RuntimeConfigKeys.ALERT_OPEN_SAMPLES, 3L)), 1);
-    int recover = Math.max(Math.toIntExact(settings.getLong(RuntimeConfigKeys.ALERT_RECOVER_SAMPLES, 3L)), 1);
+    int open = clampWindow(settings.getLong(RuntimeConfigKeys.ALERT_OPEN_SAMPLES, 3L));
+    int recover = clampWindow(settings.getLong(RuntimeConfigKeys.ALERT_RECOVER_SAMPLES, 3L));
     long keepDays = settings.getLong(RuntimeConfigKeys.ALERT_HISTORY_KEEP_DAYS, 7L);
     if (keepDays > 0) repo.pruneResolved(Instant.now().minus(Duration.ofDays(keepDays)));
-    for (Signal s : collectSignals()) handle(s, open, recover);
+    List<Signal> signals = collectSignals();
+    Set<String> produced = new HashSet<>();
+    for (Signal s : signals) {
+      produced.add(keyOf(s));
+      handle(s, open, recover);
+    }
+    reconcile(produced, open, recover);
+  }
+
+  /** 对仍在 PENDING/OPEN、但本拍无对应信号的 episode,用其自身 info 合成 inactive 信号走标准 -recover 回落。 */
+  private void reconcile(Set<String> produced, int open, int recover) {
+    for (AlertEpisode ep : repo.findAllActive()) {
+      if (produced.contains(ep.key())) continue; // 该 key 已由常态信号处理,免双计
+      handle(new Signal(ep.rule(), ep.targetType(), ep.targetId(), ep.severity(), ep.value(), false),
+          open, recover);
+    }
+  }
+
+  /** sample 窗口开/收 clamp:至少 1、上限 10000,防 Long 溢 int 的 toIntExact 抛异常每拍卡死循环。 */
+  private static int clampWindow(long v) {
+    return (int) Math.min(Math.max(v, 1L), 10000L);
   }
 
   /** 组装 8 条规则信号(阈=0/停用即跳过该规则)。 */

@@ -38,6 +38,15 @@ public class JdbcAlertRepository implements AlertRepository {
   }
 
   @Override
+  public List<AlertEpisode> findAllActive() {
+    return jdbc.query(
+        "SELECT id, key, rule, target_type, target_id, severity, status, sample_count, value,"
+            + " opened_at, opened_value, resolved_at, resolved_value FROM alert_episode"
+            + " WHERE status IN ('PENDING','OPEN')",
+        (rs, i) -> map(rs));
+  }
+
+  @Override
   public AlertEpisode insert(AlertEpisode e) {
     // RETURNING id 回填自增主键注入返回记录。同一 key 已存在活跃行时 partial unique(alert_episode_active_key_uq)
     // 会抛 DuplicateKeyException——交由调用方捕获决定回落/丢弃,这里原样抛出。
