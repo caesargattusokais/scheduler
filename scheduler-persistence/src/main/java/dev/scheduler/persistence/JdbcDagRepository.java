@@ -442,4 +442,13 @@ public class JdbcDagRepository implements DagRepository {
         "SELECT count(*) FROM dag_run WHERE status='PENDING'", Long.class);
     return c == null ? 0 : c;
   }
+
+  @Override public List<DagRunFailedCount> perDagFailedRunsSince(Instant since) {
+    return jdbc.query(
+        "SELECT dag_id, count(*) AS cnt FROM dag_run"
+            + " WHERE status='FAILED' AND finished_at >= ?"
+            + " GROUP BY dag_id ORDER BY dag_id",
+        (rs, i) -> new DagRunFailedCount(rs.getLong("dag_id"), rs.getLong("cnt")),
+        java.sql.Timestamp.from(since));
+  }
 }

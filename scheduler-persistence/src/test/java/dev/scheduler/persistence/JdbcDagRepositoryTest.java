@@ -39,6 +39,14 @@ class JdbcDagRepositoryTest extends AbstractPostgresTest {
     return d.id();
   }
 
+  /** 直接插一条终态 dag_run(idempotency_key 全局唯一,key 须调用方各不同)。 */
+  private void insertTerminalRun(long dagId, String status, String idemKey, Instant finishedAt) {
+    jdbc.update("INSERT INTO dag_run (dag_id, status, idempotency_key, trigger_reason, finished_at)"
+        + " VALUES (?,?,?,?,?)",
+        dagId, status, idemKey, "test",
+        java.sql.Timestamp.from(finishedAt));
+  }
+
   @Test void createDag_persistsNodesAndEdges() {
     long t1 = newTask("0 */5 * * * *");
     long t2 = newTask("0 */5 * * * *");
@@ -234,6 +242,45 @@ class JdbcDagRepositoryTest extends AbstractPostgresTest {
     dagRepo.finalizeRun(r3, DagRunStatus.SUCCESS, "done");
 
     assertEquals(2, dagRepo.countActiveRuns(dagId));
+  }
+
+  /** 近窗每 DAG FAILED 计数:仅窗口内(>=since)终态 FAILED 计入;窗口外 FAILED 与非 FAILED 不计;零在窗 FAILED 的 DAG 缺席。 */
+  @Test void perDagFailedRunsSince_countsOnlyInWindowTerminalFailedPerDag() {
+    long dagA = newDag();
+    long dagB = newDag();
+    long dagC = newDag(); // 仅在窗 FAILED 为零 → 应缺席
+    Instant since = Instant.ofEpochMilli(1_000_000_000L);
+
+    insertTerminalRun(dagA, "FAILED", "a-in", since.plusSeconds(10));   // 窗内 FAILED → 计 1
+    insertTerminalRun(dagA, "FAILED", "a-out", since.minusSeconds(10)); // 窗外 FAILED → 不计
+    insertTerminalRun(dagA, "SUCCESS", "a-ok", since.plusSeconds(20));  // 窗内非 FAILED → 不计
+    insertTerminalRun(dagB, "FAILED", "b-in1", since.plusSeconds(30));  // 窗内 FAILED ×2
+    insertTerminalRun(dagB, "FAILED", "b-in2", since.plusSeconds(40));
+    insertTerminalRun(dagC, "FAILED", "c-out", since.minusSeconds(5));  // 窗外 FAILED → 缺席
+    insertTerminalRun(dagC, "CANCELED", "c-ok", since.plusSeconds(5));  // 非 FAILED → 缺席
+
+    var counts = dagRepo.perDagFailedRunsSince(since);
+
+    assertEquals(2, counts.size(), "零在窗 FAILED 的 dagC 不出现在 GROUP BY 结果(缺席)");
+    assertEquals(dagA, counts.get(0).dagId(), "按 dag_id 升序");
+    assertEquals(1L, counts.get(0).count(), "dagA 仅窗内那条 FAILED 计数;窗外 FAILED 与非 FAILED 均不计");
+    assertEquals(dagB, counts.get(1).dagId());
+    assertEquals(2L, counts.get(1).count(), "dagB 两条窗内 FAILED 全计");
+  }
+
+  /** since 为窗口起点(含):恰等于 since 的 finished_at 计入。 */
+  @Test void perDagFailedRunsSince_sinceInclusiveAndEmpty() {
+    long dagId = newDag();
+    Instant since = Instant.ofEpochMilli(1_000_000_000L);
+    insertTerminalRun(dagId, "FAILED", "edge", since); // finished_at 恰 == since → 应计入
+
+    var counts = dagRepo.perDagFailedRunsSince(since);
+    assertEquals(1, counts.size());
+    assertEquals(1L, counts.get(0).count(), "finished_at == since 计入(含)");
+
+    var none = dagRepo.perDagFailedRunsSince(since.plusSeconds(3600));
+    assertTrue(none.isEmpty(), "无命中 → 空 list,非 null");
+    assertNotNull(none, "空结果集返回空 list 而非 null");
   }
 
   /** 全局口径:跨所有 dag 计入非终态 run(终态不计);无 dag_id 过滤。 */

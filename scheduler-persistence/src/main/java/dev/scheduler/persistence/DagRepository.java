@@ -86,6 +86,10 @@ public interface DagRepository {
   /** 某 run 的非终态节点(status IN (PENDING, RUNNING)),取消级联用。 */
   List<DagRunNode> findNonTerminalNodes(long runId);
 
+  /** 近窗内每 DAG 终态 FAILED 的 dag_run 计数(告警 per-dag 信号源);since 为窗口起点(含),按 dag_id 升序。 */
+  List<DagRunFailedCount> perDagFailedRunsSince(Instant since);
+  record DagRunFailedCount(long dagId, long count) {}
+
   /** 惰性 spawn:置 execution_id + RUNNING,落 node_outcome(RUNNING,'spawned')。CAS on status='PENDING':
    *  0 行=已推进 → 返回 false。 */
   boolean markNodeSpawned(long nodeId, long executionId);
