@@ -154,4 +154,11 @@ public class JdbcAuditRepository implements AuditRepository {
             hasDiff, diffField, beforeField, metaField).toArray());
     return c == null ? 0 : c;
   }
+
+  @Override
+  public List<String> distinctActions() {
+    // 审计页动作筛选下拉数据源:数据里真实出现过的动作,去重字母序;新增审计动作自动出现,无需前端改列表。
+    return jdbc.query("SELECT DISTINCT action FROM app_audit ORDER BY action",
+        (rs, rowNum) -> rs.getString(1));
+  }
 }

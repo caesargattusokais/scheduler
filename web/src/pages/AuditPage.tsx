@@ -1,20 +1,14 @@
 // web/src/pages/AuditPage.tsx
 import { useCallback, useEffect, useState } from 'react';
-import { archiveAudits, getAuditIntegrity, listAudits } from '../api/client';
+import { archiveAudits, getAuditIntegrity, listAuditActions, listAudits } from '../api/client';
 import { useInterval } from '../lib/useInterval';
 import { AuditEntry, AuditIntegrity } from '../api/types';
 import Pager from '../components/Pager';
 
 const PAGE_SIZE = 20;
-const ACTIONS = [
-  // 资源动作
-  'task.create', 'task.update', 'task.pause', 'task.resume', 'task.delete', 'task.trigger',
-  'execution.rerun', 'execution.cancel', 'shard.requeue',
-  'dag.create', 'dag.pause', 'dag.resume', 'dag.trigger', 'dag_run.cancel', 'dag_node.rerun',
-  // 认证动作(登录/认证全量审计:成功侧 auth.* + 失败侧 access.denied + ADMIN 强制登出)
-  'auth.login', 'auth.change_password', 'auth.logout', 'access.denied', 'operator.sessions.revoke',
-  'operator.password.set',
-];
+// 动作筛选选项不再硬编码:随审计页挂载从 GET /audits/actions 拉取数据里真实出现过的动作,
+// 新增审计动作自动出现在下拉(免去每次加后端动作都要同步改这里)。
+// 目标类型是稳定枚举(TargetType),维持常量即可。
 const TARGET_TYPES = ['task', 'execution', 'shard', 'dag', 'dag_run', 'none'];
 
 const fmt = (t: string) => (t ? new Date(t).toLocaleString() : '—');
@@ -61,6 +55,8 @@ export default function AuditPage() {
   const [offset, setOffset] = useState(0);
   const [err, setErr] = useState<string | null>(null);
   const [integrity, setIntegrity] = useState<AuditIntegrity | null>(null);
+  /** 动作筛选选项:挂载时从 GET /audits/actions 拉取数据里真实出现过的动作(替代硬编码列表)。 */
+  const [actions, setActions] = useState<string[]>([]);
   const [archiveOlderThan, setArchiveOlderThan] = useState('');
   const [archiveMsg, setArchiveMsg] = useState<string | null>(null);
 
@@ -118,6 +114,7 @@ export default function AuditPage() {
     catch (e) { setErr(String(e)); }
   };
   useEffect(() => { load(); checkIntegrity(); }, [load]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { listAuditActions().then(setActions).catch(() => setActions([])); }, []);
   useInterval(load, 5000);
 
   return (
@@ -164,7 +161,7 @@ export default function AuditPage() {
           <select className="input" value={action}
             onChange={(e) => { setAction(e.target.value); setOffset(0); }}>
             <option value="">全部</option>
-            {ACTIONS.map((a) => <option key={a} value={a}>{a}</option>)}
+            {actions.map((a) => <option key={a} value={a}>{a}</option>)}
           </select>
         </label>
         <label className="field">

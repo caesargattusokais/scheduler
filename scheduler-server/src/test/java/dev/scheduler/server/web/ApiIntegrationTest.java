@@ -998,6 +998,35 @@ class ApiIntegrationTest {
         "SELECT count(*) FROM app_audit WHERE action='audit.archive' AND target_type='none'", Long.class));
   }
 
+  /** 审计页动作筛选数据源:GET /audits/actions 返回数据里真实出现过的动作(distinct 字母序)。
+   *  新增审计动作(如 operator.password.set)随数据自动出现在下拉,无需再改前端硬编码列表。 */
+  @Test
+  void auditActionsListsDistinctObservedActions() throws Exception {
+    // 动作产生前 endpooint 即可用(空数组)。
+    String emptyBody = mvc.perform(get("/api/v1/audits/actions"))
+        .andExpect(status().isOk()).andReturn().getResponse().getContentAsString();
+    assertTrue(objectMapper.readTree(emptyBody).isArray());
+
+    // 产生两种动作:任务写(task.create)+ admin 改密(operator.password.set)。
+    mvc.perform(post("/api/v1/tasks").cookie(session(ALICE_TOKEN))
+            .contentType(MediaType.APPLICATION_JSON)
+            .content("{\"name\":\"act-task\",\"kind\":\"cron\",\"handlerRef\":\"demo\",\"cron\":\""
+                + CRON + "\",\"shardCount\":1}"))
+        .andExpect(status().isCreated());
+    mvc.perform(post("/api/v1/operators/bob/password").cookie(session(ALICE_TOKEN))
+            .contentType(MediaType.APPLICATION_JSON)
+            .content("{\"password\":\"new-secret-1\"}"))
+        .andExpect(status().isOk());
+
+    JsonNode actions = objectMapper.readTree(mvc.perform(get("/api/v1/audits/actions"))
+        .andExpect(status().isOk()).andReturn().getResponse().getContentAsString());
+    List<String> list = new java.util.ArrayList<>();
+    actions.forEach(a -> list.add(a.asText()));
+    assertTrue(list.contains("task.create"), "应含 task.create, got: " + list);
+    assertTrue(list.contains("operator.password.set"), "新审计动作应自动出现在下拉, got: " + list);
+    assertEquals(list.size(), list.stream().distinct().count(), "应为去重集合");
+  }
+
   // ---------- 审计写端:三控制器 15 个写端点,审计operator取会话 cookie principal ----------
 
   /** 审计写端:TaskController create/update/pause/resume/trigger/delete;operator 取 CurrentOperator(会话 principal);meta 为后态。 */

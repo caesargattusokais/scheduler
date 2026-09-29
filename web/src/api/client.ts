@@ -241,6 +241,8 @@ export interface ListAuditsParams {
 }
 export const listAudits = (p: ListAuditsParams = {}): Promise<Page<AuditEntry>> =>
   req<Page<AuditEntry>>(`/api/v1/audits${qstr(p)}`);
+/** 审计页动作筛选下拉数据源:app_audit 中实际出现过的动作(distinct 字母序),随数据自动更新。 */
+export const listAuditActions = () => req<string[]>('/api/v1/audits/actions');
 /** 审计取证链完整性:全量入链且无篡改 → verified。 */
 export const getAuditIntegrity = () => req<AuditIntegrity>('/api/v1/audits/integrity');
 /** 归档 occurred_at 早于 olderThan(ISO)的审计行,即删即重链(ADMIN 专属)。返回本次归档行数。 */

@@ -121,6 +121,11 @@ public class AuditController {
   @GetMapping("/integrity")
   public AuditIntegrity integrity() { return audits.integrity(); }
 
+  /** 审计页动作筛选下拉数据源:app_audit 中实际出现过的动作(distinct,字母序)。读开放;
+   *  前端由此驱动筛选选项,新增审计动作自动出现,不再硬编码 in 前端。 */
+  @GetMapping("/actions")
+  public List<String> actions() { return audits.distinctActions(); }
+
   /** 归档 retention 旧行:operator 取 CurrentOperator(拦截器已保证为已登录操作者);
    *  olderThan 为 ISO-8601 截止(不含),limit 为该次最多归档条数(按 id 升序),默认 1000。
    *  返回形如 {"archived":n,"olderThan":"..."}。 */

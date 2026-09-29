@@ -53,4 +53,8 @@ public interface AuditRepository {
   /** 把 occurred_at < cutoff 的旧行(按 id 升序,单次至多 limit 条)复制到 app_audit_archive 并从 app_audit 删除,
    *  随后重链剩余行——删除不破坏取证链(integrity() 仍 verified)。同事务原子;返回本次归档行数。 */
   long archiveOlderThan(Instant cutoff, int limit);
+
+  /** app_audit 中实际出现过的动作(action)去重有序集合——审计页动作筛选下拉的数据源(替代前端硬编码,
+   *  新动作随数据自动出现,不再随新增审计动作手动配前端列表)。 */
+  List<String> distinctActions();
 }
