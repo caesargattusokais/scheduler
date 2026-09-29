@@ -204,7 +204,7 @@ class ApiIntegrationTest {
     jdbc.execute("TRUNCATE app_dag CASCADE; TRUNCATE execution, execution_outcome, execution_shard,"
         + " execution_shard_outcome, app_task, app_audit, app_audit_archive, worker,"
         + " app_auth_session, app_login_attempt, app_notification, app_task_event, app_webhook,"
-        + " app_runtime_config RESTART IDENTITY CASCADE");
+        + " app_runtime_config, alert_episode RESTART IDENTITY CASCADE");
     // app_operator 不在 TRUNCATE 之列(写端授权依赖其在引导/测试期间恒在;且不清 password_hash,保留上下文
     // 启动时 boot-pass 引导的口令,login(boot-pass) 恒可用):幂等确保 alice/bob/carol/dave 每用例都在,
     //  即便某用例 deactivate 过也不会让后续用例缺人。
@@ -2990,6 +2990,64 @@ class ApiIntegrationTest {
         .andExpect(status().isOk())
         .andExpect(jsonPath("$.total").value(1))
         .andExpect(jsonPath("$.items[0].id").value(delivered));
+  }
+
+  // ---- 告警读 API:GET /alerts/active(OPEN 列)+ /alerts/history(RESOLVED 分页),读开放 ----
+
+  /** 告警读往返:裸 jdbc 直插一条 OPEN + 一条 RESOLVED 行(镜像 notification/本类直种子手法;目标任务经
+   *  LEFT JOIN 出真实名,故先 seedTaskRow 取 id 作 target_id)。/active 深 assert OPEN 形状;RESOLVED 行只入 /history。 */
+  @Test
+  void alertsRoundTrip_historyPaged() throws Exception {
+    long tid = seedTaskRow("alerts-seed-task"); // 真实任务名经 join 解析 targetName,非 null
+    jdbc.update("INSERT INTO alert_episode(key, rule, target_type, target_id, severity, status,"
+            + " sample_count, value, opened_at, opened_value)"
+            + " VALUES('task-failure-rate:task:" + tid + "','task-failure-rate','task',?, 'high','OPEN',5,'33%',"
+            + " '2026-09-29T00:00:00Z','33%')", tid);
+    jdbc.update("INSERT INTO alert_episode(key, rule, target_type, target_id, severity, status,"
+            + " sample_count, value, opened_at, opened_value, resolved_at, resolved_value)"
+            + " VALUES('task-failure-rate:task:old:" + tid + "','task-failure-rate','task',?, 'high','RESOLVED',8,'25%',"
+            + " '2026-09-28T00:00:00Z','25%','2026-09-28T10:00:00Z','0%')", tid);
+
+    // /active → 仅 OPEN 1 条,深 assert 形状;resolvedAt 为 JSON null。
+    mvc.perform(get("/api/v1/alerts/active"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.length()").value(1))
+        .andExpect(jsonPath("$[0].rule").value("task-failure-rate"))
+        .andExpect(jsonPath("$[0].targetType").value("task"))
+        .andExpect(jsonPath("$[0].targetId").value(tid))
+        .andExpect(jsonPath("$[0].targetName").value("alerts-seed-task"))
+        .andExpect(jsonPath("$[0].status").value("OPEN"))
+        .andExpect(jsonPath("$[0].value").value("33%"))
+        .andExpect(jsonPath("$[0].openedAt").isNotEmpty())
+        .andExpect(jsonPath("$[0].resolvedAt").value(org.hamcrest.Matchers.nullValue()));
+
+    // /history → RESOLVED 1 条,分页信封{tems,total,offset,limit}与既有 Page 端点一致。
+    mvc.perform(get("/api/v1/alerts/history"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.total").value(1))
+        .andExpect(jsonPath("$.items.length()").value(1))
+        .andExpect(jsonPath("$.limit").value(100))
+        .andExpect(jsonPath("$.offset").value(0))
+        .andExpect(jsonPath("$.items[0].status").value("RESOLVED"))
+        .andExpect(jsonPath("$.items[0].resolvedAt").isNotEmpty());
+
+    // 分页参数:limit=1 offset=0 → total 恒全量 1。
+    mvc.perform(get("/api/v1/alerts/history").param("limit", "1").param("offset", "0"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.total").value(1))
+        .andExpect(jsonPath("$.items.length()").value(1));
+  }
+
+  /** 空态(truncate 后):/active 空数组,/history 空 items + total 0(无行不 NPE)。 */
+  @Test
+  void alertsRoundTrip_emptyState() throws Exception {
+    mvc.perform(get("/api/v1/alerts/active"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.length()").value(0));
+    mvc.perform(get("/api/v1/alerts/history"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.total").value(0))
+        .andExpect(jsonPath("$.items.length()").value(0));
   }
 
   // ---- 4-2 执行 SLO 指标:DB 快照聚合(父延迟 p50/p95、分片均长、per-task 吞吐/成功率、近窗失败细分) ----
