@@ -32,6 +32,7 @@ import dev.scheduler.server.service.RuntimeConfigService;
 import dev.scheduler.server.trigger.TriggerEngine;
 import dev.scheduler.persistence.RuntimeConfigRepository;
 import dev.scheduler.persistence.RuntimeConfigRow;
+import java.lang.reflect.Method;
 import java.util.Optional;
 import jakarta.servlet.http.Cookie;
 import java.time.Clock;
@@ -135,6 +136,8 @@ class ApiIntegrationTest {
   @Autowired dev.scheduler.server.leader.LeaderElection leader;
   /** 通知 outbox 仓储:投递历史 API 断言前先落库一行(fire 侧单测覆盖,集成侧不重驱动 NotificationLoop)。 */
   @Autowired NotificationRepository notifications;
+  /** @Bean 装配的真审计保留循环(默认 1h 周期,测试内不自行触发后台 tick;days 生效用例反射驱动其单拍)。 */
+  @Autowired dev.scheduler.server.config.Beans.AuditRetentionLoop auditRetentionLoop;
 
   /** 上下文启动(绑定时刻)前就存在的任务 id,用于断言 per-task 指标 series。 */
   private static long METRICS_TASK_ID;
@@ -960,6 +963,38 @@ class ApiIntegrationTest {
         .andExpect(status().isForbidden());
     assertEquals(1L, jdbc.queryForObject(
         "SELECT count(*) FROM app_audit WHERE action='access.denied' AND operator='bob'", Long.class));
+  }
+
+  /** @Bean 装配的真 AuditRetentionLoop:同步驱动其单拍,验证 audit.retention.days 热键确实驱动归档
+   *  (而非仅靠手动 /archive 端点)。建真实审计链行并回拨 occurred_at,PUT days=1 → 反射调其 loopOnce(protected)
+   *  → 老行入归档 + 归档动作回写审计。默认 1h 周期不会在测试内自行触发,无后台竞态。 */
+  @Test
+  void auditRetentionDays_hotKey_drivesLoopArchival() throws Exception {
+    // 建真实审计链行(task.create),回拨到真实 now-2 天(loopOnce 用 Instant.now(),非模拟钟)→ 早于 now-1 天截止线。
+    objectMapper.readTree(mvc.perform(post("/api/v1/tasks").cookie(session(ALICE_TOKEN))
+            .contentType(MediaType.APPLICATION_JSON)
+            .content("{\"name\":\"retention-task\",\"kind\":\"cron\",\"handlerRef\":\"demo\","
+                + "\"cron\":\"" + CRON + "\",\"shardCount\":1}"))
+        .andExpect(status().isCreated()).andReturn().getResponse().getContentAsString());
+    long auditId = jdbc.queryForObject("SELECT id FROM app_audit WHERE action='task.create'", Long.class);
+    jdbc.update("UPDATE app_audit SET occurred_at = now() - interval '2 days' WHERE id=?", auditId);
+
+    // 开启保留:days=1(热键;PUT 落 app_runtime_config,真循环每拍热读)。
+    mvc.perform(put("/api/v1/runtime-config/audit.retention.days")
+            .contentType(MediaType.APPLICATION_JSON).content("{\"value\":\"1\"}"))
+        .andExpect(status().isOk());
+
+    // 真循环单拍:loopOnce 为 protected,跨包反射调用;leader 守卫在上下文恒真。
+    Method loopOnce = auditRetentionLoop.getClass().getDeclaredMethod("loopOnce");
+    loopOnce.setAccessible(true);
+    loopOnce.invoke(auditRetentionLoop);
+
+    // 归档发生:老行离开 app_audit 入归档;归档动作自身回写一条 target=none 的 audit.archive。
+    assertEquals(0L, jdbc.queryForObject(
+        "SELECT count(*) FROM app_audit WHERE action='task.create'", Long.class));
+    assertEquals(1L, jdbc.queryForObject("SELECT count(*) FROM app_audit_archive", Long.class));
+    assertEquals(1L, jdbc.queryForObject(
+        "SELECT count(*) FROM app_audit WHERE action='audit.archive' AND target_type='none'", Long.class));
   }
 
   // ---------- 审计写端:三控制器 15 个写端点,审计operator取会话 cookie principal ----------
