@@ -13,6 +13,7 @@ const ACTIONS = [
   'dag.create', 'dag.pause', 'dag.resume', 'dag.trigger', 'dag_run.cancel', 'dag_node.rerun',
   // 认证动作(登录/认证全量审计:成功侧 auth.* + 失败侧 access.denied + ADMIN 强制登出)
   'auth.login', 'auth.change_password', 'auth.logout', 'access.denied', 'operator.sessions.revoke',
+  'operator.password.set',
 ];
 const TARGET_TYPES = ['task', 'execution', 'shard', 'dag', 'dag_run', 'none'];
 
