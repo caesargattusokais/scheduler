@@ -3,6 +3,22 @@ import { useCallback, useEffect, useState } from 'react';
 import { listRuntimeConfig, setRuntimeConfig } from '../api/client';
 import { RuntimeConfigEntry } from '../api/types';
 
+/** 各热键的用途说明(展示层;契约与默认值在 server RuntimeConfigKeys)。改动均热生效:delay 为下拍调度间隔,
+ *   capacity/suspend 为 worker 与全循环下拍即读。 */
+const KEY_DESC: Record<string, string> = {
+  'loop.scan-delay-ms': '扫描入队循环的调度间隔(毫秒):每隔多久扫一次待调度任务并入队执行。',
+  'reconcile.delay-ms': '对账循环间隔(毫秒):周期性校正执行状态(超时/活性回收/纠偏)。',
+  'dag.delay-ms': 'DAG 派生循环间隔(毫秒):扫活跃运行、按依赖派生下游节点。',
+  'event.scan-delay-ms': '事件入站扫描间隔(毫秒):轮询待处理的入站事件。',
+  'notifications.dispatch-delay-ms': '通知投递轮询间隔(毫秒):outbox 出队并投递 webhook 的节奏。',
+  'dlq.replay-delay-ms': 'DLQ 自动重放循环间隔(毫秒):扫超重放上限的死信分片并重新入队。',
+  'audit.retention.delay-ms': '审计归档循环间隔(毫秒):周期性执行归档扫描(默认 1 小时)。',
+  'audit.retention.days': '审计归档阈值(天):0=不归档;大于 0 时归档 N 天之前的审计(低优先,可调可启)。',
+  'worker.capacity': '每个 worker 并发认领/执行的在途分片数上限。热调增/减即时生效,不重建线程池。',
+  'worker.shutdown-grace-sec': 'worker 优雅停机等待在途分片排空的上限(秒);超时由 server 活性机制兜底回收。',
+  suspend: '全局暂停开关:置 true 后所有 server 循环与 worker 认领都停新动作(排空在途);清位后下一拍恢复。',
+};
+
 export default function SettingsPage() {
   const [items, setItems] = useState<RuntimeConfigEntry[]>([]);
   const [err, setErr] = useState<string | null>(null);
@@ -40,7 +56,7 @@ export default function SettingsPage() {
         <div className="table-wrap">
           <table className="table">
             <thead>
-              <tr><th>键</th><th>当前值</th><th>来源</th><th>更新者</th><th>更新时间</th><th></th></tr>
+              <tr><th>键</th><th>说明</th><th>当前值</th><th>来源</th><th>更新者</th><th>更新时间</th><th></th></tr>
             </thead>
             <tbody>
               {items.map((item) => (
@@ -65,6 +81,7 @@ function Row({ item, busy, onSave }: {
   return (
     <tr>
       <td className="font-mono text-sm">{item.key}</td>
+      <td className="max-w-md text-left text-sm text-slate-600">{KEY_DESC[item.key] ?? '—'}</td>
       <td className="text-sm">
         {isSuspend
           ? (item.value === 'true'
