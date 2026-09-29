@@ -2889,13 +2889,15 @@ class ApiIntegrationTest {
         .andExpect(status().isUnauthorized());
   }
 
-  /** ADMIN 设密(人类选定口令)→ 清 must_change 标(强制首登改密解除)。 */
+  /** ADMIN 设密(人类选定口令)→ 清 must_change 标(强制首登改密解除)。
+   *  口令与 adminSetsPassword_updatesHashAndRevokesSessions 区分:resetDb 不 TRUNCATE app_password_history,
+   *  同值跨用例第二次会触发防重 400,故各自用独立口令隔离用例顺序。 */
   @Test
   void adminSetPassword_clearsMustChangeFlag() throws Exception {
     jdbc.update("UPDATE app_operator SET must_change_password=true WHERE name='bob'");
     mvc.perform(post("/api/v1/operators/bob/password").cookie(session(ALICE_TOKEN))
             .contentType(MediaType.APPLICATION_JSON)
-            .content("{\"password\":\"new-secret-1\"}"))
+            .content("{\"password\":\"fresh-secret-2\"}"))
         .andExpect(status().isOk());
     assertEquals(Boolean.FALSE, jdbc.queryForObject(
         "SELECT must_change_password FROM app_operator WHERE name='bob'", Boolean.class),
