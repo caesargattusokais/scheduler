@@ -84,6 +84,7 @@ import org.testcontainers.junit.jupiter.Testcontainers;
     properties = {
         "scheduler.loop.enabled=false",
         "scheduler.dag.enabled=false", // 关闭 DagLoop,消除异步扫描对同步驱动断言(dagEngine.scanOnce)的竞态
+        "scheduler.event.enabled=false", // 关闭 EventLoop,消除后台 scanOnce 消费 PENDING 事件行对 postEvent_* 断言(app_task_event 行数/event.submit 审计)的竞态(flaky)
         "scheduler.dlq.enabled=false", // 关闭 DLQ 自动重放循环:dlqReplayLoop 用例以桩 leader 手动驱动 tick,消除后台周期处理的竞态
         "scheduler.notifications.enabled=false", // 关闭通知投递循环(同异步竞态考量)
         "management.endpoints.web.exposure.include=health,info,prometheus",
