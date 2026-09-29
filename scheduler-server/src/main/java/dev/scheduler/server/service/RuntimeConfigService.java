@@ -32,6 +32,18 @@ public class RuntimeConfigService {
     }
   }
 
+  /** 比率阈值读取(failure-rate 等):值必须是可解析的 double,否则回落 fallback。 */
+  public double getDouble(String key, double fallback) {
+    RuntimeConfigRow row = repo.find(key).orElse(null);
+    if (row == null) return fallback;
+    try {
+      return Double.parseDouble(row.value().trim());
+    } catch (NumberFormatException e) {
+      log.warn("runtime config {} has non-numeric value '{}'; falling back to {}", key, row.value(), fallback);
+      return fallback;
+    }
+  }
+
   public boolean getFlag(String key, boolean fallback) {
     RuntimeConfigRow row = repo.find(key).orElse(null);
     if (row == null) return fallback;
@@ -88,6 +100,9 @@ public class RuntimeConfigService {
           Long.parseLong(value);
         } else if (key.equals("worker.capacity")) {
           Long.parseLong(value);
+        } else if (key.equals(RuntimeConfigKeys.ALERT_FAILURE_RATE)
+                || key.equals(RuntimeConfigKeys.ALERT_TASK_FAILURE_RATE)) {
+          Double.parseDouble(value);
         }
       } catch (NumberFormatException e) {
         throw new IllegalArgumentException("invalid numeric value for " + key + ": " + value);

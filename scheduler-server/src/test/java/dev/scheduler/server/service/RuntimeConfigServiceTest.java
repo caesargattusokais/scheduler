@@ -79,4 +79,60 @@ class RuntimeConfigServiceTest {
     assertThrows(IllegalArgumentException.class,
         () -> new RuntimeConfigService(new FakeRepo(), null).set("loop.scan-delay-ms", "abc", "alice"));
   }
+
+  // ---- Task 4: scheduler.alert.* hot keys + getDouble ----
+
+  @Test void alertKeys_areKnown() {
+    assertTrue(RuntimeConfigKeys.isKnown(RuntimeConfigKeys.ALERT_DELAY));
+    assertTrue(RuntimeConfigKeys.isKnown(RuntimeConfigKeys.ALERT_OPEN_SAMPLES));
+    assertTrue(RuntimeConfigKeys.isKnown(RuntimeConfigKeys.ALERT_RECOVER_SAMPLES));
+    assertTrue(RuntimeConfigKeys.isKnown(RuntimeConfigKeys.ALERT_HISTORY_KEEP_DAYS));
+    assertTrue(RuntimeConfigKeys.isKnown(RuntimeConfigKeys.ALERT_AUDIT_TAMPER));
+    assertTrue(RuntimeConfigKeys.isKnown(RuntimeConfigKeys.ALERT_DLQ_DEPTH));
+    assertTrue(RuntimeConfigKeys.isKnown(RuntimeConfigKeys.ALERT_DELIVERY_FAILED));
+    assertTrue(RuntimeConfigKeys.isKnown(RuntimeConfigKeys.ALERT_FAILURE_RATE));
+    assertTrue(RuntimeConfigKeys.isKnown(RuntimeConfigKeys.ALERT_P95_LATENCY_MS));
+    assertTrue(RuntimeConfigKeys.isKnown(RuntimeConfigKeys.ALERT_WORKER_OFFLINE));
+    assertTrue(RuntimeConfigKeys.isKnown(RuntimeConfigKeys.ALERT_TASK_FAILURE_RATE));
+    assertTrue(RuntimeConfigKeys.isKnown(RuntimeConfigKeys.ALERT_DAG_RUN_FAILED));
+  }
+
+  @Test void alertKeys_defaultOf() {
+    assertEquals("0.05", RuntimeConfigKeys.defaultOf(RuntimeConfigKeys.ALERT_FAILURE_RATE));
+    assertEquals("5000", RuntimeConfigKeys.defaultOf(RuntimeConfigKeys.ALERT_P95_LATENCY_MS));
+    assertEquals("3", RuntimeConfigKeys.defaultOf(RuntimeConfigKeys.ALERT_OPEN_SAMPLES));
+    assertEquals("7", RuntimeConfigKeys.defaultOf(RuntimeConfigKeys.ALERT_HISTORY_KEEP_DAYS));
+  }
+
+  @Test void getDouble_usesDbValue() {
+    FakeRepo repo = new FakeRepo();
+    repo.upsert(RuntimeConfigKeys.ALERT_FAILURE_RATE, "0.05", "a");
+    assertEquals(0.05,
+        new RuntimeConfigService(repo, null).getDouble(RuntimeConfigKeys.ALERT_FAILURE_RATE, 0.1));
+  }
+
+  @Test void getDouble_invalidValue_fallsBack() {
+    FakeRepo repo = new FakeRepo();
+    repo.upsert(RuntimeConfigKeys.ALERT_FAILURE_RATE, "abc", "a");
+    assertEquals(0.1,
+        new RuntimeConfigService(repo, null).getDouble(RuntimeConfigKeys.ALERT_FAILURE_RATE, 0.1));
+  }
+
+  @Test void getDouble_missing_fallsBack() {
+    assertEquals(0.1,
+        new RuntimeConfigService(new FakeRepo(), null).getDouble(RuntimeConfigKeys.ALERT_FAILURE_RATE, 0.1));
+  }
+
+  @Test void set_alertRate_valid_persists() {
+    FakeRepo repo = new FakeRepo();
+    AuditRecorder auditor = mock(AuditRecorder.class);
+    new RuntimeConfigService(repo, auditor).set(RuntimeConfigKeys.ALERT_FAILURE_RATE, "0.2", "alice");
+    assertEquals("0.2", repo.find(RuntimeConfigKeys.ALERT_FAILURE_RATE).orElseThrow().value());
+  }
+
+  @Test void set_alertRate_invalidValue_rejects() {
+    assertThrows(IllegalArgumentException.class,
+        () -> new RuntimeConfigService(new FakeRepo(), null)
+            .set(RuntimeConfigKeys.ALERT_FAILURE_RATE, "abc", "alice"));
+  }
 }
