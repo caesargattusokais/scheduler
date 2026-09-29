@@ -161,7 +161,7 @@ public class AlertEngine {
       if ("PENDING".equals(e.status()) && next >= open) {
         repo.update(with(key, s, "OPEN", next, e, Instant.now(), s.value(), null, null));
       } else {
-        repo.update(with(key, s, "PENDING", next, e, null, null, null, null));
+        repo.update(with(key, s, e.status(), next, e, e.openedAt(), e.openedValue(), e.resolvedAt(), e.resolvedValue()));
       }
     } else {
       int next = e.sampleCount() < 0 ? e.sampleCount() - 1 : -1;

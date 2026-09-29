@@ -215,6 +215,28 @@ class AlertEngineTest {
     assertTrue(h.alerts.active.isEmpty());
   }
 
+  @Test void open_persistsWhileConditionActive_keepsStatusAndOpened() {
+    Harness h = new Harness(base(3, 3, 0).put(RuntimeConfigKeys.ALERT_P95_LATENCY_MS, "100"))
+        .slo(slo(200, List.of()));
+    h.engine.evaluateOnce(); // s=1 PENDING
+    h.engine.evaluateOnce(); // s=2 PENDING
+    h.engine.evaluateOnce(); // s=3 OPEN,落 opened_at/opened_value
+    AlertEpisode opened = h.episode("p95-latency");
+    String openedValue = opened.openedValue();
+    Instant openedAt = opened.openedAt();
+    assertNotNull(openedAt);
+    assertEquals("200", openedValue);
+    // 条件持续 active,sample_count 继续攀升 → 行必须保持 OPEN,不回退 PENDING。
+    h.engine.evaluateOnce(); // s=4
+    h.engine.evaluateOnce(); // s=5
+    h.engine.evaluateOnce(); // s=6
+    AlertEpisode after = h.episode("p95-latency");
+    assertEquals("OPEN", after.status(), "持续 active 时 OPEN 不得回退到 PENDING");
+    assertEquals(6, after.sampleCount());
+    assertEquals(openedAt, after.openedAt(), "OPEN 的 opened_at 不得被清空/重写");
+    assertEquals(openedValue, after.openedValue(), "OPEN 的 opened_value 不得丢失");
+  }
+
   // ---- per-task / per-dag 独立键 ----
 
   @Test void perTask_twoOverTwoKeys_underNotEmitted() {
