@@ -32,6 +32,7 @@ import dev.scheduler.server.leader.LeaderElection;
 import dev.scheduler.server.reconcile.Reconciler;
 import dev.scheduler.server.service.AuditRecorder;
 import dev.scheduler.server.service.AuditRetentionService;
+import dev.scheduler.server.service.ExecutionMetrics;
 import dev.scheduler.server.service.NotificationDispatcher;
 import dev.scheduler.server.service.NotificationFirer;
 import dev.scheduler.server.service.NotificationHub;
@@ -387,6 +388,12 @@ public class Beans {
   RuntimeConfigService runtimeConfigService(RuntimeConfigRepository runtimeConfigRepository,
                                             AuditRecorder auditor) {
     return new RuntimeConfigService(runtimeConfigRepository, auditor);
+  }
+
+  /** 执行 SLO 聚合共享信号源:SLO 端点(MetricsController)与告警引擎(AlertEngine)共用同一查询口径。 */
+  @Bean
+  ExecutionMetrics executionMetrics(JdbcTemplate jdbc) {
+    return new ExecutionMetrics(jdbc);
   }
 
   /** 通知投递器:foreground 拉取到期行、HMAC 签名投递、退避/重试/终态。由 NotificationLoop 周期驱动。 */
