@@ -5,7 +5,7 @@ import { ActiveSession, OperatorEntry } from '../api/types';
 
 const ROLE_OPTS = ['OPERATOR', 'ADMIN'] as const;
 
-export default function OperatorsPage() {
+export default function OperatorsPage({ currentName }: { currentName: string }) {
   const [rows, setRows] = useState<OperatorEntry[]>([]);
   const [err, setErr] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -118,20 +118,27 @@ export default function OperatorsPage() {
               <tr><th>名称</th><th>角色</th><th>状态</th><th></th></tr>
             </thead>
             <tbody>
-              {rows.map((r) => (
+              {rows.map((r) => {
+                // 自己那行不做自害管理(设密撤自己会话、停用自锁):仅保留会话查看;改自己的密走身份菜单「修改密码」。
+                const me = r.name === currentName;
+                return (
                 <Fragment key={r.name}>
                   <tr>
-                    <td className="font-mono text-sm">{r.name}</td>
+                    <td className="font-mono text-sm">{r.name}
+                      {me && <span className="ml-2 rounded bg-violet-100 px-1.5 py-0.5 text-xs font-medium text-violet-700">当前登录(自助改密)</span>}
+                    </td>
                     <td><span className={badge(r.role)}>{r.role}</span></td>
                     <td>{r.active
                       ? <span className="rounded bg-emerald-100 px-1.5 py-0.5 text-xs font-medium text-emerald-700">启用</span>
                       : <span className="rounded bg-slate-200 px-1.5 py-0.5 text-xs font-medium text-slate-600">已停用</span>}</td>
                     <td className="text-right">
-                      <button className="btn btn-secondary" title="查看并管理该操作者的活动会话(ADMIN;可强制登出)"
+                      <button className="btn btn-secondary" title="查看该操作者的活动会话(ADMIN;可强制登出)"
                         onClick={() => toggleSessions(r.name)}>{sessionsFor === r.name ? '收起' : '会话'}</button>
-                      <button className="btn btn-secondary" title="设置该操作者的登录密码(ADMIN;成功后其会话被撤销,需重新登录)"
-                        onClick={() => setPwd(r.name)}>设密码</button>
-                      {r.active && (
+                      {!me && (
+                        <button className="btn btn-secondary" title="设置该操作者的登录密码(ADMIN;成功后其会话被撤销,需重新登录)"
+                          onClick={() => setPwd(r.name)}>设密码</button>
+                      )}
+                      {!me && r.active && (
                         <button className="btn btn-secondary" title="停用后该操作者不再能执行写操作"
                           onClick={() => deactivate(r.name)}>停用</button>
                       )}
@@ -153,7 +160,7 @@ export default function OperatorsPage() {
                               </span>
                             ))}
                           </div>
-                          {!sessLoading && sessions.length > 0 && (
+                          {!sessLoading && !me && sessions.length > 0 && (
                             <button className="btn btn-secondary" title="立即撤销该操作者全部活动会话"
                               onClick={() => revoke(r.name)}>强制登出</button>
                           )}
@@ -162,7 +169,8 @@ export default function OperatorsPage() {
                     </tr>
                   )}
                 </Fragment>
-              ))}
+                );
+              })}
             </tbody>
           </table>
         </div>

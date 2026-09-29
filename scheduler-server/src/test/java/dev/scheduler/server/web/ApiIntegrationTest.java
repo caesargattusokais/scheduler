@@ -2378,6 +2378,32 @@ class ApiIntegrationTest {
         .andExpect(status().isBadRequest());
   }
 
+  /** 强认证:管理员不得在操作者目录操作自己(设密撤自己会话、停用自锁)→ 400 + access.denied,且自己会话未被误撤销。 */
+  @Test
+  void adminCannotOperateOnSelf_returns400_andAuditsWithoutRevokingOwnSession() throws Exception {
+    // 给自己设密 → 400,提示走自助改密。
+    mvc.perform(post("/api/v1/operators/alice/password").cookie(session(ALICE_TOKEN))
+            .contentType(MediaType.APPLICATION_JSON)
+            .content("{\"password\":\"new-secret-1\"}"))
+        .andExpect(status().isBadRequest())
+        .andExpect(jsonPath("$.message").value(org.hamcrest.Matchers.containsString("/auth/change-password")));
+    // 停用自己 → 400。
+    mvc.perform(post("/api/v1/operators/alice/deactivate").cookie(session(ALICE_TOKEN)))
+        .andExpect(status().isBadRequest())
+        .andExpect(jsonPath("$.message").value(org.hamcrest.Matchers.containsString("cannot deactivate your own account")));
+    // 两次拒绝各落一条 operator=alice 的 access.denied。
+    assertEquals(2L, jdbc.queryForObject(
+        "SELECT count(*) FROM app_audit WHERE action='access.denied' AND operator='alice'", Long.class));
+    // 关键:自己仍非自害被撤——篡改的守卫若撤销了调用者会话,后续 ADMIN 写会 401,这里必须仍成功。
+    assertEquals(1L, jdbc.queryForObject(
+        "SELECT count(*) FROM app_auth_session WHERE token_hash=? AND revoked_at IS NULL",
+        Long.class, AuthHashing.sha256(ALICE_TOKEN)));
+    String body = "{\"name\":\"self-non-harmed\",\"kind\":\"cron\",\"handlerRef\":\"demo\",\"cron\":\"" + CRON + "\"}";
+    mvc.perform(post("/api/v1/tasks").cookie(session(ALICE_TOKEN))
+            .contentType(MediaType.APPLICATION_JSON).content(body))
+        .andExpect(status().isCreated());
+  }
+
   /** 权限拒绝会留一条 access.denied 审计(自带称操作者),自动进取证链。 */
   @Test
   void accessDenied_isAudited() throws Exception {

@@ -56,15 +56,30 @@ public class OperatorController {
         .orElse(new OperatorEntry(req.name().trim(), req.role(), req.active()));
   }
 
-  /** 设/改操作者口令(长度校验 + BCrypt 落库 + 撤销该操作者全部会话)。 */
+  /** 设/改操作者口令(长度校验 + BCrypt 落库 + 撤销该操作者全部会话)。拒绝为当前登录者自己设密
+   *  (设密会撤掉自己当前会话→自锁/清会话,属误用路径),记 access.denied 并抛 400,引导走自助 /auth/change-password。 */
   @PostMapping("/{name}/password")
   public void setPassword(@PathVariable String name, @RequestBody Map<String, String> body) {
+    rejectSelf(name, "/api/v1/operators/" + name + "/password",
+        "cannot manage your own account here; use /auth/change-password");
     passwords.setPassword(name, body.get("password"));
   }
 
+  /** 停用操作者(整体 ADMIN)。同样拒绝停用自己(自锁后无人能救),记 access.denied 并抛 400。 */
   @PostMapping("/{name}/deactivate")
   public void deactivate(@PathVariable String name) {
+    rejectSelf(name, "/api/v1/operators/" + name + "/deactivate", "cannot deactivate your own account");
     passwords.deactivate(name);
+  }
+
+  /** 管理员不得在操作者目录里管理自己(设密撤自己会话、停用自锁)→ 记 access.denied 并抛 400。
+   *  自己的账号变更应走自助流程(/auth/change-password);对他人无副作用,放行。 */
+  private void rejectSelf(String name, String path, String reason) {
+    if (current.get() != null && name.equals(current.get())) {
+      auditor.record(current.get(), "access.denied", TargetType.NONE, 0L,
+          Map.of("path", path, "method", "POST", "reason", reason, "required", "ADMIN"));
+      throw new IllegalArgumentException(reason);
+    }
   }
 
   /** 活动会话视图:列该操作者未撤销且未过期的会话(建立/到期时刻 + 截断哈希展示键)。ADMIN。 */

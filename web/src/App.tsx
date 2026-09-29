@@ -105,7 +105,7 @@ export default function App() {
             <Route path="/dags" element={<DagsPage />} />
             <Route path="/metrics" element={<MetricsPage />} />
             <Route path="/audits" element={<AuditPage />} />
-            <Route path="/operators" element={isAdmin ? <OperatorsPage /> : <Navigate to="/tasks" replace />} />
+            <Route path="/operators" element={isAdmin ? <OperatorsPage currentName={meOp.name} /> : <Navigate to="/tasks" replace />} />
             <Route path="/notifications" element={<NotificationsPage />} />
             <Route path="/settings" element={<SettingsPage />} />
             {/* 自助改密页(身份菜单入口;强制改密走上方硬门分支,不经此路由) */}
