@@ -1006,4 +1006,89 @@ class JdbcShardRepositoryTest extends AbstractPostgresTest {
     assertTrue(shardRepo.findOverRuntime(taskId, 60, 30).stream().anyMatch(e -> e.id() == sid),
         "死属主超时 → 列入回收");
   }
+
+  // ---- E2B 可观测:stuck-alive(findStuckAliveRunning / countStuckAliveRunning)----
+
+  private void seedTaskTimeout(long taskId, int timeoutSeconds) {
+    jdbc.update("UPDATE app_task SET timeout_seconds=? WHERE id=?", timeoutSeconds, taskId);
+  }
+
+  /** stuck-alive:活属主 + 已超其运行预算 → 列入(被 findOverRuntime 排除的补集,自观测)。 */
+  @Test void findStuckAliveRunning_aliveOwnerOverBudget_isReturned() {
+    long taskId = newTask(1, 8);
+    seedTaskTimeout(taskId, 60);
+    long parentId = seedParentAndShards(taskId, 1);
+    long sid = shard(parentId, 0).id();
+    jdbc.update("UPDATE execution_shard SET status='RUNNING', worker_id='w-sa-a',"
+        + " started_at=now() - interval '10 minutes' WHERE id=?", sid);
+    seedWorker("w-sa-a", 5); // ALIVE, last_seen 5s 前 < stale(30)
+
+    var stuck = shardRepo.findStuckAliveRunning(taskId, 30);
+    assertEquals(1, stuck.size());
+    assertEquals(sid, stuck.get(0).id());
+    assertEquals("w-sa-a", stuck.get(0).workerId());
+    assertEquals(60, stuck.get(0).timeoutSeconds());
+  }
+
+  /** 活属主但未超其 timeout 预算 → 不视为卡死(慢而健康不误报)。 */
+  @Test void findStuckAliveRunning_aliveOwnerUnderBudget_notReturned() {
+    long taskId = newTask(1, 8);
+    seedTaskTimeout(taskId, 60 * 60); // 1h 预算
+    long parentId = seedParentAndShards(taskId, 1);
+    long sid = shard(parentId, 0).id();
+    jdbc.update("UPDATE execution_shard SET status='RUNNING', worker_id='w-sa-b',"
+        + " started_at=now() - interval '10 minutes' WHERE id=?", sid);
+    seedWorker("w-sa-b", 5);
+
+    assertTrue(shardRepo.findStuckAliveRunning(taskId, 30).stream().noneMatch(e -> e.id() == sid),
+        "活属主但未超预算 → 不列入 stuck");
+  }
+
+  /** 死属主(即便超预算)不入 stuck —— 那是普通回收路径,finstuck 只关心活体卡死。 */
+  @Test void findStuckAliveRunning_deadOwnerOverBudget_notReturned() {
+    long taskId = newTask(1, 8);
+    seedTaskTimeout(taskId, 60);
+    long parentId = seedParentAndShards(taskId, 1);
+    long sid = shard(parentId, 0).id();
+    jdbc.update("UPDATE execution_shard SET status='RUNNING', worker_id='w-sa-c',"
+        + " started_at=now() - interval '10 minutes' WHERE id=?", sid);
+    seedWorker("w-sa-c", 120); // ALIVE 但 last_seen 120s 前 > stale(30) → 判死
+
+    assertTrue(shardRepo.findStuckAliveRunning(taskId, 30).stream().noneMatch(e -> e.id() == sid),
+        "死属主超预算 → 走普通回收,不列入 stuck");
+  }
+
+  /** 无运行预算(timeout_seconds=0)的 task 不计卡死。 */
+  @Test void findStuckAliveRunning_noTimeoutBudget_notCounted() {
+    long taskId = newTask(1, 8);
+    seedTaskTimeout(taskId, 0); // newTask 默认 timeout_seconds=300,须显式清零预算
+    long parentId = seedParentAndShards(taskId, 1);
+    long sid = shard(parentId, 0).id();
+    jdbc.update("UPDATE execution_shard SET status='RUNNING', worker_id='w-sa-d',"
+        + " started_at=now() - interval '10 minutes' WHERE id=?", sid);
+    seedWorker("w-sa-d", 5);
+
+    assertTrue(shardRepo.findStuckAliveRunning(taskId, 30).stream().noneMatch(e -> e.id() == sid));
+  }
+
+  /** count 与列表一致,且支持全量(taskId=null)。 */
+  @Test void countStuckAliveRunning_matchesList_andSupportsGlobal() {
+    long taskA = newTask(1, 8); seedTaskTimeout(taskA, 60);
+    long parentA = seedParentAndShards(taskA, 1);
+    long sa = shard(parentA, 0).id();
+    jdbc.update("UPDATE execution_shard SET status='RUNNING', worker_id='w-sa-e',"
+        + " started_at=now() - interval '10 minutes' WHERE id=?", sa);
+    seedWorker("w-sa-e", 5);
+
+    long taskB = newTask(1, 8); seedTaskTimeout(taskB, 60);
+    long parentB = seedParentAndShards(taskB, 1);
+    long sb = shard(parentB, 0).id();
+    jdbc.update("UPDATE execution_shard SET status='RUNNING', worker_id='w-sa-f',"
+        + " started_at=now() - interval '10 minutes' WHERE id=?", sb);
+    seedWorker("w-sa-f", 5);
+
+    assertEquals(1, shardRepo.findStuckAliveRunning(taskA, 30).size());
+    assertEquals(2, shardRepo.countStuckAliveRunning(30));
+    assertEquals(2, shardRepo.findStuckAliveRunning(null, 30).size());
+  }
 }

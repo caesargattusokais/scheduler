@@ -257,6 +257,39 @@ public class JdbcShardRepository implements ShardRepository {
         taskId, (double) timeoutSeconds, (double) staleAfterSeconds);
   }
 
+  @Override public List<ShardRepository.StuckShard> findStuckAliveRunning(Long taskId, int staleAfterSeconds) {
+    String base = "SELECT s.id, s.execution_id, s.shard_index, s.worker_id, s.attempt, s.started_at, t.timeout_seconds"
+        + " FROM execution_shard s JOIN execution e ON e.id = s.execution_id"
+        + " JOIN app_task t ON t.id = e.task_id";
+    String cond = " s.status='RUNNING' AND s.worker_id IS NOT NULL"
+        + " AND t.timeout_seconds > 0"
+        + " AND now() - s.started_at > make_interval(secs => t.timeout_seconds::double precision)"
+        + " AND EXISTS (SELECT 1 FROM worker w"
+        + "             WHERE w.id = s.worker_id AND w.status = 'ALIVE'"
+        + "             AND w.last_seen >= now() - make_interval(secs => ?))";
+    RowMapper<ShardRepository.StuckShard> map = (rs, i) -> new ShardRepository.StuckShard(rs.getLong("id"), rs.getLong("execution_id"),
+        rs.getInt("shard_index"), rs.getString("worker_id"), rs.getInt("attempt"),
+        rs.getTimestamp("started_at").toInstant(), rs.getLong("timeout_seconds"));
+    if (taskId != null) {
+      return jdbc.query(base + " WHERE e.task_id = ? AND" + cond, map, taskId, (double) staleAfterSeconds);
+    }
+    return jdbc.query(base + " WHERE" + cond, map, (double) staleAfterSeconds);
+  }
+
+  @Override public long countStuckAliveRunning(int staleAfterSeconds) {
+    Long n = jdbc.queryForObject(
+        "SELECT count(*) FROM execution_shard s JOIN execution e ON e.id = s.execution_id"
+            + " JOIN app_task t ON t.id = e.task_id"
+            + " WHERE s.status='RUNNING' AND s.worker_id IS NOT NULL"
+            + " AND t.timeout_seconds > 0"
+            + " AND now() - s.started_at > make_interval(secs => t.timeout_seconds::double precision)"
+            + " AND EXISTS (SELECT 1 FROM worker w"
+            + "             WHERE w.id = s.worker_id AND w.status = 'ALIVE'"
+            + "             AND w.last_seen >= now() - make_interval(secs => ?))",
+        Long.class, (double) staleAfterSeconds);
+    return n == null ? 0L : n;
+  }
+
   @Override public boolean markStatus(long shardId, ExecutionStatus to, String workerId, String detail) {
     Shard cur = findShard(shardId).orElseThrow(() -> new IllegalStateException("no shard " + shardId));
     if (!ExecutionTransitions.canTransition(cur.status(), to)) {
