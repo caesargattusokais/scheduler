@@ -9,6 +9,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
@@ -618,6 +619,37 @@ class ApiIntegrationTest {
         .andExpect(status().isOk())
         .andExpect(jsonPath("$['items'][*].id", hasItem((int) execId)))
         .andExpect(jsonPath("$['items'][?(@.id == " + execId + ")].status").value("DUE")); // worker 循环已关,保持 DUE
+  }
+
+  /** E1:同 idempotencyKey 重复 POST /trigger → 复用同一父 execution(ON CONFLICT (idempotency_key) 去重). */
+  @Test
+  void manualTrigger_sameIdempotencyKey_deduplicatesToSingleParent() throws Exception {
+    long t = seedTaskRow("DedupTask");
+    String key = "my-request-001";
+    var p1 = mvc.perform(post("/api/v1/tasks/" + t + "/trigger")
+            .param("idempotencyKey", key)).andExpect(status().isCreated())
+        .andReturn().getResponse().getContentAsString();
+    var p2 = mvc.perform(post("/api/v1/tasks/" + t + "/trigger")
+            .param("idempotencyKey", key)).andExpect(status().isCreated())
+        .andReturn().getResponse().getContentAsString();
+    long id1 = objectMapper.readTree(p1).get("id").asLong();
+    long id2 = objectMapper.readTree(p2).get("id").asLong();
+    assertEquals(id1, id2, "same idempotencyKey must reuse the same parent execution");
+    // 全库只应有一条该 key 的父
+    Integer rows = jdbc.queryForObject(
+        "SELECT count(*) FROM execution WHERE idempotency_key=?", Integer.class, "manual:" + t + ":" + key);
+    assertEquals(1, rows, "exactly one parent for the idempotency key");
+  }
+
+  /** E1:不带 idempotencyKey → 每次 POST 都新建父(向后兼容,与改造前无异). */
+  @Test
+  void manualTrigger_withoutKey_stillMakesNewRunEachTime() throws Exception {
+    long t = seedTaskRow("DedupTaskB");
+    long a = objectMapper.readTree(mvc.perform(post("/api/v1/tasks/" + t + "/trigger"))
+        .andExpect(status().isCreated()).andReturn().getResponse().getContentAsString()).get("id").asLong();
+    long b = objectMapper.readTree(mvc.perform(post("/api/v1/tasks/" + t + "/trigger"))
+        .andExpect(status().isCreated()).andReturn().getResponse().getContentAsString()).get("id").asLong();
+    assertNotEquals(a, b, "no idempotencyKey -> fresh parent each POST (backward compatible)");
   }
 
   /** M5.2:GET /executions from/to 时间窗过滤(started_at)。父 execution.started_at 在建父即回填 now()

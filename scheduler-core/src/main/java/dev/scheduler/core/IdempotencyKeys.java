@@ -35,4 +35,14 @@ public final class IdempotencyKeys {
   public static String forDagDep(long upstreamRunId) {
     return "dep:" + upstreamRunId;
   }
+
+  /** task 手动触发(可选 request-token 幂等):带 token → 同 token 重试复现同父;缺省由调用方决定回落到 UUID。 */
+  public static String forManualTask(long taskId, String requestToken) {
+    return "manual:" + taskId + ":" + requestToken;
+  }
+
+  /** 源 execution 重跑(可选 request-token 幂等):镜像 forManualTask。 */
+  public static String forTaskRerun(long srcExecutionId, String requestToken) {
+    return "rerun:" + srcExecutionId + ":" + requestToken;
+  }
 }

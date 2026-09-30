@@ -1,6 +1,7 @@
 package dev.scheduler.server.web;
 
 import dev.scheduler.core.Execution;
+import dev.scheduler.core.IdempotencyKeys;
 import dev.scheduler.core.TargetType;
 import dev.scheduler.core.Task;
 import dev.scheduler.persistence.ShardRepository;
@@ -218,9 +219,11 @@ public class TaskController {
 
   @PostMapping("/{id}/trigger")
   public ResponseEntity<Execution> trigger(
-      @PathVariable long id) {
+      @PathVariable long id,
+      @RequestParam(value = "idempotencyKey", required = false) String idempotencyKey) {
     Task before = requireTask(id);
-    Execution run = manualRun(id, UUID.randomUUID().toString());
+    String suffix = idempotencyKey != null ? idempotencyKey : UUID.randomUUID().toString();
+    Execution run = manualRun(id, suffix);
     auditor.record(current.get(), "task.trigger", TargetType.TASK, id, Map.of(), null, taskBefore(before));
     return ResponseEntity.status(HttpStatus.CREATED).body(run);
   }
@@ -228,7 +231,7 @@ public class TaskController {
   /** 手动触发:建父 execution + 其 shard(重跑已 M6.5 移入 /executions/{id}/rerun)。 */
   private Execution manualRun(long taskId, String suffix) {
     Task t = requireTask(taskId);
-    String key = "manual:" + t.id() + ":" + suffix;
+    String key = IdempotencyKeys.forManualTask(t.id(), suffix);
     long pid = shards.createParentWithShards(t.id(), key, t.shardCount()).id();
     return shards.findParent(pid).orElseThrow(() -> notFound("execution " + pid));
   }
