@@ -66,6 +66,10 @@ public interface DagRepository {
   DagRun createScheduledRun(long dagId, Instant triggerAt);
   /** 手动触发:同 createScheduledRun,幂等键 = manual:{uuid}。 */
   DagRun createManualRun(long dagId);
+
+  /** 手动触发(可选 request-token 幂等):带 token → 键 dag:{dagId}:manual:{token}(同 token 重试复现同 run);
+   *  缺省 requestToken=null → 回落 forManualDagRun UUUID 语义(向后兼容,每次新建)。 */
+  DagRun createManualRun(long dagId, String requestToken);
   /** 1d:上游 run 成功 → 下游幂等新建一次 run。键 = dep:{upstreamRunId}(IdempotencyKeys.forDagDep),
    *  trigger_reason = dag:{upstreamRunId};同一上游 run 重复派生 → 幂等复用(崩溃重放自愈)。 */
   DagRun createDependencyRun(long downstreamDagId, long upstreamRunId);

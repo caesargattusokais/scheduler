@@ -744,6 +744,116 @@ class ApiIntegrationTest {
         .andExpect(status().isNotFound());
   }
 
+  // ---------- E1·A 层:*idempotencyKey* on rerun / dag manual trigger / dag node rerun ----------
+
+  /** E1:同 idempotencyKey 重复 POST /executions/{id}/rerun → 复用同一重跑轮(键 rerun:{srcId}:{key} 全库 1 行). */
+  @Test
+  void rerunExecution_sameIdempotencyKey_deduplicatesToSingleRound() throws Exception {
+    long id = postTask("rerun-dedupe");
+    long sourceId = triggerParent(id); // DUE 父 + 1 DUE shard
+    for (Long sid : jdbc.queryForList("SELECT id FROM execution_shard WHERE execution_id=?",
+        Long.class, sourceId)) {
+      jdbc.update("UPDATE execution_shard SET status='SUCCESS', finished_at=now() WHERE id=?", sid);
+    }
+    assertEquals(1, jdbc.update(
+        "UPDATE execution SET status='SUCCESS', finished_at=now() WHERE id=? AND status='DUE'", sourceId));
+
+    String key = "rerun-req-001";
+    long a = objectMapper.readTree(mvc.perform(post("/api/v1/executions/" + sourceId + "/rerun")
+        .param("idempotencyKey", key)).andExpect(status().isCreated())
+        .andReturn().getResponse().getContentAsString()).get("id").asLong();
+    long b = objectMapper.readTree(mvc.perform(post("/api/v1/executions/" + sourceId + "/rerun")
+        .param("idempotencyKey", key)).andExpect(status().isCreated())
+        .andReturn().getResponse().getContentAsString()).get("id").asLong();
+    assertEquals(a, b, "same idempotencyKey must reuse the same rerun round");
+    Integer rows = jdbc.queryForObject(
+        "SELECT count(*) FROM execution WHERE idempotency_key=?", Integer.class,
+        "rerun:" + sourceId + ":" + key);
+    assertEquals(1, rows, "exactly one rerun round for the idempotency key");
+  }
+
+  /** E1:不带 idempotencyKey → 每次 POST rerun 都新建一轮(向后兼容). */
+  @Test
+  void rerunExecution_withoutKey_stillMakesNewRoundEachTime() throws Exception {
+    long id = postTask("rerun-nokey");
+    long sourceId = triggerParent(id);
+    for (Long sid : jdbc.queryForList("SELECT id FROM execution_shard WHERE execution_id=?",
+        Long.class, sourceId)) {
+      jdbc.update("UPDATE execution_shard SET status='SUCCESS', finished_at=now() WHERE id=?", sid);
+    }
+    assertEquals(1, jdbc.update(
+        "UPDATE execution SET status='SUCCESS', finished_at=now() WHERE id=? AND status='DUE'", sourceId));
+    long a = objectMapper.readTree(mvc.perform(post("/api/v1/executions/" + sourceId + "/rerun"))
+        .andExpect(status().isCreated()).andReturn().getResponse().getContentAsString()).get("id").asLong();
+    long b = objectMapper.readTree(mvc.perform(post("/api/v1/executions/" + sourceId + "/rerun"))
+        .andExpect(status().isCreated()).andReturn().getResponse().getContentAsString()).get("id").asLong();
+    assertNotEquals(a, b, "no idempotencyKey -> fresh rerun round each POST (backward compatible)");
+  }
+
+  /** E1:同 idempotencyKey 重复 POST /dags/{id}/trigger → 复用同一 dag_run(键 dag:{dagId}:manual:{key} 全库 1 行). */
+  @Test
+  void dagTrigger_sameIdempotencyKey_deduplicatesToSingleRun() throws Exception {
+    long t = postTask("dag-trigger-dedupe");
+    long dagId = postDag("dag-trigger-dedupe-dag", new long[]{t}, new String[]{"A"}, new String[][]{});
+    pauseDag(dagId); // 防 cron(CLOCK 钉 tick)额外建调度 run,只留手动 run 断言确定性
+    String key = "dag-req-001";
+    long id1 = objectMapper.readTree(mvc.perform(post("/api/v1/dags/" + dagId + "/trigger")
+        .param("idempotencyKey", key)).andExpect(status().isCreated())
+        .andReturn().getResponse().getContentAsString()).get("id").asLong();
+    long id2 = objectMapper.readTree(mvc.perform(post("/api/v1/dags/" + dagId + "/trigger")
+        .param("idempotencyKey", key)).andExpect(status().isCreated())
+        .andReturn().getResponse().getContentAsString()).get("id").asLong();
+    assertEquals(id1, id2, "same idempotencyKey must reuse the same dag_run");
+    Integer rows = jdbc.queryForObject(
+        "SELECT count(*) FROM dag_run WHERE idempotency_key=?", Integer.class,
+        "dag:" + dagId + ":manual:" + key);
+    assertEquals(1, rows, "exactly one dag_run for the idempotency key");
+  }
+
+  /** E1:不带 idempotencyKey → 每次 POST trigger 都新建 dag_run(向后兼容). */
+  @Test
+  void dagTrigger_withoutKey_stillMakesNewRunEachTime() throws Exception {
+    long t = postTask("dag-trigger-nokey");
+    long dagId = postDag("dag-trigger-nokey-dag", new long[]{t}, new String[]{"A"}, new String[][]{});
+    pauseDag(dagId);
+    long a = objectMapper.readTree(mvc.perform(post("/api/v1/dags/" + dagId + "/trigger"))
+        .andExpect(status().isCreated()).andReturn().getResponse().getContentAsString()).get("id").asLong();
+    long b = objectMapper.readTree(mvc.perform(post("/api/v1/dags/" + dagId + "/trigger"))
+        .andExpect(status().isCreated()).andReturn().getResponse().getContentAsString()).get("id").asLong();
+    assertNotEquals(a, b, "no idempotencyKey -> fresh dag_run each POST (backward compatible)");
+  }
+
+  /** E1:dag 节点重跑带 idempotencyKey → 首次 200 RUNNING 新建 execution;同 key 重复 POST → 节点已非终态 → 既有守卫 409,
+   *  不新建第二轮/execution(键 dag:{runId}:node:{key}:rerun:{k} 全库 1 行). */
+  @Test
+  void dagNodeRerun_sameIdempotencyKey_noSecondExecutionOnRepeat() throws Exception {
+    long t = postTask("rerun-node-dedupe");
+    long dagId = postDag("rerun-node-dedupe-dag", new long[]{t}, new String[]{"A"}, new String[][]{});
+    pauseDag(dagId);
+    long runId = triggerDag(dagId);
+    dagEngine.scanOnce();              // spawn A → RUNNING
+    completeNodeShards(runId, "A", "SUCCESS");
+    reconciler.scanOnce();             // A 父 SUCCESS
+    dagEngine.scanOnce();              // A 派生 SUCCESS → run 终态 SUCCESS
+
+    long aNodeId = dagNodeId(runId, "A");
+    String key = "node-req-001";
+    mvc.perform(post("/api/v1/dags/runs/" + runId + "/nodes/" + aNodeId + "/rerun")
+        .param("idempotencyKey", key)).andExpect(status().isOk())
+        .andExpect(jsonPath("$.status").value("RUNNING"));
+    long execAfterFirst = dagNodeExecutionId(runId, "A");
+
+    // 同 key 重复 POST:节点已非终态(RUNNING)→ 既有守卫 409,不新建 execution
+    mvc.perform(post("/api/v1/dags/runs/" + runId + "/nodes/" + aNodeId + "/rerun")
+        .param("idempotencyKey", key)).andExpect(status().isConflict());
+    assertEquals(execAfterFirst, dagNodeExecutionId(runId, "A"),
+        "repeat with same key must not create a second execution/round");
+    Integer rows = jdbc.queryForObject(
+        "SELECT count(*) FROM execution WHERE idempotency_key=?", Integer.class,
+        "dag:" + runId + ":node:A:rerun:" + key);
+    assertEquals(1, rows, "exactly one rerun execution for the node idempotency key");
+  }
+
   // ---------- 任务删除(仅删无子记录,否则 409) ----------
 
   @Test void deleteTask_unreferenced_removesAnd404s() throws Exception {

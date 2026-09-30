@@ -158,9 +158,10 @@ public class DagController {
   /** 手动触发一次:建 dag_run + 全 PENDING 节点,交由 DagEngine 扫描推进。 */
   @PostMapping("/{id}/trigger")
   public ResponseEntity<DagRun> trigger(
-      @PathVariable long id) {
+      @PathVariable long id,
+      @RequestParam(value = "idempotencyKey", required = false) String idempotencyKey) {
     Dag before = requireDag(id);
-    DagRun run = dags.createManualRun(id);
+    DagRun run = dags.createManualRun(id, idempotencyKey);
     auditor.record(current.get(), "dag.trigger", TargetType.DAG, id, Map.of(), null, dagBefore(before));
     return ResponseEntity.status(HttpStatus.CREATED).body(run);
   }
@@ -213,11 +214,12 @@ public class DagController {
   /** M5.3 §1.4 单节点重跑:仅终态节点可用;404 缺失,非终态 → 409;成功 200 + 节点现态。节点态变更经 DagEngine。 */
   @PostMapping("/runs/{runId}/nodes/{nodeId}/rerun")
   public ResponseEntity<DagRunNode> rerunNode(
-      @PathVariable long runId, @PathVariable long nodeId) {
+      @PathVariable long runId, @PathVariable long nodeId,
+      @RequestParam(value = "idempotencyKey", required = false) String idempotencyKey) {
     dags.findRun(runId).orElseThrow(() -> notFound("dag run " + runId));
     DagRunNode node = dags.findNode(nodeId).orElseThrow(() -> notFound("dag run node " + nodeId));
     if (!node.dagRunId().equals(runId)) throw notFound("dag run node " + nodeId);
-    DagRunNode restarted = dagEngine.rerunNode(runId, nodeId);
+    DagRunNode restarted = dagEngine.rerunNode(runId, nodeId, idempotencyKey);
     auditor.record(current.get(), "dag_node.rerun", TargetType.DAG_RUN, runId, Map.of("nodeId", nodeId), null, nodeBefore(node));
     return ResponseEntity.ok(restarted);
   }

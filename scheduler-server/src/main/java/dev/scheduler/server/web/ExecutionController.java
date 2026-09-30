@@ -2,6 +2,7 @@ package dev.scheduler.server.web;
 
 import dev.scheduler.core.Execution;
 import dev.scheduler.core.ExecutionStatus;
+import dev.scheduler.core.IdempotencyKeys;
 import dev.scheduler.core.Shard;
 import dev.scheduler.core.TargetType;
 import dev.scheduler.persistence.ExecutionRepository;
@@ -92,13 +93,15 @@ public class ExecutionController {
    */
   @PostMapping("/{id}/rerun")
   public ResponseEntity<Execution> rerun(
-      @PathVariable long id) {
+      @PathVariable long id,
+      @RequestParam(value = "idempotencyKey", required = false) String idempotencyKey) {
     Execution source = executions.findById(id).orElseThrow(() -> notFound("execution " + id));
     if (!RERUNNABLE.contains(source.status())) {
       throw new ResponseStatusException(HttpStatus.CONFLICT,
           "execution " + id + " is " + source.status() + " and cannot be rerun (only terminal/orphaned can)");
     }
-    String key = "rerun:" + source.id() + ":" + UUID.randomUUID();
+    String suffix = idempotencyKey != null ? idempotencyKey : UUID.randomUUID().toString();
+    String key = IdempotencyKeys.forTaskRerun(source.id(), suffix);
     Execution created = shards.createParentWithShards(
         source.taskId(), key, source.shardCount(), source.args(), source.id());
     auditor.record(current.get(), "execution.rerun", TargetType.EXECUTION, created.id(), Map.of(), null, executionBefore(source));

@@ -256,7 +256,12 @@ public class JdbcDagRepository implements DagRepository {
     return createRun(dagId, IdempotencyKeys.forDagTrigger(dagId, triggerAt), "scheduled");
   }
   @Override public DagRun createManualRun(long dagId) {
-    return createRun(dagId, IdempotencyKeys.forManualDagRun(dagId), "manual");
+    return createManualRun(dagId, null);
+  }
+  @Override public DagRun createManualRun(long dagId, String requestToken) {
+    String key = requestToken != null ? "dag:" + dagId + ":manual:" + requestToken
+                                      : IdempotencyKeys.forManualDagRun(dagId);
+    return createRun(dagId, key, "manual");
   }
   @Override public DagRun createDependencyRun(long downstreamDagId, long upstreamRunId) {
     return createRun(downstreamDagId, IdempotencyKeys.forDagDep(upstreamRunId),

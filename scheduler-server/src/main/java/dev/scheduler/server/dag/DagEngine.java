@@ -112,15 +112,18 @@ public class DagEngine {
    *  回绕到新 execution + 重开 run → 返回回绕后节点现态。下游不自动复位(propagateRun 跳过已终态)。
    *  节点态写仅经本方法(引擎是 dag 运行表唯一写者)。
    */
-  public DagRunNode rerunNode(long runId, long nodeId) {
+  public DagRunNode rerunNode(long runId, long nodeId, String requestToken) {
     DagRunNode n = dags.findNode(nodeId).orElseThrow(
         () -> new IllegalStateException("no dag_run_node " + nodeId));
     if (!n.dagRunId().equals(runId)) throw new IllegalStateException("node " + nodeId + " not in run " + runId);
     if (!n.status().isTerminal()) throw new IllegalStateException(
         "node " + nodeId + " is " + n.status() + " and cannot be rerun");
     Task task = tasks.findById(n.taskId()).orElseThrow();
+    String key = requestToken != null
+        ? "dag:" + runId + ":node:" + n.nodeKey() + ":rerun:" + requestToken
+        : IdempotencyKeys.forNodeRerun(runId, n.nodeKey());
     Execution parent = shards.createParentWithShards(
-        n.taskId(), IdempotencyKeys.forNodeRerun(runId, n.nodeKey()), task.shardCount());
+        n.taskId(), key, task.shardCount());
     if (!dags.rerunNodeToExecution(runId, nodeId, parent.id())) {
       throw new IllegalStateException("node " + nodeId + " was not terminal; rerun cancelled");
     }
