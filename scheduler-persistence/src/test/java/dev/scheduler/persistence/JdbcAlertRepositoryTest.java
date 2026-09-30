@@ -53,6 +53,21 @@ class JdbcAlertRepositoryTest extends AbstractPostgresTest {
         "RESOLVED row must be excluded");
   }
 
+  @Test void insertGlobalEpisodeNullTargetDefaultsToNone() {
+    // 引擎对全局规则(dlq-depth/worker-offline/failure-rate 等)不产 target → targetType null;
+    // 表 target_type NOT NULL DEFAULT 'none',null 必须归一为 'none' 才能落库。
+    AlertEpisode saved = repo.insert(new AlertEpisode(0, "dlq-depth", "dlq-depth", null, null,
+        "high", "PENDING", 1, "388", null, null, null, null));
+
+    assertEquals("none", saved.targetType(),
+        "null target must normalize to schema sentinel 'none' in the returned record");
+    var found = repo.findActiveByKey("dlq-depth");
+    assertTrue(found.isPresent());
+    assertEquals("none", found.get().targetType(),
+        "persisted global episode must read back with target_type 'none'");
+    assertEquals("dlq-depth", found.get().rule());
+  }
+
   @Test void secondNonTerminalSameKeyThrowsDuplicateKey() {
     repo.insert(episode("dup:key"));
     assertThrows(DuplicateKeyException.class,

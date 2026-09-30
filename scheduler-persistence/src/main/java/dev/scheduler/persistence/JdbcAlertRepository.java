@@ -48,14 +48,18 @@ public class JdbcAlertRepository implements AlertRepository {
 
   @Override
   public AlertEpisode insert(AlertEpisode e) {
+    // 全局/无目标 episode(e.targetType() 为 null,如 dlq-depth 等全局规则)落库须归一为 schema 守卫字面量
+    // 'none'(target_type NOT NULL DEFAULT 'none');否则逐拍 INSERT 违反非空约束。视图 CASE 对非 task/dag
+    // 类型一律渲染全局,故 'none' 与 null 在读取侧等价。
+    String tt = e.targetType() != null ? e.targetType() : "none";
     // RETURNING id 回填自增主键注入返回记录。同一 key 已存在活跃行时 partial unique(alert_episode_active_key_uq)
     // 会抛 DuplicateKeyException——交由调用方捕获决定回落/丢弃,这里原样抛出。
     Long id = jdbc.query(
         "INSERT INTO alert_episode (key, rule, target_type, target_id, severity, status, sample_count, value)"
             + " VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
         rs -> rs.next() ? rs.getLong(1) : null,
-        e.key(), e.rule(), e.targetType(), e.targetId(), e.severity(), e.status(), e.sampleCount(), e.value());
-    return new AlertEpisode(id, e.key(), e.rule(), e.targetType(), e.targetId(), e.severity(),
+        e.key(), e.rule(), tt, e.targetId(), e.severity(), e.status(), e.sampleCount(), e.value());
+    return new AlertEpisode(id, e.key(), e.rule(), tt, e.targetId(), e.severity(),
         e.status(), e.sampleCount(), e.value(), e.openedAt(), e.openedValue(), e.resolvedAt(), e.resolvedValue());
   }
 
