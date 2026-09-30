@@ -2,7 +2,7 @@
 
 > **规划路径**:E(调度纵深)子项第一件,按「调度器能做满 Exactly-once」的可验证边界推进。
 > **前置**:sharding/分片(M3/M6)、DLQ 治理(V28)、运行超时(v2 runtime)、跨 DAG 依赖(V24)、告警引擎(V31)。
-> **状态**:设计中。
+> **状态**:已实现(2026-09-30)。
 > **更新日期**:2026-09-30
 
 ---
@@ -64,6 +64,8 @@
 - **同键重复**:返回**原父**(`ON CONFLICT ... RETURNING id` 已返回原行 id),不 bump 内容、不重复插 shard。可用 `forDagRun` 的 manual 分支复用同 mechanism。
 
 **A 层不改为**:cron/interval/事件/跨 DAG 依赖(已有强去重,无需 request-id)。
+
+> **node rerun 同键不对称性(实现注)**:DAG node rerun 对**已运行中**节点重复触发,即便带上同一 `idempotencyKey`,也返回 **HTTP 409**(既有非终态守卫先于键构造触发,什么都不创建)——**不是** A 层的 id-replay(同键返回原父)。此不对称是有意为之:节点守卫在 `IdempotencyKeys` 构造之前就拦截,故不会走到去重路径;而 manual task / rerun / manual dag 三者没有该前置守卫,才走「同键复用原父」的去重。文档/前端应据此区分:重放已结束节点用同键重取原父,重放运行中节点则先等其进入终态。
 
 ---
 
