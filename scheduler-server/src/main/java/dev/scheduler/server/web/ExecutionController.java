@@ -195,9 +195,7 @@ public class ExecutionController {
       throw new ResponseStatusException(HttpStatus.CONFLICT,
           "shard " + shardId + " is " + s.status() + " and cannot be force-abandoned (only RUNNING with an owner)");
     }
-    boolean ownerAlive = workers.findAllAlive(Instant.now().minusSeconds(STUCK_ALIVE_STALE_SECONDS))
-        .stream().anyMatch(w -> w.id().equals(s.workerId()));
-    if (ownerAlive) {
+    if (workers.isAlive(s.workerId(), STUCK_ALIVE_STALE_SECONDS)) {
       throw new ResponseStatusException(HttpStatus.CONFLICT,
           "owner worker " + s.workerId() + " is still ALIVE; stop it before force-abandon");
     }

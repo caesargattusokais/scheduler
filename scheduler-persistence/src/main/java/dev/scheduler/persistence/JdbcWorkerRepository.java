@@ -46,6 +46,14 @@ public class JdbcWorkerRepository implements WorkerRepository {
         + "WHERE status='ALIVE' AND last_seen >= ?", MAP, java.sql.Timestamp.from(lastSeenAtLeast));
   }
 
+  @Override public boolean isAlive(String workerId, int staleAfterSeconds) {
+    Integer n = jdbc.queryForObject(
+        "SELECT count(*) FROM worker WHERE id=? AND status='ALIVE'"
+            + " AND last_seen >= now() - make_interval(secs => ?)",
+        Integer.class, workerId, (double) staleAfterSeconds);
+    return n != null && n > 0;
+  }
+
   @Override
   public void purgeStale(Instant olderThan) {
     jdbc.update("DELETE FROM worker WHERE last_seen < ?", java.sql.Timestamp.from(olderThan));

@@ -54,4 +54,16 @@ class JdbcWorkerRepositoryTest extends AbstractPostgresTest {
     repo.purgeStale(BASE.minusSeconds(30));
     assertEquals(List.of("recent"), jdbc.queryForList("SELECT id FROM worker", String.class));
   }
+
+  /** E2-B:isAlive 锚 DB 时钟(now()-窗),非 JVM — abandon 安全前门须与 stuck 判定同源,防双跑。 */
+  @Test
+  void isAlive_judgesByDbClockFreshness() {
+    jdbc.update("INSERT INTO worker (id, refs, last_seen, status) VALUES ('w-fresh','', now() - interval '5 seconds', 'ALIVE')");
+    jdbc.update("INSERT INTO worker (id, refs, last_seen, status) VALUES ('w-stale','', now() - interval '120 seconds', 'ALIVE')");
+    jdbc.update("INSERT INTO worker (id, refs, last_seen, status) VALUES ('w-dead','', now(), 'DEAD')");
+    assertTrue(repo.isAlive("w-fresh", 30), "fresh ALIVE(last_seen 5s<窗30s,真活)→ alive");
+    assertTrue(!repo.isAlive("w-stale", 30), "last_seen 120s 超窗 → 非 alive");
+    assertTrue(!repo.isAlive("w-dead", 30), "DEAD 态 → 非 alive");
+    assertTrue(!repo.isAlive("w-missing", 30), "不存在 → 非 alive");
+  }
 }
