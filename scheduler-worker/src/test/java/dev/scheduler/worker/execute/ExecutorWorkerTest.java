@@ -31,6 +31,7 @@ import java.time.Instant;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.CancellationException;
@@ -612,5 +613,81 @@ class ExecutorWorkerTest extends AbstractExecutorWorkerTest {
     Shard s = shards.findShard(shardId).orElseThrow();
     assertEquals(ExecutionStatus.FAILED, s.status(), "活性优先回收 → FAILED");
     assertEquals(1L, shardOutcomeCount(shardId, "FAILED"), "回收落 FAILED outcome");
+  }
+
+  /** B1 每-attempt 栅栏测试:动态代理 ShardRepository,仅对 {@code failShards} 里的分片令 renewLease 返回 false,
+   *  其余方法全量委托给真 JdbcShardRepository(认领/读/回写走真实语义),从而可控地测定续租失败分支。 */
+  private ShardRepository renewGate(Set<Long> failShards) {
+    return (ShardRepository) java.lang.reflect.Proxy.newProxyInstance(
+        ShardRepository.class.getClassLoader(), new Class<?>[] {ShardRepository.class},
+        (proxy, method, args) -> {
+          if (method.getName().equals("renewLease")) {
+            return !failShards.contains((Long) args[0]);
+          }
+          return method.invoke(shards, args);
+        });
+  }
+
+  private ExecutorWorker gatedWorker(ShardRepository gated, HandlerRegistry registry) {
+    return new ExecutorWorker(tasks, gated, registry, "worker-a",
+        new FailureResolver(gated, new RetryPolicy(), CLOCK), CLOCK, 120, 30);
+  }
+
+  /** B1 自栅栏·正控:续租成功(renewLease=true)→ handler 本 tick 正常运行,落 SUCCESS。 */
+  @Test void leaseRenewSucceeds_runsHandler() {
+    ShardRepository gated = renewGate(new HashSet<>()); // 无失联分片 → renewLease 恒真
+    var rec = new RecordingHandler(false);
+    long taskId = createTask("rec", 1, 1);
+    long parentId = seedParentAndShards(taskId, 1);
+    long shardId = shard(parentId, 0).id();
+
+    boolean processed = gatedWorker(gated, new MapHandlerRegistry(List.of(() -> rec))).workOne();
+
+    assertTrue(processed);
+    assertEquals(1, rec.calls.size(), "续租成功 → handler 本 tick 被调用");
+    assertEquals(ExecutionStatus.SUCCESS, shards.findShard(shardId).orElseThrow().status(),
+        "续租成功 → 正常回写 SUCCESS");
+  }
+
+  /** B1 自栅栏·负控:续租失败(renewLease=false,属主已失/attempt 不符)→ 本 work unit 自栅栏:handler 本 tick 不得运行、
+   *  不推进副作用、不落 outcome,让位给回收判定(温和粒度,仅停本 work unit,不波及 worker 其它分片)。 */
+  @Test void leaseRenewFails_selfFencesWorkUnit_handlerNotRun() {
+    long taskId = createTask("rec", 1, 1);
+    long parentId = seedParentAndShards(taskId, 1);
+    long shardId = shard(parentId, 0).id();
+    ShardRepository gated = renewGate(Set.of(shardId)); // 仅该分片 renewLease=false
+    var rec = new RecordingHandler(false);
+
+    boolean processed = gatedWorker(gated, new MapHandlerRegistry(List.of(() -> rec))).workOne();
+
+    assertTrue(processed, "认领成功后自栅栏:本 tick 视为已处理(避免重复认领同一 DUE 候选)");
+    assertEquals(0, rec.calls.size(), "续租失败 → handler 本 tick 不得运行");
+    assertEquals(ExecutionStatus.RUNNING, shards.findShard(shardId).orElseThrow().status(),
+        "栅栏:不回写终态,让位给回收判定");
+    assertEquals("worker-a", shards.findShard(shardId).orElseThrow().workerId(),
+        "栅栏:不改变归属(交给对账器按活性接管)");
+    assertEquals(0L, shardOutcomeCount(shardId, "SUCCESS"), "栅栏:不落 SUCCESS outcome");
+    assertEquals(0L, shardOutcomeCount(shardId, "FAILED"), "栅栏:不落 FAILED outcome");
+  }
+
+  /** B1 温和粒度:续租失败被栅栏的 work unit 不阻断同一 worker 线程/状态——同一实例随后处理一个新的健康分片时
+   *  handler 仍正常执行(自栅栏按 work unit 隔离,非整 worker 停机)。 */
+  @Test void fencedShard_doesNotBlockHealthySibling() {
+    long fenceTask = createTask("fence", 1, 1);
+    long fenceParent = seedParentAndShards(fenceTask, 1);
+    long fencedId = shard(fenceParent, 0).id();
+    ShardRepository gated = renewGate(Set.of(fencedId)); // 仅 fenced 片 renewLease=false
+    var rec = new RecordingHandler(false);
+    var registry = new MapHandlerRegistry(List.of(() -> rec));
+    ExecutorWorker w = gatedWorker(gated, registry);
+
+    assertTrue(w.workOne(), "第一拍认领 fenced 片 → 自栅栏:仍视为已处理");
+    assertEquals(0, rec.calls.size(), "fenced 片 handler 未运行");
+
+    // 第二拍:新增一个健康分片(handlerRef 仍为 "rec" 以命中注册 handler);同一 worker 实例应照常处理它。
+    long okTask = createTask("rec", 1, 1);
+    seedParentAndShards(okTask, 1);
+    assertTrue(w.workOne(), "同一 worker 处理新健康分片:自栅栏不阻断后续 work unit");
+    assertEquals(1, rec.calls.size(), "健康分片 handler 照常运行");
   }
 }

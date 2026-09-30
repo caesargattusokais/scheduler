@@ -68,12 +68,26 @@ public class ExecutorWorker {
       // 父 execution 只读(取 args/shardCount);worker 绝不对父行做任何写。
       Execution parent = shards.findParent(shard.executionId())
           .orElseThrow(() -> new IllegalStateException("no parent execution for shard " + shard.id()));
+      // B1 续租失败自栅栏:handler 运行前做一次强制续租校验。若续租返回 false(属主已失 / attempt 不符,即已被
+      // Reconciler 回收并重认领),本 work unit 立停:不运行 handler、不推进副作用、不起周期续租,直接让位给
+      // 回收判定。温和粒度:仅停本 work unit 本 tick,不波及 worker 其它在途分片。
+      if (!shards.renewLease(shard.id(), workerId, shard.attempt() + 1, clock.instant().plusSeconds(leaseSeconds))) {
+        org.slf4j.LoggerFactory.getLogger(ExecutorWorker.class)
+            .warn("lease cannot renew for shard {} (reclaimed/redescribed); self-fencing work unit, "
+                + "skipping handler and yielding to reclaim", shard.id());
+        return true; // 本 tick 已认领该片,视为已处理(避免把同一 DUE 候选再认领一遍)。
+      }
       // 长运行 handler(如分片批处理同步)会同步阻塞本循环超过一次租约时长;认领后立即起周期续租,运行期
       // 保持 lease 有效,避免被 server 端 Reconciler 误回收,handler 写回终态后的 finally 中停租。
       ScheduledFuture<?> renew = renewer.scheduleWithFixedDelay(() -> {
         try {
           // B1 每-attempt 栅栏:领取后 shard 对象为认领前(DUE)快照,claim 已 attempt+1 → 传当前在途 attempt。
-          shards.renewLease(shard.id(), workerId, shard.attempt() + 1, clock.instant().plusSeconds(leaseSeconds));
+          // 返回 false 即运行期租约/属主/attempt 已失 —— 记日志自栅栏,迟回写由 markStatusOwned 守卫兜底抑制。
+          if (!shards.renewLease(shard.id(), workerId, shard.attempt() + 1, clock.instant().plusSeconds(leaseSeconds))) {
+            org.slf4j.LoggerFactory.getLogger(ExecutorWorker.class)
+                .warn("lease lost for shard {} while running; self-fencing (stale write-back will be suppressed)",
+                    shard.id());
+          }
         } catch (Throwable ex) {
           // 瞬时续租失败不中断调度任务;ownership 已失/终态由 renewLease 0 行静默,写回侧守卫兜底。
           org.slf4j.LoggerFactory.getLogger(ExecutorWorker.class)
