@@ -67,9 +67,9 @@ public class Reconciler {
       for (ExpiredShard run : shards.findExpiredRunning(task.id(), staleAfterSeconds)) {
         try {
           if (shards.markStatus(run.id(), ExecutionStatus.FAILED, workerId,
-                  "owner unresponsive or lease expired")) {
+                  "owner unresponsive")) {
             failureResolver.handle(task, run.id(), run.attempt(),
-                "owner unresponsive or lease expired");
+                "owner unresponsive");
             reclaimed++;
           }
         } catch (IllegalStateException alreadyMovedOn) {
