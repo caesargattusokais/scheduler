@@ -71,7 +71,8 @@ class AlertEngineTest {
         .put(RuntimeConfigKeys.ALERT_P95_LATENCY_MS, "0")
         .put(RuntimeConfigKeys.ALERT_WORKER_OFFLINE, "0")
         .put(RuntimeConfigKeys.ALERT_TASK_FAILURE_RATE, "0.0")
-        .put(RuntimeConfigKeys.ALERT_DAG_RUN_FAILED, "0");
+        .put(RuntimeConfigKeys.ALERT_DAG_RUN_FAILED, "0")
+        .put(RuntimeConfigKeys.ALERT_STUCK_ALIVE, "0");
   }
 
   /** 内存 AlertRepository:记录 insert/update/delete/prune 序列,维护活跃/已解决存储。 */

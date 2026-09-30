@@ -2,7 +2,7 @@
 
 > **规划路径**:E(调度纵深)子项第二件,E1(调度幂等/Exactly-once)之后的可观测性补位。
 > **前置**:E1 统一活性门控回收(B1)、告警子系统(V31)、DLQ 治理(V28)。
-> **状态**:设计中(2026-09-30)。
+> **状态**:已实现(2026-09-30)。
 > **更新日期**:2026-09-30
 
 ---
@@ -78,7 +78,7 @@ AND EXISTS (SELECT 1 FROM worker w
 
 ### 4.3 滞留视图 + 强制放弃端点(server)
 
-**视图** `GET /api/v1/executions/shards/stuck`(可分页/按 task 过滤):列出 stuck-alive 分片,含 shardId / executionId / taskId / workerId / attempt / started_at / 超龄秒 / timeoutSeconds。驱动前端卡死页。只读,审计读开放同既有。
+**视图** `GET /api/v1/executions/stuck`(可分页/按 task 过滤):列出 stuck-alive 分片,含 shardId / executionId / taskId / workerId / attempt / started_at / 超龄秒 / timeoutSeconds。驱动前端卡死页。只读,审计读开放同既有。
 
 **强制放弃** `POST /api/v1/executions/shards/{shardId}/abandon`(镜像既有 `POST .../shards/{shardId}/requeue`,ExecutionController:139 全套模式):
 
@@ -102,7 +102,7 @@ AND EXISTS (SELECT 1 FROM worker w
 
 ## 6. API 变更
 
-- **新增** `GET /api/v1/executions/shards/stuck`(只读,审计读开放)。
+- **新增** `GET /api/v1/executions/stuck`(只读,审计读开放)。
 - **新增** `POST /api/v1/executions/shards/{shardId}/abandon`(写,OperatorInterceptor 收口)。
 - 无既有端点/字段/信封变更。OpenAPI 快照需加这两条(additive 重导)。
 
