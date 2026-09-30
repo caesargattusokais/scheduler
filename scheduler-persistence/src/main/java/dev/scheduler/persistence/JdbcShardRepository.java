@@ -218,12 +218,13 @@ public class JdbcShardRepository implements ShardRepository {
     return v == null ? 0 : v;
   }
 
-  @Override public boolean renewLease(long shardId, String ownerWorkerId, Instant leaseUntil) {
-    // 所有权守卫续约:仅当仍归本 worker(RUNNING 且 worker_id 匹配)才延长;否则 0 行静默,让位给写回/回收判定。
+  @Override public boolean renewLease(long shardId, String ownerWorkerId, int expectedAttempt, Instant leaseUntil) {
+    // 所有权守卫续约(B1 每-attempt 栅栏):仅当仍归本 worker(RUNNING 且 worker_id 匹配)且 attempt 未变
+    // (=== expectedAttempt)才延长;被接管(worker_id 变)或重认领(attempt 递增)则 0 行静默,让位给写回/回收判定。
     return jdbc.update("""
         UPDATE execution_shard SET lease_until=?
-         WHERE id=? AND status='RUNNING' AND worker_id=?""",
-        java.sql.Timestamp.from(leaseUntil), shardId, ownerWorkerId) == 1;
+         WHERE id=? AND status='RUNNING' AND worker_id=? AND attempt=?""",
+        java.sql.Timestamp.from(leaseUntil), shardId, ownerWorkerId, expectedAttempt) == 1;
   }
 
   @Override public List<ExpiredShard> findExpiredRunning(long taskId, int staleAfterSeconds) {
@@ -281,7 +282,8 @@ public class JdbcShardRepository implements ShardRepository {
     return ok[0];
   }
 
-  @Override public boolean markStatusOwned(long shardId, ExecutionStatus to, String ownerWorkerId, String detail) {
+  @Override public boolean markStatusOwned(long shardId, ExecutionStatus to, String ownerWorkerId,
+                                         int expectedAttempt, String detail) {
     Shard cur = findShard(shardId).orElseThrow(() -> new IllegalStateException("no shard " + shardId));
     if (!ExecutionTransitions.canTransition(cur.status(), to)) return false; // 行已在他处终态 → stale,静默
     final boolean[] ok = {false};
@@ -289,11 +291,11 @@ public class JdbcShardRepository implements ShardRepository {
       int updated = jdbc.update("""
         UPDATE execution_shard SET status=?, worker_id=COALESCE(?, worker_id),
           finished_at=CASE WHEN ? IN ('SUCCESS','FAILED','CANCELED') THEN now() ELSE finished_at END
-          WHERE id=? AND status=? AND worker_id=?""",
-          to.name(), ownerWorkerId, to.name(), shardId, cur.status().name(), ownerWorkerId);
+          WHERE id=? AND status=? AND worker_id=? AND attempt=?""",
+          to.name(), ownerWorkerId, to.name(), shardId, cur.status().name(), ownerWorkerId, expectedAttempt);
       if (updated == 0) {
-        log.debug("markStatusOwned lost ownership race: shard {} no longer owned by {}; "
-            + "suppressing outcome", shardId, ownerWorkerId);
+        log.debug("markStatusOwned lost ownership race: shard {} no longer owned by {} at attempt {}; "
+            + "suppressing outcome", shardId, ownerWorkerId, expectedAttempt);
         return;
       }
       jdbc.update("INSERT INTO execution_shard_outcome (shard_id, status, detail) VALUES (?,?,?)",

@@ -49,10 +49,12 @@ public interface ShardRepository {
    *  queued_at 在每次进入 DUE 时置 now(),故重试/重排后队龄从重新入队算起,不会虚高。 */
   long maxDueQueueAgeSeconds();
 
-  /** 运行中续约:仅当分片仍归 {@code ownerWorkerId}(worker_id 匹配)且仍 RUNNING 时延长 lease_until。
-   *  长运行 handler(千万级批处理同步阻塞)期间 worker 周期调用,避免租约短于任务时长被 Reconciler 误回收;
-   *  已终态(如写回 SUCCESS)或被接管(worker_id 变更)则 0 行 → 静默返回 false。无 outcome 行。 */
-  boolean renewLease(long shardId, String ownerWorkerId, Instant leaseUntil);
+  /** 运行中续约:仅当分片仍归 {@code ownerWorkerId}(worker_id 匹配)、仍 RUNNING、且 attempt 仍为
+   *  {@code expectedAttempt}(B1 每-attempt 栅栏)时才延长 lease_until。长运行 handler(千万级批处理同步阻塞)
+   *  期间 worker 周期调用,避免租约短于任务时长被 Reconciler 误回收。已终态(如写回 SUCCESS)、被接管
+   *  (worker_id 变更)、或 attempt 已递增(回收后被重认领)则 0 行 → 静默返回 false,不延长新 attempt 的租约。
+   *  无 outcome 行。 */
+  boolean renewLease(long shardId, String ownerWorkerId, int expectedAttempt, Instant leaseUntil);
 
   /** 对账器扫描到的孤儿 RUNNING shard(由 Reconciler 逐任务回收),只投影对账所需的 id 与 attempt。 */
   record ExpiredShard(long id, int attempt) {}
@@ -73,9 +75,11 @@ public interface ShardRepository {
 
   /**
    * 持有着专属的终态回写:worker 用它写回自己的成功/失败/取消。除要求状态可迁移外,还要求行仍归
-   * {@code ownerWorkerId} 所有(worker_id 匹配)。若行已不在可迁移状态或已被他方接管(如 reconciler 回收后另一 worker
-   * 重新认领)→ 返回 false 且不落 outcome,静默丢弃该次回写。 */
-  boolean markStatusOwned(long shardId, ExecutionStatus to, String ownerWorkerId, String detail);
+   * {@code ownerWorkerId} 所有(worker_id 匹配)且 attempt 仍为 {@code expectedAttempt}(B1 每-attempt 栅栏)。
+   * 后者拦住「回收→重认领(attempt 递增)后,同 worker 旧 attempt 的陈旧回写 clobber 新 attempt 状态」:即便
+   * worker_id 相同,attempt 不匹配也视为 stale → 静默丢弃。若行已不在可迁移状态、已被他方接管、或 attempt
+   * 已递增 → 返回 false 且不落 outcome。 */
+  boolean markStatusOwned(long shardId, ExecutionStatus to, String ownerWorkerId, int expectedAttempt, String detail);
 
   /** 失败分片排回:FAILED → DUE 并写 next_retry_at。CAS on status='FAILED':0 行=竞态/非 FAILED,静默跳过不落 outcome。
    *  retryBudgetMs != null 且该 shard retry_budget_until 尚未置(首次进重试)时,置 retry_budget_until=now()+W;

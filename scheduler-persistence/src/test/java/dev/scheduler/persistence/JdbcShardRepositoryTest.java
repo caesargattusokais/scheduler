@@ -271,16 +271,42 @@ class JdbcShardRepositoryTest extends AbstractPostgresTest {
     claimShard(shard0, taskId, "w1", 8);
 
     Instant renewed = Instant.now().plusSeconds(300).truncatedTo(ChronoUnit.MICROS);
-    assertTrue(shardRepo.renewLease(shard0, "w1", renewed), "持有者续约应成功");
+    // claim 后 attempt=1 → expectedAttempt 传 1
+    assertTrue(shardRepo.renewLease(shard0, "w1", 1, renewed), "持有者续约应成功");
     assertEquals(renewed, shardRepo.findShard(shard0).get().leaseUntil());
 
     // 非持有者(worker 变更)续约 → 0 行静默 false
-    assertFalse(shardRepo.renewLease(shard0, "w2", renewed.plusSeconds(10)));
+    assertFalse(shardRepo.renewLease(shard0, "w2", 1, renewed.plusSeconds(10)));
     assertEquals(renewed, shardRepo.findShard(shard0).get().leaseUntil(), "非持有者不得改变租约");
 
     // 终态(如写回 SUCCESS)后不再续约
-    assertTrue(shardRepo.markStatusOwned(shard0, ExecutionStatus.SUCCESS, "w1", "ok"));
-    assertFalse(shardRepo.renewLease(shard0, "w1", renewed.plusSeconds(20)));
+    assertTrue(shardRepo.markStatusOwned(shard0, ExecutionStatus.SUCCESS, "w1", 1, "ok"));
+    assertFalse(shardRepo.renewLease(shard0, "w1", 1, renewed.plusSeconds(20)));
+  }
+
+  /** B1 每-attempt 栅栏:回收(F→DUE 复位)后再认领(attempt+1,同 worker)后,用旧 attempt 的续约必须被拒,
+   *  不得延长新 attempt 的租约;用当前 attempt 续约才成功。 */
+  @Test void renewLease_staleAttempt_rejected_afterReclaim_doesNotExtendLease() {
+    long taskId = newTask(1, 8);
+    long parentId = seedParentAndShards(taskId, 1);
+    long shard0 = shard(parentId, 0).id();
+    claimShard(shard0, taskId, "w1", 8);   // attempt -> 1, RUNNING by w1
+    // 回收:FAILED → 复位 DUE → 同 worker 再认领
+    shardRepo.markStatus(shard0, ExecutionStatus.FAILED, "w1", "boom");
+    jdbc.update("UPDATE execution_shard SET status='DUE' WHERE id=?", shard0);
+    claimShard(shard0, taskId, "w1", 8);   // attempt -> 2, RUNNING by w1(新 attempt)
+
+    Instant renewed = Instant.now().plusSeconds(300).truncatedTo(ChronoUnit.MICROS);
+    Instant pre = shardRepo.findShard(shard0).get().leaseUntil();
+
+    // 旧 attempt=1 的续约必须被拒(worker 相同但 attempt 陈旧)
+    assertFalse(shardRepo.renewLease(shard0, "w1", 1, renewed), "陈旧 attempt 续约必须被拒");
+    assertEquals(2, shardRepo.findShard(shard0).get().attempt(), "attempt 保持当前值");
+    assertEquals(pre, shardRepo.findShard(shard0).get().leaseUntil(), "陈旧续约不得延长租约");
+
+    // 当前 attempt=2 续约成功
+    assertTrue(shardRepo.renewLease(shard0, "w1", 2, renewed), "当前 attempt 续约应成功");
+    assertEquals(renewed, shardRepo.findShard(shard0).get().leaseUntil());
   }
 
   @Test void excessiveConcurrencyRejectsSecondShard() {
@@ -372,7 +398,7 @@ class JdbcShardRepositoryTest extends AbstractPostgresTest {
     long shard0 = shard(parentId, 0).id();
     claimShard(shard0, taskId, "w1", 8); // -> RUNNING, worker_id=w1
 
-    boolean ok = shardRepo.markStatusOwned(shard0, ExecutionStatus.SUCCESS, "w2", "stale done");
+    boolean ok = shardRepo.markStatusOwned(shard0, ExecutionStatus.SUCCESS, "w2", 1, "stale done");
 
     assertFalse(ok, "owner mismatch → 守卫必须拦截回写");
     Shard s = shardRepo.findShard(shard0).get();
@@ -387,7 +413,7 @@ class JdbcShardRepositoryTest extends AbstractPostgresTest {
     long shard0 = shard(parentId, 0).id();
     claimShard(shard0, taskId, "w1", 8); // -> RUNNING, worker_id=w1
 
-    boolean ok = shardRepo.markStatusOwned(shard0, ExecutionStatus.SUCCESS, "w1", "done");
+    boolean ok = shardRepo.markStatusOwned(shard0, ExecutionStatus.SUCCESS, "w1", 1, "done");
 
     assertTrue(ok, "持有者自身回写应成功");
     Shard s = shardRepo.findShard(shard0).get();
@@ -403,10 +429,37 @@ class JdbcShardRepositoryTest extends AbstractPostgresTest {
     claimShard(shard0, taskId, "w1", 8);
     shardRepo.markStatus(shard0, ExecutionStatus.SUCCESS, "w1", "done"); // 已 SUCCESS 终态
 
-    boolean ok = shardRepo.markStatusOwned(shard0, ExecutionStatus.SUCCESS, "w1", "again");
+    boolean ok = shardRepo.markStatusOwned(shard0, ExecutionStatus.SUCCESS, "w1", 1, "again");
 
     assertFalse(ok, "非可迁移(SUCCESS→SUCCESS)→ 守卫返回 false");
     assertEquals(1, successOutcomes(shard0), "不得再落第二条 outcome");
+  }
+
+  /** B1 每-attempt 栅栏核心:旧 attempt(同 worker)的回写在分片被回收再认领(attempt 递增)后必须被拒。
+   *  这是「重认领后的陈旧写回不得 clobber 新 attempt」的证明:新 attempt=2 的 属主守卫要求 attempt 亦匹配,
+   *  否则同 worker 的旧写会命中 status+worker_id 而覆盖新 attempt 的 RUNNING。 */
+  @Test void markStatusOwned_staleAttempt_writebackRejected_afterReclaim() {
+    long taskId = newTask(1, 8);
+    long parentId = seedParentAndShards(taskId, 1);
+    long shard0 = shard(parentId, 0).id();
+    claimShard(shard0, taskId, "w1", 8);   // attempt -> 1, RUNNING by w1
+    // 回收:FAILED → 复位 DUE → 同 worker 再认领(new attempt)
+    shardRepo.markStatus(shard0, ExecutionStatus.FAILED, "w1", "boom");
+    jdbc.update("UPDATE execution_shard SET status='DUE' WHERE id=?", shard0);
+    claimShard(shard0, taskId, "w1", 8);   // attempt -> 2, RUNNING by w1(同 worker,陈旧意图)
+
+    // 旧 attempt=1 的写回必须被拒:返回 false,不落 SUCCESS outcome,不覆盖新 attempt 的 RUNNING。
+    assertFalse(shardRepo.markStatusOwned(shard0, ExecutionStatus.SUCCESS, "w1", 1, "stale write"));
+    Shard s = shardRepo.findShard(shard0).get();
+    assertEquals(ExecutionStatus.RUNNING, s.status(), "陈旧写回不得覆盖新 attempt 的 RUNNING");
+    assertEquals("w1", s.workerId(), "worker 未变(陈旧 intent 仅体现在 attempt)");
+    assertEquals(2, s.attempt(), "attempt 保持当前值");
+    assertEquals(0, successOutcomes(shard0), "被栅栏拦截 → 不落 SUCCESS outcome");
+
+    // 当前 attempt=2 的写回成功。
+    assertTrue(shardRepo.markStatusOwned(shard0, ExecutionStatus.SUCCESS, "w1", 2, "ok"), "当前 attempt 写回应成功");
+    assertEquals(ExecutionStatus.SUCCESS, shardRepo.findShard(shard0).get().status());
+    assertEquals(1, successOutcomes(shard0), "恰一条 SUCCESS outcome");
   }
 
   @Test void illegalTransitionThrows() {
