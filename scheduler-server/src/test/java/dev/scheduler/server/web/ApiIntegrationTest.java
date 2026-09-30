@@ -1780,6 +1780,71 @@ class ApiIntegrationTest {
         .andExpect(status().isNotFound());
   }
 
+  // ---- E2B:卡死视图 + 强制放弃 ----
+
+  long seedRunningShard(long taskId, String workerId) {
+    long parentId = shards.createParentWithShards(taskId, "e2b:" + System.nanoTime(), 1).id();
+    long shardId = shards.findShards(parentId).get(0).id();
+    jdbc.update("UPDATE execution_shard SET status='RUNNING', worker_id=?,"
+        + " started_at=now() - interval '10 minutes' WHERE id=?", workerId, shardId);
+    return shardId;
+  }
+
+  @Test void stuckView_listsOnlyAliveOwnerOverBudget() throws Exception {
+    long id = postTask("stuck-view-task");
+    jdbc.update("UPDATE app_task SET timeout_seconds=60 WHERE id=?", id);
+    long shardLive = seedRunningShard(id, "w-live");
+    jdbc.update("INSERT INTO worker (id, refs, last_seen, status) VALUES ('w-live','',now(),'ALIVE')");
+    long shardDead = seedRunningShard(id, "w-dead");
+    jdbc.update("INSERT INTO worker (id, refs, last_seen, status) VALUES ('w-dead','',now() - interval '120 seconds','ALIVE')");
+
+    mvc.perform(get("/api/v1/executions/stuck").param("taskId", String.valueOf(id)))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.total").value(1))
+        .andExpect(jsonPath("$.items[0].shardId").value((int) shardLive));
+  }
+
+  @Test void abandon_aliveOwner_returnsConflict() throws Exception {
+    long id = postTask("abandon-alive-task");
+    long shardId = seedRunningShard(id, "w-live");
+    jdbc.update("INSERT INTO worker (id, refs, last_seen, status) VALUES ('w-live','',now(),'ALIVE')");
+
+    mvc.perform(post("/api/v1/executions/shards/" + shardId + "/abandon"))
+        .andExpect(status().isConflict());
+    assertEquals("RUNNING", jdbc.queryForObject(
+        "SELECT status FROM execution_shard WHERE id=?", String.class, shardId),
+        "属主仍 ALIVE → 拒绝,行不被改动");
+  }
+
+  @Test void abandon_deadOwner_downsToDue_withAudit() throws Exception {
+    long id = postTask("abandon-dead-task");
+    long shardId = seedRunningShard(id, "w-dead");
+    jdbc.update("INSERT INTO worker (id, refs, last_seen, status) VALUES ('w-dead','',now() - interval '120 seconds','ALIVE')");
+
+    mvc.perform(post("/api/v1/executions/shards/" + shardId + "/abandon"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.status").value("DUE"))
+        .andExpect(jsonPath("$.attempt").value(0)); // requeue 复位 attempt
+    // FAILED outcome 'operator force-abandon' 已落;再 requeue → DUE
+    assertEquals(1L, (long) jdbc.queryForObject(
+        "SELECT count(*) FROM execution_shard_outcome WHERE shard_id=? AND detail='operator force-abandon'",
+        Long.class, shardId));
+    // 审计留痕
+    mvc.perform(get("/api/v1/audits").param("action", "shard.force-abandon").param("targetId", String.valueOf(shardId)))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.items.length()").value(1));
+  }
+
+  @Test void abandon_nonRunning_returnsConflict() throws Exception {
+    long id = postTask("abandon-not-running-task");
+    long parentId = shards.createParentWithShards(id, "e2b-nr:" + System.nanoTime(), 1).id();
+    long shardId = shards.findShards(parentId).get(0).id();
+    jdbc.update("UPDATE execution_shard SET status='SUCCESS' WHERE id=?", shardId);
+
+    mvc.perform(post("/api/v1/executions/shards/" + shardId + "/abandon"))
+        .andExpect(status().isConflict());
+  }
+
   /** 详情 = 父 header + 其 shard,派生父 status(非终态父 + RUNNING shard → 读作 RUNNING),且只读不写库。 */
   @Test
   void getExecutionDetail_returnsParentAndShards_withDerivedRunningStatus() throws Exception {

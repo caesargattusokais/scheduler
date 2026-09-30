@@ -8,11 +8,13 @@ import dev.scheduler.core.TargetType;
 import dev.scheduler.persistence.ExecutionRepository;
 import dev.scheduler.persistence.ShardRepository;
 import dev.scheduler.persistence.TaskRef;
+import dev.scheduler.persistence.WorkerRepository;
 import dev.scheduler.server.security.CurrentOperator;
 import dev.scheduler.server.service.AuditRecorder;
 import dev.scheduler.server.service.DlqView;
 import dev.scheduler.server.service.ExecutionDetail;
 import dev.scheduler.server.service.ExecutionQueryService;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.format.DateTimeParseException;
 import java.util.LinkedHashMap;
@@ -41,14 +43,24 @@ public class ExecutionController {
 
   private final ExecutionRepository executions;
   private final ShardRepository shards;
+  private final WorkerRepository workers;
   private final ExecutionQueryService queryService;
   private final AuditRecorder auditor;
   private final CurrentOperator current;
 
+  private static final int STUCK_ALIVE_STALE_SECONDS = 30;
+
+  /** E2-B 卡死视图行(persistence StuckShard + task 名/handlerRef + 派生超龄秒)。 */
+  public record StuckView(long shardId, long executionId, int shardIndex, String taskName,
+                          String handlerRef, String workerId, int attempt, Instant startedAt,
+                          long ageSeconds, long timeoutSeconds) {}
+
   public ExecutionController(ExecutionRepository executions, ShardRepository shards,
-                             JdbcTemplate jdbc, AuditRecorder auditor, CurrentOperator current) {
+                             WorkerRepository workers, JdbcTemplate jdbc, AuditRecorder auditor,
+                             CurrentOperator current) {
     this.executions = executions;
     this.shards = shards;
+    this.workers = workers;
     this.queryService = new ExecutionQueryService(jdbc, executions, shards);
     this.auditor = auditor;
     this.current = current;
@@ -148,6 +160,52 @@ public class ExecutionController {
     auditor.record(current.get(), "shard.requeue", TargetType.SHARD, shardId, Map.of(), null, shardBefore(s));
     return ResponseEntity.ok(
         shards.findShard(shardId).orElseThrow(() -> notFound("shard " + shardId)));
+  }
+
+  /** E2-B 卡死视图:属主仍 ALIVE 但已超运行预算的 RUNNING 分片(只读观测;运维判「慢 vs 真卡」+ 触发强制放弃)。
+   *  分页在内存切片(卡死分片通常极少,简单为先)。 */
+  @GetMapping("/stuck")
+  public Page<StuckView> stuck(
+      @RequestParam(required = false) Long taskId,
+      @RequestParam(required = false) Integer limit,
+      @RequestParam(required = false) Integer offset) {
+    Paging p = Paging.of(limit, offset);
+    List<ShardRepository.StuckShard> ss = shards.findStuckAliveRunning(taskId, STUCK_ALIVE_STALE_SECONDS);
+    List<Long> ids = ss.stream().map(ShardRepository.StuckShard::id).toList();
+    Map<Long, TaskRef> refs = shards.findTaskRefsByShardIds(ids);
+    List<StuckView> all = ss.stream().map(x -> {
+      TaskRef r = refs.get(x.id());
+      long age = Duration.between(x.startedAt(), Instant.now()).getSeconds();
+      return new StuckView(x.id(), x.executionId(), x.shardIndex(),
+          r == null ? null : r.name(), r == null ? null : r.handlerRef(),
+          x.workerId(), x.attempt(), x.startedAt(), age, x.timeoutSeconds());
+    }).toList();
+    List<StuckView> items = all.stream().skip(p.offset()).limit(p.limit()).toList();
+    return new Page<>(items, all.size(), p.offset(), p.limit());
+  }
+
+  /** E2-B 强制放弃:运维显式回收「属主卡住」的 RUNNING 分片(mirror requeue 全套)。
+   *  安全前门:属主仍 ALIVE → 409(强制先停 worker 再放弃)。放行后:防御性 markOffline + RUNNING→FAILED
+   *  ("operator force-abandon") + requeue(→DUE attempt=0)换干净 attempt,审计留痕。 */
+  @PostMapping("/shards/{shardId}/abandon")
+  public ResponseEntity<Shard> abandon(
+      @PathVariable long shardId) {
+    Shard s = shards.findShard(shardId).orElseThrow(() -> notFound("shard " + shardId));
+    if (s.status() != ExecutionStatus.RUNNING || s.workerId() == null) {
+      throw new ResponseStatusException(HttpStatus.CONFLICT,
+          "shard " + shardId + " is " + s.status() + " and cannot be force-abandoned (only RUNNING with an owner)");
+    }
+    boolean ownerAlive = workers.findAllAlive(Instant.now().minusSeconds(STUCK_ALIVE_STALE_SECONDS))
+        .stream().anyMatch(w -> w.id().equals(s.workerId()));
+    if (ownerAlive) {
+      throw new ResponseStatusException(HttpStatus.CONFLICT,
+          "owner worker " + s.workerId() + " is still ALIVE; stop it before force-abandon");
+    }
+    workers.markOffline(s.workerId(), Instant.now().minusSeconds(600)); // 防御性摘活(即便守卫已过仍兜底)
+    shards.markStatus(shardId, ExecutionStatus.FAILED, s.workerId(), "operator force-abandon");
+    shards.requeueShard(shardId);
+    auditor.record(current.get(), "shard.force-abandon", TargetType.SHARD, shardId, Map.of(), null, shardBefore(s));
+    return ResponseEntity.ok(shards.findShard(shardId).orElseThrow(() -> notFound("shard " + shardId)));
   }
 
   /**
