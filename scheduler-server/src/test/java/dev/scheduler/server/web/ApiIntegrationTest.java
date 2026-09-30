@@ -3138,7 +3138,9 @@ class ApiIntegrationTest {
         "/api/v1/dags", "/api/v1/dags/runs", "/api/v1/dags/runs/{runId}",
         "/api/v1/events",
         // 通知告警闭环 + 指标 SLO
-        "/api/v1/webhooks", "/api/v1/notifications", "/api/v1/metrics/executions",
+        "/api/v1/webhooks", "/api/v1/notifications",
+        "/api/v1/alerts/active", "/api/v1/alerts/history",
+        "/api/v1/metrics/executions",
         // 审计治理 + 操作者
         "/api/v1/audits", "/api/v1/audits/integrity", "/api/v1/operators");
     for (String p : critical) {

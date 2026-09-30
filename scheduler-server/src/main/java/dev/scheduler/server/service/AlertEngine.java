@@ -60,8 +60,6 @@ public class AlertEngine {
   private record Signal(String rule, String targetType, Long targetId, String severity,
                         String value, boolean active) {}
 
-  private record Rule(String ruleId, String severity, String targetType) {}
-
   /**
    * 单拍评估:剪枝过期 RESOLVED 历史,再逐信号走状态机,最后 reconcile 兜底 —— 对「本拍不再产出信号」的活跃
    * 行(见下)以合成 inactive 信号强制回落,堵死第 3 类栅控发射器(dag-run-failed GROUP BY 缺行、

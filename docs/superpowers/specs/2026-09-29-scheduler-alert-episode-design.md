@@ -155,7 +155,7 @@ partial unique 保证任意时刻每个 key 至多 1 个活跃 episode;RESOLVED 
 - DLQ 深度:`ShardRepository` 死信存量计数。
 - FAILED 通知数:`NotificationRepository` 按 status 计数。
 - per-DAG 近窗失败:`DagRepository` 或 AlertRepository join `dag_run` 按 dag_id 近窗 `status='FAILED'` 分组。
-- `AlertRepository`:**findActiveByKey / findActiveAll / upsert(迁移) / deleteKey / pruneResolved(cutoff)** + 供 controller 的视图查询(join task/dag 名)。
+- `AlertRepository`:**findActiveByKey / findAllActive(活跃全集,reconcile 用) / insert+update(非 upsert) / deleteKey / pruneResolved(cutoff)** + 供 controller 的视图查询(findActive / findResolved / countResolved;join task/dag 名)。
 
 ---
 
@@ -167,7 +167,7 @@ partial unique 保证任意时刻每个 key 至多 1 个活跃 episode;RESOLVED 
 [{
   "id":1, "rule":"task-failure-rate", "targetType":"task", "targetId":42,
   "targetName":"daily-export", "severity":"high", "status":"OPEN",
-  "value":"0.33", "openedAt":"2026-09-29T08:00:00Z", "samples":5
+  "value":"0.33", "openedAt":"2026-09-29T08:00:00Z"
 }]
 ```
 
@@ -184,14 +184,14 @@ partial unique 保证任意时刻每个 key 至多 1 个活跃 episode;RESOLVED 
 ### `AlertsPage`
 - 删掉前端「算告警」逻辑(阈值常量、gauge 聚合),改为 **渲染 `GET /api/v1/alerts/active`**(5s 轮询):
   - 顶部绿/红横幅:**active 为空 → 全绿**;否则「N 项需要关注」。
-  - triage 列表:severity 点/标签、规则人话标题、`targetName`(task/dag)或全局、当前值 `value`、`openedAt`「始于」、samples;行尾下钻链接同现(规则→所属页)。
+  - triage 列表:severity 点/标签、规则人话标题、`targetName`(task/dag)或全局、当前值 `value`、`openedAt`「始于」;行尾下钻链接同现(规则→所属页)。
 - 新增**「历史」页签**:打 `GET /api/v1/alerts/history?limit&offset`,Pager 化,只读。
 - `client.ts` 加 `listAlertEpisodes()`/`listAlertHistory()`;`types` 加 `AlertEpisodeView`。
 - `MetricsPage` / `NotificationsPage` / 其余不动。
 
 ### 人话标题映射
 规则 id → 标题(未知回落原文,镜像 NotificationsPage 的 KIND_LABELS 手法):
-`audit-tamper`→审计取证链 / `dlq-depth`→DLQ 积压 / `delivery-failed`→通知投递失败 / `failure-rate`→执行失败率 / `p95-latency`→父延迟 / `worker-offline`→worker 全部离线 / `task-failure-rate`→任务失败聚集 / `dag-run-failed`→DAG 批次失败。
+`audit-tamper`→审计取证链 / `dlq-depth`→DLQ 积压 / `delivery-failed`→通知投递失败 / `failure-rate`→执行失败率 / `p95-latency`→父延迟偏高 / `worker-offline`→worker 全部离线 / `task-failure-rate`→任务失败聚集 / `dag-run-failed`→DAG 批次失败。
 
 ---
 

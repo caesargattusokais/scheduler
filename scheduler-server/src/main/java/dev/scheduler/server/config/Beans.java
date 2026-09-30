@@ -446,7 +446,7 @@ public class Beans {
     return new AlertEngine(metrics, shards, notifs, audits, workers, dags, settings, alertRepo);
   }
 
-  /** 告警评价循环:leader 门控,周期驱动 AlertEngine.evaluateOnce();失败兜底不杀线程(镜像 NotificationLoop)。 */
+  /** AlertLoop bean(循环实现与语义见下方内嵌类)。 */
   @Bean
   @ConditionalOnProperty(name = "scheduler.alert.enabled", havingValue = "true", matchIfMissing = true)
   AlertLoop alertLoop(RuntimeConfigService runtimeConfigService, AlertEngine engine, LeaderElection leader) {
