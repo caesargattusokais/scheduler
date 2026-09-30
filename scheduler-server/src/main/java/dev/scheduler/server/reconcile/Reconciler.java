@@ -45,22 +45,10 @@ public class Reconciler {
   public int scanOnce() {
     int reclaimed = 0;
     for (Task task : tasks.findAll()) {
-      for (ExpiredShard run : shards.findExpiredRunning(task.id(), staleAfterSeconds)) {
-        try {
-          if (shards.markStatus(run.id(), ExecutionStatus.FAILED, workerId,
-                  "owner unresponsive or lease expired")) {
-            failureResolver.handle(task, run.id(), run.attempt(),
-                "owner unresponsive or lease expired");
-            reclaimed++;
-          }
-        } catch (IllegalStateException alreadyMovedOn) {
-          // 快照后该行已被 owner 抢先完成(或已非法迁移)→ 已迁移,跳过这一行,不中止整批回收。
-        }
-      }
-      // §3 分布式执行超时:timeoutSeconds>0 的任务,已认领且运行超限的 RUNNING 分片走同一条失败路径
-      // (重试/死信/FAIL_FAST)。worker 迟到写回由 owner 归属守卫拒(worker_id 已被改写)→ 硬超时语义。
-      // 与租约/活性回收互不干扰、同汇入 fail 路径;同 trigger 片二次查或已 FAILED 时由 canTransition 抛
-      // IllegalStateException 被上方 catch 结构吞掉(这里独立 catch,与活性分支同口径)。
+      // 阶段 1 — §3 分布式执行超时:timeoutSeconds>0 的任务,已认领且运行超限的 RUNNING 分片走失败路径
+      // (重试/死信/FAIL_FAST),发 execution.timeout。先于活性回收,故死属主 + 超时片保住 'runtime timeout'
+      // detail 与超时通知;活体 worker 慢/超时由 B1 活性门排除,不在此收。worker 迟到写回由 owner 归属守卫拒
+      // (worker_id 已被改写)→ 硬超时语义。
       if (task.timeoutSeconds() > 0) {
         for (ExpiredShard run : shards.findOverRuntime(task.id(), task.timeoutSeconds(), staleAfterSeconds)) {
           try {
@@ -72,6 +60,20 @@ public class Reconciler {
           } catch (IllegalStateException alreadyMovedOn) {
             // 快照后已终态/已迁移 → 跳过,不中止整批。
           }
+        }
+      }
+      // 阶段 2 — 活性回收:对上阶段未收的孤儿(dead-owner 且未超时)走同一条失败路径,detail 'owner unresponsive'。
+      // 阶段 1 已 FAILED 的片因 findExpiredRunning 要求 status='RUNNING' 而不再命中,两阶段互不重叠/不重复计数。
+      for (ExpiredShard run : shards.findExpiredRunning(task.id(), staleAfterSeconds)) {
+        try {
+          if (shards.markStatus(run.id(), ExecutionStatus.FAILED, workerId,
+                  "owner unresponsive or lease expired")) {
+            failureResolver.handle(task, run.id(), run.attempt(),
+                "owner unresponsive or lease expired");
+            reclaimed++;
+          }
+        } catch (IllegalStateException alreadyMovedOn) {
+          // 快照后该行已被 owner 抢先完成/被超时阶段回收(或已非法迁移)→ 已迁移,跳过这一行,不中止整批回收。
         }
       }
     }

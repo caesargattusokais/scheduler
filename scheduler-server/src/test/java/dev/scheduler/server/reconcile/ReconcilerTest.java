@@ -310,9 +310,8 @@ class ReconcilerTest {
     assertEquals(1L, parentOutcomeCount(parentId, "CANCELED"));
   }
 
-  /** §3 分布式超时 + B1 活性门:timeoutSeconds>0 且属主已死(心跳失联)的 RUNNING 超限片 → 照常被回收 FAILED,父汇聚 FAILED。
-   *  (B1 单活性门/phase 顺序下,先经活性分支回收,故 detail 为「owner unresponsive」;detail='runtime timeout' 与
-   *  execution.timeout 事件在 Reconciler 内已不可达,仅持久层 findOverRuntime 直接测。) */
+  /** §3 分布式超时 + B1 活性门:timeoutSeconds>0 且属主已死(心跳失联)的 RUNNING 超限片 → 超时分支(先于活性回收)
+   *  回收,落 'runtime timeout' detail + execution.timeout 通知,父汇聚 FAILED。 */
   @Test void shardOverRuntime_deadOwnerReclaimedAsFailed() {
     long taskId = createTaskTimed(3);
     long parentId = seedParentWithShards(taskId, 1);
@@ -326,11 +325,13 @@ class ReconcilerTest {
     assertEquals(1, reconciler().scanOnce(), "死属主超时 → 回收");
     assertEquals(ExecutionStatus.FAILED, shards.findShard(sid).orElseThrow().status());
     assertEquals(1L, shardOutcomeCount(sid, "FAILED"));
-    Long lv = jdbc.queryForObject(
+    Long rt = jdbc.queryForObject(
         "SELECT count(*) FROM execution_shard_outcome WHERE shard_id=? AND status='FAILED'"
-            + " AND detail='owner unresponsive or lease expired'",
+            + " AND detail='runtime timeout'",
         Long.class, sid);
-    assertEquals(1L, lv, "先经活性分支回收 → failure detail = owner unresponsive");
+    assertEquals(1L, rt, "超时分支先收 → failure detail = runtime timeout");
+    assertTrue(fired.contains(new Fired("execution.timeout", "shard", sid,
+        "timeout:" + sid + ":1")), "dead-owner 超时 → 发 execution.timeout(attempt=1)");
     // 单分片父随之汇聚 FAILED → 父级 execution.failed 亦发。
     assertTrue(fired.contains(new Fired("execution.failed", "execution", parentId,
         "parent:execution.failed:" + parentId)), "父终态 FAILED → 发 execution.failed");
