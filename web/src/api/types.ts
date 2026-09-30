@@ -65,6 +65,20 @@ export interface DlqRow extends Shard {
   failureDetail: string | null;
 }
 
+/** 卡死分片行(E2-B 独立视图):属主 worker 仍 ALIVE 但已超过任务运行预算的 RUNNING 分片。 */
+export interface StuckRow {
+  shardId: number;
+  executionId: number;
+  shardIndex: number;
+  taskName: string | null;
+  handlerRef: string | null;
+  workerId: string | null;
+  attempt: number;
+  startedAt: string | null;
+  ageSeconds: number;
+  timeoutSeconds: number;
+}
+
 export interface ExecutionDetail {
   id: number;
   taskId: number;

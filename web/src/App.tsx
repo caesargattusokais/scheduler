@@ -7,6 +7,7 @@ import ForcePasswordChange from './pages/ForcePasswordChange';
 import TasksPage from './pages/TasksPage';
 import ExecutionsPage from './pages/ExecutionsPage';
 import DlqPage from './pages/DlqPage';
+import StuckPage from './pages/StuckPage';
 import DagsPage from './pages/DagsPage';
 import MetricsPage from './pages/MetricsPage';
 import AlertsPage from './pages/AlertsPage';
@@ -104,6 +105,7 @@ export default function App() {
             <Route path="/executions" element={<ExecutionsPage />} />
             <Route path="/events" element={<EventsPage />} />
             <Route path="/dlq" element={<DlqPage />} />
+            <Route path="/stuck" element={<StuckPage />} />
             <Route path="/dags" element={<DagsPage />} />
             <Route path="/metrics" element={<MetricsPage />} />
             <Route path="/alerts" element={<AlertsPage />} />

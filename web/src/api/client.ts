@@ -27,6 +27,7 @@ import type {
   RuntimeConfigEntry,
   SessionsRevokeResult,
   Shard,
+  StuckRow,
   Task,
   UpdateTaskRequest,
   UpsertOperatorRequest,
@@ -160,6 +161,14 @@ export const getDlq = (p: ListDlqParams = {}): Promise<Page<DlqRow>> =>
 
 export const requeueShard = (shardId: number) =>
   req<Shard>(`/api/v1/executions/shards/${shardId}/requeue`, { method: 'POST' });
+
+/** E2-B 卡死视图:属主仍 ALIVE 但已超运行预算的 RUNNING 分片(只读,驱动卡死页)。 */
+export const getStuck = (p: { taskId?: number; limit?: number; offset?: number } = {}): Promise<Page<StuckRow>> =>
+  req<Page<StuckRow>>(`/api/v1/executions/stuck${qstr(p)}`);
+
+/** E2-B 强制放弃:属主必须已非 ALIVE(后端 409 兜底);需先停 worker。 */
+export const forceAbandonShard = (shardId: number) =>
+  req<Shard>(`/api/v1/executions/shards/${shardId}/abandon`, { method: 'POST' });
 
 // ---- DAG ----
 export interface ListDagsParams {

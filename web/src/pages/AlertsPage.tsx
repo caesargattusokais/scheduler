@@ -17,6 +17,7 @@ const RULE_LABELS: Record<string, { text: string; cls: string }> = {
   'worker-offline': { text: 'worker 全部离线', cls: 'bg-rose-100 text-rose-700' },
   'task-failure-rate': { text: '任务失败聚集', cls: 'bg-fuchsia-100 text-fuchsia-700' },
   'dag-run-failed': { text: 'DAG 批次失败', cls: 'bg-emerald-100 text-emerald-700' },
+  'stuck-alive': { text: '运行卡死', cls: 'bg-slate-100 text-slate-700' },
 };
 
 /** 规则 id → 下钻所属页(镜像旧 AlertsPage 的 href 映射;未知回落 /alerts)。 */
@@ -29,6 +30,7 @@ const RULE_DRILLDOWN: Record<string, string> = {
   'worker-offline': '/metrics',
   'task-failure-rate': '/tasks',
   'dag-run-failed': '/dags',
+  'stuck-alive': '/stuck',
 };
 
 /** 三档严重度外观(沿用旧页)。 */
