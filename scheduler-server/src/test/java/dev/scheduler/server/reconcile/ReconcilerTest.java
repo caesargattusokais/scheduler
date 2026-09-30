@@ -103,6 +103,15 @@ class ReconcilerTest {
     }
   }
 
+  /** B1 单一活性门:孤儿回收的前提 = 属主已死(worker 行心跳失联或缺失)。此助手把 shard 播为「有属主但属主已死」的
+   *  RUNNING 孤儿(worker_id=owner + 心跳失联的 ALIVE worker 行),并置 lease(该 lease 只是摆设,B1 不再以租约回收)。 */
+  private void setDeadOwnedShard(Shard s, String owner, String leaseExpr) {
+    jdbc.update("UPDATE execution_shard SET status='RUNNING', worker_id=?, lease_until="
+        + leaseExpr + ", attempt=1 WHERE id=?", owner, s.id());
+    jdbc.update("INSERT INTO worker (id, refs, last_seen, status)"
+        + " VALUES (?, '', now() - interval '2 minutes', 'ALIVE')", owner); // 心跳失联(> stale30)→ 判死
+  }
+
   private long shardOutcomeCount(long shardId, String status) {
     return jdbc.queryForObject(
         "SELECT count(*) FROM execution_shard_outcome WHERE shard_id=? AND status=?",
@@ -147,7 +156,7 @@ class ReconcilerTest {
     long taskId = createTask(1, 0, 1000, null); // maxRetries=0 → 不可重试
     long parentId = seedParentWithShards(taskId, 1);
     long sid = shard(parentId, 0).id();
-    setShard(shard(parentId, 0), "RUNNING", "now() - interval '1 hour'");
+    setDeadOwnedShard(shard(parentId, 0), "w-orphan", "now() - interval '1 hour'"); // 属主已死 → 活性门回收
 
     int n = reconciler().scanOnce();
 
@@ -167,7 +176,7 @@ class ReconcilerTest {
     long taskId = createTask(1, 2, 1000, null); // maxRetries=2, 无 pattern → 可重试
     long parentId = seedParentWithShards(taskId, 1);
     long sid = shard(parentId, 0).id();
-    setShard(shard(parentId, 0), "RUNNING", "now() - interval '1 hour'");
+    setDeadOwnedShard(shard(parentId, 0), "w-retry", "now() - interval '1 hour'"); // 属主已死 → 活性门回收
 
     int n = reconciler().scanOnce();
 
@@ -185,8 +194,8 @@ class ReconcilerTest {
     long parentId = seedParentWithShards(taskId, 2);
     long a = shard(parentId, 0).id();
     long b = shard(parentId, 1).id();
-    setShard(shards.findShard(a).orElseThrow(), "RUNNING", "now() - interval '1 hour'");
-    setShard(shards.findShard(b).orElseThrow(), "RUNNING", "now() - interval '30 minutes'");
+    setDeadOwnedShard(shards.findShard(a).orElseThrow(), "w-a", "now() - interval '1 hour'");
+    setDeadOwnedShard(shards.findShard(b).orElseThrow(), "w-b", "now() - interval '30 minutes'");
 
     int n = reconciler().scanOnce();
 
@@ -248,8 +257,8 @@ class ReconcilerTest {
     Shard dueSib = shard(parentId, 2);
     long runningSid = runningSib.id();
     long dueSid = dueSib.id();
-    // 触发片:过期孤儿 RUNNING(回收→FAILED→DLQ);兄弟:一个有效租约 RUNNING、一个 DUE。
-    setShard(trigger, "RUNNING", "now() - interval '1 hour'");
+    // 触发片:属主已死的孤儿 RUNNING(活性门回收→FAILED→DLQ);兄弟:一个有效租约 RUNNING、一个 DUE。
+    setDeadOwnedShard(trigger, "w-trigger", "now() - interval '1 hour'");
     setShard(runningSib, "RUNNING", "now() + interval '60 seconds'");
 
     int n = reconciler().scanOnce();
@@ -301,8 +310,10 @@ class ReconcilerTest {
     assertEquals(1L, parentOutcomeCount(parentId, "CANCELED"));
   }
 
-  /** §3 分布式超时:设了 timeoutSeconds>0,RUNNING 且 started_at 超限 → 被铁 FAILED + runtime timeout。 */
-  @Test void shardOverRuntime_isReclaimedAsFailed() {
+  /** §3 分布式超时 + B1 活性门:timeoutSeconds>0 且属主已死(心跳失联)的 RUNNING 超限片 → 照常被回收 FAILED,父汇聚 FAILED。
+   *  (B1 单活性门/phase 顺序下,先经活性分支回收,故 detail 为「owner unresponsive」;detail='runtime timeout' 与
+   *  execution.timeout 事件在 Reconciler 内已不可达,仅持久层 findOverRuntime 直接测。) */
+  @Test void shardOverRuntime_deadOwnerReclaimedAsFailed() {
     long taskId = createTaskTimed(3);
     long parentId = seedParentWithShards(taskId, 1);
     long sid = shard(parentId, 0).id();
@@ -310,17 +321,16 @@ class ReconcilerTest {
         + " lease_until=now()+interval '60 seconds', attempt=1,"
         + " started_at=now() - interval '10 minutes' WHERE id=?", sid);
     jdbc.update("INSERT INTO worker (id, refs, last_seen, status)"
-        + " VALUES ('w', '', now() - interval '5 seconds', 'ALIVE')"); // 心跳新鲜:排除活性分支,单测超时分支
+        + " VALUES ('w', '', now() - interval '2 minutes', 'ALIVE')"); // 心跳失联(> stale30)→ 判死
 
-    assertEquals(1, reconciler().scanOnce(), "超时 → 回收");
+    assertEquals(1, reconciler().scanOnce(), "死属主超时 → 回收");
     assertEquals(ExecutionStatus.FAILED, shards.findShard(sid).orElseThrow().status());
     assertEquals(1L, shardOutcomeCount(sid, "FAILED"));
-    Long rt = jdbc.queryForObject(
-        "SELECT count(*) FROM execution_shard_outcome WHERE shard_id=? AND status='FAILED' AND detail='runtime timeout'",
+    Long lv = jdbc.queryForObject(
+        "SELECT count(*) FROM execution_shard_outcome WHERE shard_id=? AND status='FAILED'"
+            + " AND detail='owner unresponsive or lease expired'",
         Long.class, sid);
-    assertEquals(1L, rt, "failure detail = runtime timeout");
-    assertTrue(fired.contains(new Fired("execution.timeout", "shard", sid,
-        "timeout:" + sid + ":1")), "超时回收 → 发 execution.timeout(attempt=1)");
+    assertEquals(1L, lv, "先经活性分支回收 → failure detail = owner unresponsive");
     // 单分片父随之汇聚 FAILED → 父级 execution.failed 亦发。
     assertTrue(fired.contains(new Fired("execution.failed", "execution", parentId,
         "parent:execution.failed:" + parentId)), "父终态 FAILED → 发 execution.failed");
@@ -355,8 +365,8 @@ class ReconcilerTest {
     assertEquals(ExecutionStatus.RUNNING, shards.findShard(sid).orElseThrow().status());
   }
 
-  /** §3:worker 心跳仍新鲜但已超时 → 仍被铁(超时与活性两分支互不干扰,都汇入统一 fail 路径)。 */
-  @Test void liveButOverRuntime_shardStillTimedOut() {
+  /** B1(§4.1):活 worker(心跳新鲜 ALIVE)即使超时也绝不回收——活体慢不回收,避免同一物理 shard 双跑。 */
+  @Test void liveWorkerOverTimeout_isNotReclaimed() {
     long taskId = createTaskTimed(3);
     long parentId = seedParentWithShards(taskId, 1);
     long sid = shard(parentId, 0).id();
@@ -365,10 +375,11 @@ class ReconcilerTest {
         + " lease_until=now()+interval '60 seconds', attempt=1,"
         + " started_at=now() - interval '10 minutes' WHERE id=?", owner, sid);
     jdbc.update("INSERT INTO worker (id, refs, last_seen, status)"
-        + " VALUES (?, '', now() - interval '5 seconds', 'ALIVE')", owner);
+        + " VALUES (?, '', now() - interval '5 seconds', 'ALIVE')", owner); // 心跳新鲜(< stale30)
 
-    assertEquals(1, reconciler().scanOnce(), "活 worker 但超时 → 仍铁 FAILED");
-    assertEquals(ExecutionStatus.FAILED, shards.findShard(sid).orElseThrow().status());
+    assertEquals(0, reconciler().scanOnce(), "活 worker 但超时 → 不回收");
+    assertEquals(ExecutionStatus.RUNNING, shards.findShard(sid).orElseThrow().status());
+    assertEquals(0L, shardOutcomeCount(sid, "FAILED"));
   }
 
   /** 父仍需等待未终态兄弟:1 SUCCESS + 1 RUNNING + 1 DUE → 父不动不下场。 */

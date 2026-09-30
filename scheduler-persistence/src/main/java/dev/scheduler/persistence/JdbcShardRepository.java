@@ -227,27 +227,33 @@ public class JdbcShardRepository implements ShardRepository {
   }
 
   @Override public List<ExpiredShard> findExpiredRunning(long taskId, int staleAfterSeconds) {
+    // B1 统一活性门控回收(§4.1):唯一回收判据 = 属主 worker 非 ALIVE(status 非 'ALIVE'、last_seen 失联、或行缺失)。
+    // 租约过期不再单独构成回收信号——活体 worker 的 shard 即便租约过期/运行超时也绝不回收,避免同一物理 shard 被
+    // 重新派发而双跑(双副作用)。worker 判活口径与 server active 指标一致(status='ALIVE' AND last_seen >= now()-stale)。
     return jdbc.query(
         "SELECT s.id, s.attempt FROM execution_shard s JOIN execution e ON e.id = s.execution_id"
-            + " WHERE e.task_id=? AND s.status='RUNNING'"
-            + " AND ( s.lease_until <= now()"
-            + "     OR ( s.worker_id IS NOT NULL AND NOT EXISTS ("
-            + "           SELECT 1 FROM worker w"
-            + "            WHERE w.id = s.worker_id"
-            + "              AND w.last_seen >= now() - make_interval(secs => ?)"
-            + "              AND w.status = 'ALIVE' ) ) )",
+            + " WHERE e.task_id=? AND s.status='RUNNING' AND s.worker_id IS NOT NULL"
+            + " AND NOT EXISTS (SELECT 1 FROM worker w"
+            + "                  WHERE w.id = s.worker_id"
+            + "                    AND w.status = 'ALIVE'"
+            + "                    AND w.last_seen >= now() - make_interval(secs => ?))",
         (rs, i) -> new ExpiredShard(rs.getLong("id"), rs.getInt("attempt")),
         taskId, (double) staleAfterSeconds);
   }
 
-  @Override public List<ExpiredShard> findOverRuntime(long taskId, int timeoutSeconds) {
+  @Override public List<ExpiredShard> findOverRuntime(long taskId, int timeoutSeconds, int staleAfterSeconds) {
+    // §4.1 同一活性门:超时亦只在属主非 ALIVE 时回收;活体 worker 慢/超时绝不回收。两回收源共用一条 liveness 判据。
     return jdbc.query(
         "SELECT s.id, s.attempt FROM execution_shard s JOIN execution e ON e.id = s.execution_id"
             + " WHERE e.task_id=? AND s.status='RUNNING'"
             + " AND s.worker_id IS NOT NULL"            // 已认领才算运行(未认领异常行不参与超时)
-            + " AND now() - s.started_at > make_interval(secs => ?)",
+            + " AND now() - s.started_at > make_interval(secs => ?)"
+            + " AND NOT EXISTS (SELECT 1 FROM worker w"
+            + "                  WHERE w.id = s.worker_id"
+            + "                    AND w.status = 'ALIVE'"
+            + "                    AND w.last_seen >= now() - make_interval(secs => ?))",
         (rs, i) -> new ExpiredShard(rs.getLong("id"), rs.getInt("attempt")),
-        taskId, (double) timeoutSeconds);
+        taskId, (double) timeoutSeconds, (double) staleAfterSeconds);
   }
 
   @Override public boolean markStatus(long shardId, ExecutionStatus to, String workerId, String detail) {

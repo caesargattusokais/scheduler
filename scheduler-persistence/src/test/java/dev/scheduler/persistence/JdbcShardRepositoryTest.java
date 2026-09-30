@@ -878,17 +878,17 @@ class JdbcShardRepositoryTest extends AbstractPostgresTest {
     assertTrue(shardRepo.findExpiredRunning(taskId, 30).isEmpty(), "owner 心跳新鲜 → 不回收");
   }
 
-  /** 兜底路径保留:租约已过期即使 owner 心跳新鲜 → 仍回收(lease 兜底)。 */
-  @Test void findExpiredRunning_leaseExpiredButOwnerFresh_stillReturned() {
+  /** B1 单一活性门:租约已过期但 owner worker 心跳新鲜(ALIVE)→ 不回收(租约不再单独构成回收信号)。 */
+  @Test void findExpiredRunning_leaseExpiredButOwnerFresh_isSkipped() {
     long taskId = newTask(1, 8);
     long parentId = seedParentAndShards(taskId, 1);
     long sid = shard(parentId, 0).id();
     claimShard(sid, taskId, "w-keep", 8);    // RUNNING, worker_id='w-keep'
-    seedWorker("w-keep", 5);
+    seedWorker("w-keep", 5);                 // ALIVE, last_seen 5s 前 < stale(30)
     jdbc.update("UPDATE execution_shard SET lease_until = now() - interval '1 hour' WHERE id=?", sid);
 
-    boolean hit = shardRepo.findExpiredRunning(taskId, 30).stream().anyMatch(e -> e.id() == sid);
-    assertTrue(hit, "租约过期即使 owner 新鲜 → lease 兜底仍回收");
+    assertTrue(shardRepo.findExpiredRunning(taskId, 30).stream().noneMatch(e -> e.id() == sid),
+        "租约过期但 owner 新鲜 → 活体不被回收,绝不双跑");
   }
 
   /** 兜底:worker_id IS NULL 的 RUNNING(异常数据/测试播种)只走租约;租约新鲜 → 不回收。 */
@@ -910,6 +910,8 @@ class JdbcShardRepositoryTest extends AbstractPostgresTest {
     long overId = shard(parentId, 0).id();
     long freshId = shard(parentId, 1).id();
     long unclaimedId = shard(parentId, 2).id();
+    // 属主 worker 显式播为非 ALIVE(dead):B1 同一活性门下,死属主的超时片才可回收。
+    jdbc.update("INSERT INTO worker (id, refs, last_seen, status) VALUES ('w1', '', now(), 'DEAD')");
     // 超时:已认领(started_at 拨旧 10 分钟)
     jdbc.update("UPDATE execution_shard SET status='RUNNING', worker_id='w1',"
         + " started_at=now() - interval '10 minutes' WHERE id=?", overId);
@@ -920,9 +922,35 @@ class JdbcShardRepositoryTest extends AbstractPostgresTest {
     jdbc.update("UPDATE execution_shard SET status='RUNNING', worker_id=NULL,"
         + " started_at=now() - interval '10 minutes' WHERE id=?", unclaimedId);
 
-    var expired = shardRepo.findOverRuntime(taskId, 60);
+    var expired = shardRepo.findOverRuntime(taskId, 60, 30);
 
     assertEquals(1, expired.size(), "仅已认领且超时的分片进入超时判定");
     assertEquals(overId, expired.get(0).id());
+  }
+
+  /** B1:ALIVE 属主即使运行超时也不返回(活体慢不回收)。 */
+  @Test void findOverRuntime_aliveOwnerOverRuntime_notReturned() {
+    long taskId = newTask(4, 8);
+    long parentId = seedParentAndShards(taskId, 1);
+    long sid = shard(parentId, 0).id();
+    jdbc.update("UPDATE execution_shard SET status='RUNNING', worker_id='w-live',"
+        + " started_at=now() - interval '10 minutes' WHERE id=?", sid);
+    seedWorker("w-live", 5);   // ALIVE, last_seen 5s 前 < stale(30)
+
+    assertTrue(shardRepo.findOverRuntime(taskId, 60, 30).stream().noneMatch(e -> e.id() == sid),
+        "活体属主超时 → 不回收,避免双跑");
+  }
+
+  /** B1:死属主(心跳失联)且超时 → 返回该片(真死可回收)。 */
+  @Test void findOverRuntime_deadOwnerOverRuntime_isReturned() {
+    long taskId = newTask(4, 8);
+    long parentId = seedParentAndShards(taskId, 1);
+    long sid = shard(parentId, 0).id();
+    jdbc.update("UPDATE execution_shard SET status='RUNNING', worker_id='w-dead',"
+        + " started_at=now() - interval '10 minutes' WHERE id=?", sid);
+    seedWorker("w-dead", 120);  // ALIVE 但 last_seen 120s 前 > stale(30) → 判死
+
+    assertTrue(shardRepo.findOverRuntime(taskId, 60, 30).stream().anyMatch(e -> e.id() == sid),
+        "死属主超时 → 列入回收");
   }
 }

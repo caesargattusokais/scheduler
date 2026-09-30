@@ -62,7 +62,7 @@ public class Reconciler {
       // 与租约/活性回收互不干扰、同汇入 fail 路径;同 trigger 片二次查或已 FAILED 时由 canTransition 抛
       // IllegalStateException 被上方 catch 结构吞掉(这里独立 catch,与活性分支同口径)。
       if (task.timeoutSeconds() > 0) {
-        for (ExpiredShard run : shards.findOverRuntime(task.id(), task.timeoutSeconds())) {
+        for (ExpiredShard run : shards.findOverRuntime(task.id(), task.timeoutSeconds(), staleAfterSeconds)) {
           try {
             if (shards.markStatus(run.id(), ExecutionStatus.FAILED, workerId, "runtime timeout")) {
               failureResolver.handle(task, run.id(), run.attempt(), "runtime timeout");

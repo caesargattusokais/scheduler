@@ -54,18 +54,18 @@ public interface ShardRepository {
    *  已终态(如写回 SUCCESS)或被接管(worker_id 变更)则 0 行 → 静默返回 false。无 outcome 行。 */
   boolean renewLease(long shardId, String ownerWorkerId, Instant leaseUntil);
 
-  /** 对账器扫描到的孤儿 RUNNING shard:租约已过期仍 RUNNING,或 owner worker 心跳失联(stale)。只投影对账所需的 id 与 attempt。 */
+  /** 对账器扫描到的孤儿 RUNNING shard(由 Reconciler 逐任务回收),只投影对账所需的 id 与 attempt。 */
   record ExpiredShard(long id, int attempt) {}
 
-  /** 某任务下需回收的孤儿 RUNNING shard,由 Reconciler 逐任务回收。判定双信号:
-   *  ① 租约已过期(lease_until<=now());② owner worker 心跳失联(worker.last_seen 距今 > staleAfterSeconds 秒或
-   *  status 非 'ALIVE',仅当 worker_id 非空时判定——worker_id 为空的 RUNNING 异常行走租约兜底)。
-   *  worker 判活口径与 server active 指标一致。 */
+  /** 某任务下需回收的孤儿 RUNNING shard,由 Reconciler 逐任务回收。B1 判定为唯一活性门(§4.1):
+   *  仅当属主 worker 非 ALIVE 才判为孤儿——status 非 'ALIVE'、last_seen 距今 > staleAfterSeconds、或 worker 行缺失
+   *  (仅当 worker_id 非空时判定;worker_id 为空的 RUNNING 异常行走租约兜底,不在此判)。租约过期不再单独构成回收
+   *  信号:活体 worker 即使租约闪断/运行慢也绝不回收,避免同一物理 shard 双跑。worker 判活口径与 server active 指标一致。 */
   List<ExpiredShard> findExpiredRunning(long taskId, int staleAfterSeconds);
 
-  /** 超时的 RUNNING shard(生命周期网关):仅当分片已认领(worker_id 非空)且 started_at 距今超过 timeoutSeconds。
-   *  返回对账所需的 id 与 attempt。 */
-  List<ExpiredShard> findOverRuntime(long taskId, int timeoutSeconds);
+  /** 超时的 RUNNING shard(生命周期网关):仅当分片已认领(worker_id 非空)、started_at 距今超过 timeoutSeconds、
+   *  且属主 worker 非 ALIVE(B1 同一活性门——活体 worker 慢/超时绝不回收)。返回对账所需的 id 与 attempt。 */
+  List<ExpiredShard> findOverRuntime(long taskId, int timeoutSeconds, int staleAfterSeconds);
 
   /** 显式状态迁移(非持有者专属):对账回收/控制台取消用。非法迁移抛 IllegalStateException;CAS 0 行=行已被他方改走
    *  → 静默返回 false,不落误导性 outcome。 */
