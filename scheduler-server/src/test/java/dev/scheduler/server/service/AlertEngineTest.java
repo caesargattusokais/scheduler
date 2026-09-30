@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -236,6 +237,35 @@ class AlertEngineTest {
     assertEquals(6, after.sampleCount());
     assertEquals(openedAt, after.openedAt(), "OPEN 的 opened_at 不得被清空/重写");
     assertEquals(openedValue, after.openedValue(), "OPEN 的 opened_value 不得丢失");
+  }
+
+  // ---- E2B:stuck-alive 全局规则(镜像 dlq-depth)----
+
+  @Test void stuckAlive_aboveThreshold_opensEpisode() {
+    Harness h = new Harness(base(3, 3, 0).put(RuntimeConfigKeys.ALERT_STUCK_ALIVE, "1"));
+    when(h.shards.countStuckAliveRunning(anyInt())).thenReturn(2L);
+    h.engine.evaluateOnce();
+    h.engine.evaluateOnce();
+    h.engine.evaluateOnce(); // 3 连续 active → OPEN
+    AlertEpisode e = h.episode("stuck-alive");
+    assertEquals("OPEN", e.status());
+    assertEquals(3, e.sampleCount());
+    assertEquals("2", e.openedValue());
+    assertNull(e.targetType(), "全局规则无 target");
+  }
+
+  @Test void stuckAlive_belowThreshold_noSignal() {
+    Harness h = new Harness(base(3, 3, 0).put(RuntimeConfigKeys.ALERT_STUCK_ALIVE, "1"));
+    when(h.shards.countStuckAliveRunning(anyInt())).thenReturn(0L);
+    h.engine.evaluateOnce();
+    assertTrue(h.alerts.active.isEmpty(), "count(0) < 阈值(1)→ 不产出信号");
+  }
+
+  @Test void stuckAlive_thresholdZero_disabled() {
+    Harness h = new Harness(base(3, 3, 0).put(RuntimeConfigKeys.ALERT_STUCK_ALIVE, "0"));
+    when(h.shards.countStuckAliveRunning(anyInt())).thenReturn(5L); // 即便有卡死也因阈=0 不产出
+    h.engine.evaluateOnce();
+    assertTrue(h.alerts.active.isEmpty(), "阈=0 → 规则停用");
   }
 
   // ---- per-task / per-dag 独立键 ----

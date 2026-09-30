@@ -32,6 +32,7 @@ public final class RuntimeConfigKeys {
   public static final String ALERT_WORKER_OFFLINE = "alert.worker-offline";
   public static final String ALERT_TASK_FAILURE_RATE = "alert.task-failure-rate";
   public static final String ALERT_DAG_RUN_FAILED = "alert.dag-run-failed";
+  public static final String ALERT_STUCK_ALIVE = "alert.stuck-alive";
 
   /** 白名单 map:key → 默认值。LinkedHashMap 保序(list() 展示稳定)。 */
   public static final Map<String, String> DEFAULTS = new LinkedHashMap<>();
@@ -59,6 +60,7 @@ public final class RuntimeConfigKeys {
     DEFAULTS.put(ALERT_WORKER_OFFLINE, "1");
     DEFAULTS.put(ALERT_TASK_FAILURE_RATE, "0.2");
     DEFAULTS.put(ALERT_DAG_RUN_FAILED, "1");
+    DEFAULTS.put(ALERT_STUCK_ALIVE, "1");
   }
 
   public static boolean isKnown(String key) { return DEFAULTS.containsKey(key); }

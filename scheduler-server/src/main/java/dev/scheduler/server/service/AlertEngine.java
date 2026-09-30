@@ -32,6 +32,7 @@ public class AlertEngine {
   private static final int MIN_TOTAL = 3;
   private static final int DAG_FAIL_WINDOW_SECONDS = 3600;
   private static final int WORKER_OFFLINE_WINDOW_SECONDS = 30;
+  private static final int STUCK_ALIVE_STALE_SECONDS = 30;
 
   private final ExecutionMetrics metrics;
   private final ShardRepository shards;
@@ -167,6 +168,13 @@ public class AlertEngine {
         out.add(new Signal("dag-run-failed", "dag", d.dagId(), "high",
             Long.toString(d.count()), d.count() >= dagThr));
       }
+    }
+
+    // stuck-alive(全局, medium):存在属主仍 ALIVE 但已超其运行预算的 RUNNING 分片(自观测;B1 不改活体)。
+    long stuckThr = settings.getLong(RuntimeConfigKeys.ALERT_STUCK_ALIVE, 1L);
+    if (stuckThr > 0) {
+      long n = shards.countStuckAliveRunning(STUCK_ALIVE_STALE_SECONDS);
+      out.add(new Signal("stuck-alive", null, null, "medium", Long.toString(n), n >= stuckThr));
     }
 
     return out;
