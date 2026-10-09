@@ -152,7 +152,7 @@ class JdbcTaskRepositoryTest extends AbstractPostgresTest {
     var repo = new JdbcTaskRepository(jdbc);
     Task evt = repo.create(new Task(null, "evt-task", "event", "demo", null,
         1, 300, 0, 1000, null, 8, true, false, null, null, null, "UTC", null,
-        List.of("order.created", "order.updated"), "NONE", null));
+        List.of("order.created", "order.updated"), "NONE", null, null));
     Task cur = repo.findById(evt.id()).orElseThrow();
     assertEquals(List.of("order.created", "order.updated"), cur.eventRoutes(), "event_routes 落库回读");
     assertEquals("event", cur.kind(), "kind 落库回读");
@@ -167,15 +167,30 @@ class JdbcTaskRepositoryTest extends AbstractPostgresTest {
   @Test void findEnabledByRoute_excludesPausedAnd_updateOverwritesRoutes() {
     var repo = new JdbcTaskRepository(jdbc);
     Task t = repo.create(new Task(null, "evt-t", "event", "demo", null,
-        1, 300, 0, 1000, null, 8, true, false, null, null, null, "UTC", null, List.of("r"), "NONE", null));
+        1, 300, 0, 1000, null, 8, true, false, null, null, null, "UTC", null, List.of("r"), "NONE", null, null));
     repo.setPaused(t.id(), true);
     assertTrue(repo.findEnabledByRoute("r").isEmpty(), "暂停的事件任务不匹配路由");
 
     Task updated = new Task(t.id(), "evt-t", "event", "demo", null,
-        1, 300, 0, 1000, null, 8, true, false, null, null, null, "UTC", null, List.of("new.r"), "NONE", null);
+        1, 300, 0, 1000, null, 8, true, false, null, null, null, "UTC", null, List.of("new.r"), "NONE", null, null);
     assertTrue(repo.update(updated.id(), updated));
     assertEquals(List.of("new.r"), repo.findById(t.id()).orElseThrow().eventRoutes(), "update 覆写 event_routes");
     assertTrue(repo.findEnabledByRoute("r").isEmpty());
     assertEquals(List.of(t.id()), repo.findEnabledByRoute("new.r").stream().map(Task::id).toList());
+  }
+
+  /** E3:progress_timeout_seconds 落库回读;NULL(未启用)缺省。 */
+  @Test void roundTrip_progressTimeoutSeconds() {
+    var repo = new JdbcTaskRepository(jdbc);
+    Task created = repo.create(new Task(null, "pt", "cron", "demo", "*/5 * * * *",
+        1, 300, 0, 1000, null, 8, true, false, null, null, null,
+        "UTC", null, List.of(), "NONE", null, 900));
+    assertEquals(900, created.progressTimeoutSeconds(), "create 应带 progress_timeout_seconds");
+    Task cur = repo.findById(created.id()).orElseThrow();
+    assertEquals(900, cur.progressTimeoutSeconds(), "progress_timeout_seconds 落库回读");
+    Task plain = repo.create(new Task(null, "pt-null", "cron", "demo", "*/5 * * * *",
+        1, 300, 0, 1000, null, 8, true, false));
+    assertNull(repo.findById(plain.id()).orElseThrow().progressTimeoutSeconds(),
+        "未 opt-in → progress_timeout_seconds 回读 NULL");
   }
 }

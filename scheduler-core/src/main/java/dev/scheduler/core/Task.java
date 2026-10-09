@@ -13,7 +13,8 @@ public record Task(
     int maxActiveConcurrent, boolean enabled, boolean paused,
     String retryMode, Long retryCapMs, Long retryBudgetMs,
     String timezone, Integer intervalSeconds, List<String> eventRoutes,
-    String successPolicyType, Integer successPolicyValue) {
+    String successPolicyType, Integer successPolicyValue,
+    Integer progressTimeoutSeconds) {
   public Task {
     if (shardCount < 1) throw new IllegalArgumentException("shardCount must be >= 1");
     if (maxActiveConcurrent < 1) throw new IllegalArgumentException("maxActiveConcurrent must be >= 1");
@@ -37,7 +38,7 @@ public record Task(
       String retryMode, Long retryCapMs, Long retryBudgetMs) {
     this(id, name, kind, handlerRef, cron, shardCount, timeoutSeconds,
         maxRetries, backoffMs, retryableFailurePattern, maxActiveConcurrent, enabled, paused,
-        retryMode, retryCapMs, retryBudgetMs, "UTC", null, List.of(), "NONE", null);
+        retryMode, retryCapMs, retryBudgetMs, "UTC", null, List.of(), "NONE", null, null);
   }
 
   /** 既有 18 参完整构造(不含事件路由);事件路由取空列表。仅供事件路由无关的现有调用点/测试 fixture 推进编译。 */
@@ -49,7 +50,7 @@ public record Task(
       String timezone, Integer intervalSeconds) {
     this(id, name, kind, handlerRef, cron, shardCount, timeoutSeconds,
         maxRetries, backoffMs, retryableFailurePattern, maxActiveConcurrent, enabled, paused,
-        retryMode, retryCapMs, retryBudgetMs, timezone, intervalSeconds, List.of(), "NONE", null);
+        retryMode, retryCapMs, retryBudgetMs, timezone, intervalSeconds, List.of(), "NONE", null, null);
   }
 
   public boolean hasEventRoutes() {
