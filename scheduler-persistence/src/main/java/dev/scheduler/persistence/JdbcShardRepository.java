@@ -227,6 +227,15 @@ public class JdbcShardRepository implements ShardRepository {
         java.sql.Timestamp.from(leaseUntil), shardId, ownerWorkerId, expectedAttempt) == 1;
   }
 
+  @Override public boolean recordProgress(long shardId, String ownerWorkerId, int expectedAttempt) {
+    // E3 进度落库(镜像 renewLease 每-attempt 栅栏):DB now() 盖章(单一时钟,JVM 不传时间戳)。
+    // 仅当仍归本 worker(RUNNING + worker_id 匹配)且 attempt 未变才置 last_progress_at;被接管/重认领则 0 行静默。
+    return jdbc.update("""
+        UPDATE execution_shard SET last_progress_at = now()
+         WHERE id=? AND status='RUNNING' AND worker_id=? AND attempt=?""",
+        shardId, ownerWorkerId, expectedAttempt) == 1;
+  }
+
   @Override public List<ExpiredShard> findExpiredRunning(long taskId, int staleAfterSeconds) {
     // B1 统一活性门控回收(§4.1):唯一回收判据 = 属主 worker 非 ALIVE(status 非 'ALIVE'、last_seen 失联、或行缺失)。
     // 租约过期不再单独构成回收信号——活体 worker 的 shard 即便租约过期/运行超时也绝不回收,避免同一物理 shard 被
@@ -258,18 +267,29 @@ public class JdbcShardRepository implements ShardRepository {
   }
 
   @Override public List<ShardRepository.StuckShard> findStuckAliveRunning(Long taskId, int staleAfterSeconds) {
-    String base = "SELECT s.id, s.execution_id, s.shard_index, s.worker_id, s.attempt, s.started_at, t.timeout_seconds"
+    // E3 渐进谓词(spec §3):未 opt-in → 复用 E2B timeout/started_at;opt-in(progress_timeout>0)→ 改按 COALESCE(last_progress_at, started_at)。
+    String base = "SELECT s.id, s.execution_id, s.shard_index, s.worker_id, s.attempt, s.started_at,"
+        + " t.timeout_seconds, s.last_progress_at"
         + " FROM execution_shard s JOIN execution e ON e.id = s.execution_id"
         + " JOIN app_task t ON t.id = e.task_id";
     String cond = " s.status='RUNNING' AND s.worker_id IS NOT NULL"
-        + " AND t.timeout_seconds > 0"
-        + " AND now() - s.started_at > make_interval(secs => t.timeout_seconds::double precision)"
+        + " AND ("
+        + "   (t.progress_timeout_seconds IS NULL OR t.progress_timeout_seconds = 0)"
+        + "     AND t.timeout_seconds > 0"
+        + "     AND now() - s.started_at > make_interval(secs => t.timeout_seconds::double precision)"
+        + "   OR"
+        + "   (t.progress_timeout_seconds > 0)"
+        + "     AND now() - COALESCE(s.last_progress_at, s.started_at)"
+        + "           > make_interval(secs => t.progress_timeout_seconds::double precision)"
+        + " )"
         + " AND EXISTS (SELECT 1 FROM worker w"
         + "             WHERE w.id = s.worker_id AND w.status = 'ALIVE'"
         + "             AND w.last_seen >= now() - make_interval(secs => ?))";
-    RowMapper<ShardRepository.StuckShard> map = (rs, i) -> new ShardRepository.StuckShard(rs.getLong("id"), rs.getLong("execution_id"),
-        rs.getInt("shard_index"), rs.getString("worker_id"), rs.getInt("attempt"),
-        rs.getTimestamp("started_at").toInstant(), rs.getLong("timeout_seconds"));
+    RowMapper<ShardRepository.StuckShard> map = (rs, i) -> new ShardRepository.StuckShard(
+        rs.getLong("id"), rs.getLong("execution_id"), rs.getInt("shard_index"),
+        rs.getString("worker_id"), rs.getInt("attempt"),
+        rs.getTimestamp("started_at").toInstant(), rs.getLong("timeout_seconds"),
+        rs.getTimestamp("last_progress_at") != null ? rs.getTimestamp("last_progress_at").toInstant() : null);
     if (taskId != null) {
       return jdbc.query(base + " WHERE e.task_id = ? AND" + cond, map, taskId, (double) staleAfterSeconds);
     }
@@ -281,8 +301,15 @@ public class JdbcShardRepository implements ShardRepository {
         "SELECT count(*) FROM execution_shard s JOIN execution e ON e.id = s.execution_id"
             + " JOIN app_task t ON t.id = e.task_id"
             + " WHERE s.status='RUNNING' AND s.worker_id IS NOT NULL"
-            + " AND t.timeout_seconds > 0"
-            + " AND now() - s.started_at > make_interval(secs => t.timeout_seconds::double precision)"
+            + " AND ("
+            + "   (t.progress_timeout_seconds IS NULL OR t.progress_timeout_seconds = 0)"
+            + "     AND t.timeout_seconds > 0"
+            + "     AND now() - s.started_at > make_interval(secs => t.timeout_seconds::double precision)"
+            + "   OR"
+            + "   (t.progress_timeout_seconds > 0)"
+            + "     AND now() - COALESCE(s.last_progress_at, s.started_at)"
+            + "           > make_interval(secs => t.progress_timeout_seconds::double precision)"
+            + " )"
             + " AND EXISTS (SELECT 1 FROM worker w"
             + "             WHERE w.id = s.worker_id AND w.status = 'ALIVE'"
             + "             AND w.last_seen >= now() - make_interval(secs => ?))",

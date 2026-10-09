@@ -1091,4 +1091,72 @@ class JdbcShardRepositoryTest extends AbstractPostgresTest {
     assertEquals(2, shardRepo.countStuckAliveRunning(30));
     assertEquals(2, shardRepo.findStuckAliveRunning(null, 30).size());
   }
+
+  // ---- E3 progress-heartbeat:recordProgress + 渐进谓词 ----
+
+  private void seedProgressTimeout(long taskId, int seconds) {
+    jdbc.update("UPDATE app_task SET progress_timeout_seconds=? WHERE id=?", seconds, taskId);
+  }
+
+  /** opt-in + touch 新鲜 → 不卡(分支 B 接管:即便 timeout_seconds 已超,progress 预算未超)。 */
+  @Test void findStuckAliveRunning_optIn_progressFresh_notStuck_evenIfTimeoutShort() {
+    long taskId = newTask(1, 8);
+    jdbc.update("UPDATE app_task SET progress_timeout_seconds=60, timeout_seconds=5 WHERE id=?", taskId);
+    long parentId = seedParentAndShards(taskId, 1);
+    long sid = shard(parentId, 0).id();
+    jdbc.update("UPDATE execution_shard SET status='RUNNING', worker_id='w-opt-a',"
+        + " started_at=now() - interval '10 minutes', last_progress_at=now() WHERE id=?", sid);
+    seedWorker("w-opt-a", 5);
+
+    assertTrue(shardRepo.findStuckAliveRunning(taskId, 30).stream().noneMatch(e -> e.id() == sid),
+        "opt-in:距最近推进未超 progress 预算 → 不卡(timeout_seconds 分支 A 已被 B 接管)");
+  }
+
+  /** opt-in + 超预算且从未 touch(COALESCE 兜底 started_at)→ 列,lastProgressAt=null。 */
+  @Test void findStuckAliveRunning_optIn_neverTouched_overBudget_isStuck() {
+    long taskId = newTask(1, 8);
+    seedProgressTimeout(taskId, 60);
+    long parentId = seedParentAndShards(taskId, 1);
+    long sid = shard(parentId, 0).id();
+    jdbc.update("UPDATE execution_shard SET status='RUNNING', worker_id='w-opt-b',"
+        + " started_at=now() - interval '10 minutes' WHERE id=?", sid);
+    seedWorker("w-opt-b", 5);
+
+    var stuck = shardRepo.findStuckAliveRunning(taskId, 30);
+    assertEquals(1, stuck.size());
+    assertEquals(sid, stuck.get(0).id());
+    assertNull(stuck.get(0).lastProgressAt(), "从未 touch → lastProgressAt null");
+  }
+
+  /** opt-in + touch 陈旧(超 progress 预算)→ 列,并带出 lastProgressAt。 */
+  @Test void findStuckAliveRunning_optIn_staleProgress_overBudget_isStuck_withLastProgressAt() {
+    long taskId = newTask(1, 8);
+    seedProgressTimeout(taskId, 60);
+    long parentId = seedParentAndShards(taskId, 1);
+    long sid = shard(parentId, 0).id();
+    jdbc.update("UPDATE execution_shard SET status='RUNNING', worker_id='w-opt-c',"
+        + " started_at=now() - interval '10 minutes', last_progress_at=now() - interval '5 minutes'"
+        + " WHERE id=?", sid);
+    seedWorker("w-opt-c", 5);
+
+    var stuck = shardRepo.findStuckAliveRunning(taskId, 30);
+    assertEquals(1, stuck.size());
+    assertNotNull(stuck.get(0).lastProgressAt(), "carries lastProgressAt");
+  }
+
+  /** recordProgress 归属/attempt/终态三重栅栏(镜像 renewLease);DB now() 盖章。 */
+  @Test void recordProgress_stampsNow_whileOwned_ignoresWhenLost() {
+    long taskId = newTask(1, 8);
+    long parentId = seedParentAndShards(taskId, 1);
+    long sid = shard(parentId, 0).id();
+    claimShard(sid, taskId, "w1", 8); // attempt -> 1
+    assertTrue(shardRepo.recordProgress(sid, "w1", 1), "持有者 recordProgress 应成功");
+    assertNotNull(jdbc.queryForObject(
+        "SELECT last_progress_at FROM execution_shard WHERE id=?", java.sql.Timestamp.class, sid),
+        "DB now() 盖章落 last_progress_at");
+    assertFalse(shardRepo.recordProgress(sid, "w2", 1), "非持有者 0 行");
+    assertFalse(shardRepo.recordProgress(sid, "w1", 2), "陈旧 attempt 栅栏");
+    shardRepo.markStatusOwned(sid, ExecutionStatus.SUCCESS, "w1", 1, "ok");
+    assertFalse(shardRepo.recordProgress(sid, "w1", 1), "终态后 recordProgress 0 行");
+  }
 }

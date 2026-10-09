@@ -56,6 +56,10 @@ public interface ShardRepository {
    *  无 outcome 行。 */
   boolean renewLease(long shardId, String ownerWorkerId, int expectedAttempt, Instant leaseUntil);
 
+  /** E3 进度落库:DB now() 盖章,所有权 + attempt 栅栏(镜像 renewLease);0 行 = 已被接管/重认领,静默。
+   *  无 outcome 行。 */
+  boolean recordProgress(long shardId, String ownerWorkerId, int expectedAttempt);
+
   /** 对账器扫描到的孤儿 RUNNING shard(由 Reconciler 逐任务回收),只投影对账所需的 id 与 attempt。 */
   record ExpiredShard(long id, int attempt) {}
 
@@ -72,7 +76,7 @@ public interface ShardRepository {
   /** E2-B stuck-alive 视图投影:属主 worker 仍 ALIVE 但已超过其所属 task 运行预算的 RUNNING 分片。
    *  纯观测/只读,不改状态。timeoutSeconds 取自该分片所属 task。 */
   record StuckShard(long id, long executionId, int shardIndex, String workerId, int attempt,
-                   Instant startedAt, long timeoutSeconds) {}
+                   Instant startedAt, long timeoutSeconds, Instant lastProgressAt) {}
 
   /** E2-B 卡死视图:某任务下(或全部,taskId=null)属主 ALIVE 且已超运行预算的 RUNNING 分片。
    *  活性门 = E1 统一判据的取反(要求属性 ALIVE);超时经 execution→task JOIN 取 task.timeout_seconds。 */
