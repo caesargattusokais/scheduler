@@ -11,5 +11,6 @@ public class DemoHandler implements ExecutionHandler {
       throw new CancellationException("demo cancelled");
     }
     // no-op demo handler
+    ctx.touch(); // E3 契约示范:推进边界上报(本 handler 即时返回,touch 对短跑无实际效果)。
   }
 }

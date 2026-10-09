@@ -10,6 +10,7 @@ import dev.scheduler.worker.handler.ExecutionHandler;
 import dev.scheduler.worker.handler.CancellationToken;
 import dev.scheduler.worker.handler.HandlerContext;
 import dev.scheduler.worker.handler.HandlerRegistry;
+import dev.scheduler.worker.handler.ProgressSignal;
 import dev.scheduler.persistence.retry.FailureResolver;
 import java.time.Clock;
 import java.time.Instant;
@@ -79,6 +80,8 @@ public class ExecutorWorker {
       }
       // 长运行 handler(如分片批处理同步)会同步阻塞本循环超过一次租约时长;认领后立即起周期续租,运行期
       // 保持 lease 有效,避免被 server 端 Reconciler 误回收,handler 写回终态后的 finally 中停租。
+      // E3 进度心跳:handler 在推进边界 touch() 置位;续租线程每 tick 合并 flush 一次 recordProgress。
+      ProgressSignal progress = new ProgressSignal();
       ScheduledFuture<?> renew = renewer.scheduleWithFixedDelay(() -> {
         try {
           // B1 每-attempt 栅栏:领取后 shard 对象为认领前(DUE)快照,claim 已 attempt+1 → 传当前在途 attempt。
@@ -87,6 +90,9 @@ public class ExecutorWorker {
             org.slf4j.LoggerFactory.getLogger(ExecutorWorker.class)
                 .warn("lease lost for shard {} while running; self-fencing (stale write-back will be suppressed)",
                     shard.id());
+          } else if (progress.consume()) {
+            // renewLease 成功(仍持有 + attempt 未变)后合并 flush;recordProgress 0 行(已失权)静默。
+            shards.recordProgress(shard.id(), workerId, shard.attempt() + 1);
           }
         } catch (Throwable ex) {
           // 瞬时续租失败不中断调度任务;ownership 已失/终态由 renewLease 0 行静默,写回侧守卫兜底。
@@ -113,7 +119,7 @@ public class ExecutorWorker {
         }
         CancellationToken token = new CancellationToken(shards.isCancelRequested(shard.id()));
         HandlerContext ctx = new HandlerContext(shard.executionId(), shard.id(), shard.shardIndex(),
-            parent.shardCount(), shard.shardData(), parent.args(), workerId, token);
+            parent.shardCount(), shard.shardData(), parent.args(), workerId, token, progress);
         try {
           h.handle(ctx);
           // 正常返回后:若期间被请求取消,落 CANCELED;否则 SUCCESS。

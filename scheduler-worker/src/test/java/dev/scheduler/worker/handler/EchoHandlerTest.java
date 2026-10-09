@@ -17,7 +17,7 @@ class EchoHandlerTest {
   @Test void ref_isEcho() { assertEquals("echo", new EchoHandler(CLOCK).ref()); }
 
   @Test void resultPayload_recordsWorkerShardAndEcho() {
-    var ctx = new HandlerContext(1L, 2L, 3, 5, "data", "hello", "worker-a", new CancellationToken(false));
+    var ctx = new HandlerContext(1L, 2L, 3, 5, "data", "hello", "worker-a", new CancellationToken(false), null);
     String p = new EchoHandler(CLOCK).resultPayload(ctx);
     assertTrue(p.contains("\"workerId\":\"worker-a\""));
     assertTrue(p.contains("\"shardIndex\":3"));
@@ -26,7 +26,7 @@ class EchoHandlerTest {
   }
 
   @Test void handle_onCancelRequested_throwsCancellation() {
-    var ctx = new HandlerContext(1L, 2L, 0, 1, null, null, "worker-a", new CancellationToken(true));
+    var ctx = new HandlerContext(1L, 2L, 0, 1, null, null, "worker-a", new CancellationToken(true), null);
     assertThrows(CancellationException.class, () -> new EchoHandler(CLOCK).handle(ctx));
   }
 }

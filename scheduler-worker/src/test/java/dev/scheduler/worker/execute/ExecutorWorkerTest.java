@@ -690,4 +690,41 @@ class ExecutorWorkerTest extends AbstractExecutorWorkerTest {
     assertTrue(w.workOne(), "同一 worker 处理新健康分片:自栅栏不阻断后续 work unit");
     assertEquals(1, rec.calls.size(), "健康分片 handler 照常运行");
   }
+
+  /** E3 合并 flush:handler touch → 续租 tick(1s)合并 flush 落 last_progress_at(无 DB 写放大)。 */
+  @Test void handlerTouch_flushesProgressOnRenewTick() throws Exception {
+    long taskId = createTask("rec", 1, 1);
+    long parentId = seedParentAndShards(taskId, 1);
+    long shardId = shard(parentId, 0).id();
+    var entered = new CountDownLatch(1);
+    var release = new CountDownLatch(1);
+    var touchHandler = new ExecutionHandler() {
+      @Override public String ref() { return "rec"; }
+      @Override public void handle(HandlerContext ctx) {
+        ctx.touch(); // 上报推进
+        entered.countDown();
+        try { release.await(10, TimeUnit.SECONDS); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+      }
+    };
+    var registry = new MapHandlerRegistry(List.of(() -> touchHandler));
+    ExecutorWorker w = new ExecutorWorker(tasks, shards, registry, "worker-a",
+        new FailureResolver(shards, new RetryPolicy(), CLOCK), CLOCK, 120, 1); // renewSeconds=1
+
+    Thread runner = new Thread(w::workOne, "test-touch");
+    runner.start();
+    assertTrue(entered.await(5, TimeUnit.SECONDS), "handler 应已进入(已 touch)");
+
+    java.sql.Timestamp progressAt = null;
+    long deadline = System.currentTimeMillis() + 5000;
+    while (System.currentTimeMillis() < deadline && progressAt == null) {
+      progressAt = jdbc.queryForObject(
+          "SELECT last_progress_at FROM execution_shard WHERE id=?", java.sql.Timestamp.class, shardId);
+      if (progressAt == null) Thread.sleep(100);
+    }
+    assertNotNull(progressAt, "handler touch → 续租 tick 合并 flush 落 last_progress_at");
+    release.countDown();
+    runner.join(10000);
+    assertEquals(ExecutionStatus.SUCCESS, shards.findShard(shardId).orElseThrow().status(),
+        "handler 正常返回后落 SUCCESS");
+  }
 }

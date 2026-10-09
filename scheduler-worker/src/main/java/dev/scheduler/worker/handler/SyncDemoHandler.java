@@ -41,6 +41,8 @@ public class SyncDemoHandler implements ExecutionHandler {
       return;
     }
 
+    ctx.touch(); // E3 上报:本分片即将执行一批同步(慢而健康时不误标 stuck);worker 续租线程合并 flush。
+
     Integer synced = jdbc.queryForObject("""
         WITH ins AS (
           INSERT INTO demo_sync_target (%s)

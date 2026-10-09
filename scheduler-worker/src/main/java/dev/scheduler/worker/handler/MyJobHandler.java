@@ -16,6 +16,7 @@ public class MyJobHandler implements ExecutionHandler {
     if (ctx.token() != null && ctx.token().isCancelRequested()) {
       throw new CancellationException("myjob cancelled");
     }
+    ctx.touch(); // E3 契约示范:推进边界上报(本 handler 即时返回,touch 对短跑无实际效果)。
   }
 
   @Override public String resultPayload(HandlerContext ctx) {

@@ -24,6 +24,7 @@ class WorkerRegistrarTest {
     @Override public List<WorkerRegistration> findAllAlive(Instant since) {
       return rows.stream().filter(w -> w.lastSeen().isAfter(since)).toList();
     }
+    @Override public boolean isAlive(String workerId, int staleAfterSeconds) { return false; }
     @Override public void purgeStale(Instant olderThan) { purged.add(olderThan); }
     @Override public void markOffline(String workerId, Instant at) {
       offlined.add(workerId);
