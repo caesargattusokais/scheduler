@@ -504,6 +504,32 @@ class ApiIntegrationTest {
         .andExpect(jsonPath("$.successPolicyValue").value(1));
   }
 
+  /** E3:POST/PUT /api/v1/tasks 透传 progress_timeout_seconds;负值 → 400。 */
+  @Test void task_createAndValidate_progressTimeoutSeconds() throws Exception {
+    String body = "{\"name\":\"e3-progress-task\",\"handlerRef\":\"demo\",\"cron\":\"0 */5 * * * *\","
+        + "\"shardCount\":1,\"timeoutSeconds\":300,\"progressTimeoutSeconds\":900}";
+    var created = mvc.perform(post("/api/v1/tasks").cookie(session(ALICE_TOKEN))
+            .contentType(MediaType.APPLICATION_JSON).content(body))
+        .andExpect(status().isCreated())
+        .andExpect(jsonPath("$.progressTimeoutSeconds").value(900));
+    long id = objectMapper.readTree(created.andReturn().getResponse().getContentAsString()).get("id").asLong();
+
+    // 负值 → 400(checkDefinition)
+    mvc.perform(post("/api/v1/tasks").cookie(session(ALICE_TOKEN))
+            .contentType(MediaType.APPLICATION_JSON)
+            .content("{\"name\":\"bad-progress\",\"handlerRef\":\"demo\",\"cron\":\"0 */5 * * * *\"," +
+                "\"shardCount\":1,\"progressTimeoutSeconds\":-1}"))
+        .andExpect(status().isBadRequest());
+
+    // PUT 覆写
+    mvc.perform(put("/api/v1/tasks/" + id).cookie(session(ALICE_TOKEN))
+            .contentType(MediaType.APPLICATION_JSON)
+            .content("{\"name\":\"e3-progress-task\",\"handlerRef\":\"demo\",\"cron\":\"0 */5 * * * *\"," +
+                "\"shardCount\":1,\"progressTimeoutSeconds\":1800}"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.progressTimeoutSeconds").value(1800));
+  }
+
   /** M3 回归:shardCount=0 不得创建任务(否则扇出 0 个 shard → 恒 DUE、无法汇聚终态的父)。 */
   @Test
   void createTask_shardCountZero_returnsBadRequest() throws Exception {

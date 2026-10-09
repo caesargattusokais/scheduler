@@ -131,7 +131,7 @@ class DagEngineTest {
   private long newPolicyTask(int shardCount, String policyType, Integer policyValue) {
     return tasks.create(new Task(null, "t", "cron", "demo", null,
         shardCount, 300, 0, 1000, null, 5, true, false, null, null, null,
-        "UTC", null, List.of(), policyType, policyValue)).id();
+        "UTC", null, List.of(), policyType, policyValue, null)).id();
   }
 
   private DagEngine engine(AdvisoryLockLeaderElection leader) {

@@ -84,7 +84,7 @@ class ReconcilerTest {
   private long createPolicyTask(int shardCount, String successPolicyType, Integer successPolicyValue) {
     return tasks.create(new Task(null, "t3c", "cron", "demo", "0 */5 * * * *",
         shardCount, 300, 0, 1000, null, 5, true, false, null, null, null,
-        "UTC", null, List.of(), successPolicyType, successPolicyValue)).id();
+        "UTC", null, List.of(), successPolicyType, successPolicyValue, null)).id();
   }
 
   private Shard shard(long parentId, int idx) {

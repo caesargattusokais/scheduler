@@ -54,14 +54,16 @@ public class TaskController {
       String retryableFailurePattern, Integer maxActiveConcurrent,
       String retryMode, Long retryCapMs, Long retryBudgetMs,
       String timezone, Integer intervalSeconds, List<String> eventRoutes,
-      String successPolicyType, Integer successPolicyValue) {}
+      String successPolicyType, Integer successPolicyValue,
+      Integer progressTimeoutSeconds) {}
 
   public record UpdateTaskRequest(String name, String kind, String handlerRef, String cron,
       Integer shardCount, Integer timeoutSeconds, Integer maxRetries, Long backoffMs,
       String retryableFailurePattern, Integer maxActiveConcurrent, Boolean paused,
       String retryMode, Long retryCapMs, Long retryBudgetMs,
       String timezone, Integer intervalSeconds, List<String> eventRoutes,
-      String successPolicyType, Integer successPolicyValue) {}
+      String successPolicyType, Integer successPolicyValue,
+      Integer progressTimeoutSeconds) {}
 
   @PostMapping
   public ResponseEntity<Task> create(
@@ -77,7 +79,7 @@ public class TaskController {
         req.timeoutSeconds(), req.maxRetries(), req.backoffMs(), req.maxActiveConcurrent(),
         req.retryMode(), req.retryCapMs(), req.retryBudgetMs(),
         req.timezone(), req.intervalSeconds(), req.eventRoutes(),
-        req.successPolicyType(), req.successPolicyValue());
+        req.successPolicyType(), req.successPolicyValue(), req.progressTimeoutSeconds());
     Task created = tasks.create(new Task(
         null, req.name(), req.kind() == null ? (req.eventRoutes() == null || req.eventRoutes().isEmpty() ? "cron" : "event") : req.kind(),
         req.handlerRef(), req.cron(),
@@ -89,7 +91,7 @@ public class TaskController {
         true, false, req.retryMode(), req.retryCapMs(), req.retryBudgetMs(),
         req.timezone() == null ? "UTC" : req.timezone(), req.intervalSeconds(),
         req.eventRoutes() == null ? List.of() : req.eventRoutes(),
-        req.successPolicyType(), req.successPolicyValue()));
+        req.successPolicyType(), req.successPolicyValue(), req.progressTimeoutSeconds()));
     auditor.record(current.get(), "task.create", TargetType.TASK, created.id(), taskMeta(created));
     return ResponseEntity.status(HttpStatus.CREATED).body(created);
   }
@@ -108,7 +110,7 @@ public class TaskController {
         req.timeoutSeconds(), req.maxRetries(), req.backoffMs(), req.maxActiveConcurrent(),
         req.retryMode(), req.retryCapMs(), req.retryBudgetMs(),
         req.timezone(), req.intervalSeconds(), req.eventRoutes(),
-        req.successPolicyType(), req.successPolicyValue());
+        req.successPolicyType(), req.successPolicyValue(), req.progressTimeoutSeconds());
     Task updated = new Task(id, req.name(), req.kind() == null ? existing.kind() : req.kind(),
         req.handlerRef(), req.cron(),
         req.shardCount() == null ? existing.shardCount() : req.shardCount(),
@@ -126,7 +128,8 @@ public class TaskController {
         req.intervalSeconds() == null ? existing.intervalSeconds() : req.intervalSeconds(),
         req.eventRoutes() == null ? existing.eventRoutes() : req.eventRoutes(),
         req.successPolicyType() == null ? existing.successPolicyType() : req.successPolicyType(),
-        req.successPolicyValue() == null ? existing.successPolicyValue() : req.successPolicyValue());
+        req.successPolicyValue() == null ? existing.successPolicyValue() : req.successPolicyValue(),
+        req.progressTimeoutSeconds() == null ? existing.progressTimeoutSeconds() : req.progressTimeoutSeconds());
     if (!tasks.update(id, updated)) {
       throw notFound("task " + id);
     }
@@ -258,6 +261,7 @@ public class TaskController {
     m.put("retryBudgetMs", t.retryBudgetMs());
     m.put("successPolicyType", t.successPolicyType());
     m.put("successPolicyValue", t.successPolicyValue());
+    m.put("progressTimeoutSeconds", t.progressTimeoutSeconds());
     m.put("enabled", t.enabled());
     m.put("paused", t.paused());
     return m;
@@ -284,6 +288,7 @@ public class TaskController {
     b.put("retryBudgetMs", t.retryBudgetMs());
     b.put("successPolicyType", t.successPolicyType());
     b.put("successPolicyValue", t.successPolicyValue());
+    b.put("progressTimeoutSeconds", t.progressTimeoutSeconds());
     return b;
   }
 
@@ -310,6 +315,7 @@ public class TaskController {
     putDiff(d, "eventRoutes", before.eventRoutes(), after.eventRoutes());
     putDiff(d, "successPolicyType", before.successPolicyType(), after.successPolicyType());
     putDiff(d, "successPolicyValue", before.successPolicyValue(), after.successPolicyValue());
+    putDiff(d, "progressTimeoutSeconds", before.progressTimeoutSeconds(), after.progressTimeoutSeconds());
     return d;
   }
 
@@ -334,7 +340,8 @@ public class TaskController {
       Integer shardCount, Integer timeoutSeconds, Integer maxRetries, Long backoffMs,
       Integer maxActiveConcurrent, String retryMode, Long retryCapMs, Long retryBudgetMs,
       String timezone, Integer intervalSeconds, List<String> eventRoutes,
-      String successPolicyType, Integer successPolicyValue) {
+      String successPolicyType, Integer successPolicyValue,
+      Integer progressTimeoutSeconds) {
     boolean hasCron = cron != null && !cron.isBlank();
     boolean hasInterval = intervalSeconds != null;
     boolean hasEvents = eventRoutes != null && !eventRoutes.isEmpty();
@@ -366,6 +373,9 @@ public class TaskController {
     if (retryCapMs != null && retryCapMs < 0) throw new IllegalArgumentException("retryCapMs must be >= 0");
     if (retryBudgetMs != null && retryBudgetMs < 0) throw new IllegalArgumentException("retryBudgetMs must be >= 0");
     if (timeoutSeconds != null && timeoutSeconds < 0) throw new IllegalArgumentException("timeoutSeconds must be >= 0");
+    if (progressTimeoutSeconds != null && progressTimeoutSeconds < 0) {
+      throw new IllegalArgumentException("progressTimeoutSeconds must be >= 0");
+    }
     if (backoffMs != null && backoffMs < 0) throw new IllegalArgumentException("backoffMs must be >= 0");
     if (maxRetries != null && maxRetries < 0) throw new IllegalArgumentException("maxRetries must be >= 0");
     if (shardCount != null && shardCount < 1) throw new IllegalArgumentException("shardCount must be >= 1");
