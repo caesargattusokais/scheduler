@@ -14,6 +14,7 @@ const EMPTY: CreateTaskRequest = {
   timeoutSeconds: 300, maxRetries: 0, backoffMs: 1000, maxActiveConcurrent: 8,
   timezone: 'UTC',
   successPolicyType: undefined, successPolicyValue: undefined,
+  progressTimeoutSeconds: undefined,
 };
 
 type TrigType = 'cron' | 'interval' | 'event';
@@ -75,7 +76,8 @@ export default function TasksPage() {
       timeoutSeconds: t.timeoutSeconds, maxRetries: t.maxRetries, backoffMs: t.backoffMs,
       retryableFailurePattern: t.retryableFailurePattern ?? undefined, maxActiveConcurrent: t.maxActiveConcurrent,
       timezone: t.timezone, intervalSeconds: t.intervalSeconds, eventRoutes: t.eventRoutes ?? [],
-      successPolicyType: t.successPolicyType ?? undefined, successPolicyValue: t.successPolicyValue ?? undefined });
+      successPolicyType: t.successPolicyType ?? undefined, successPolicyValue: t.successPolicyValue ?? undefined,
+      progressTimeoutSeconds: t.progressTimeoutSeconds ?? undefined });
   }
   async function act(fn: () => Promise<unknown>) {
     try { await fn(); setErr(null); refresh(); } catch (x) { setErr(String(x)); }
@@ -153,6 +155,7 @@ export default function TasksPage() {
           {field('maxRetries', '重试次数', 'number')}
           {field('backoffMs', '退避 (ms)', 'number')}
           {field('maxActiveConcurrent', '最大并发', 'number')}
+          {field('progressTimeoutSeconds', '进度预算 (s)', 'number')}
         </div>
         {/* 3c 部分成功策略:类型选择后出现阈值输入;空类型(null)=全部成功才算成功(旧全成/全败语义)。
           RATIO_PERCENT 值∈[1,99]、MIN_SUCCESS≥1、MAX_FAILURES≥0,与后端 checkDefinition 白名单一致。 */}

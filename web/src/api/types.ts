@@ -19,6 +19,8 @@ export interface Task {
   /** 3c 部分成功策略:null/NONE=全成或全败;RATIO_PERCENT=成功占比%达标;MIN_SUCCESS=成功分片数达标;MAX_FAILURES=容忍失败分片数。 */
   successPolicyType: string | null;
   successPolicyValue: number | null;
+  /** E3:进度陈旧预算秒(null/0 = 不启用 progress 监控)。 */
+  progressTimeoutSeconds: number | null;
 }
 
 export interface Execution {
@@ -77,6 +79,9 @@ export interface StuckRow {
   startedAt: string | null;
   ageSeconds: number;
   timeoutSeconds: number;
+  /** E3:最近推进时间(null = 从未 touch)与进度年龄秒。 */
+  lastProgressAt: string | null;
+  progressAgeSeconds: number;
 }
 
 export interface ExecutionDetail {
@@ -106,6 +111,8 @@ export interface CreateTaskRequest {
   /** 3c 部分成功策略(缺省 NONE/null=全成或全败)。type 白名单四选一;RATIO_PERCENT 值∈[1,99]、MIN_SUCCESS≥1、MAX_FAILURES≥0。 */
   successPolicyType?: string;
   successPolicyValue?: number;
+  /** E3:进度陈旧预算秒(非负;null/0 = 不启用)。 */
+  progressTimeoutSeconds?: number | null;
 }
 
 export interface UpdateTaskRequest extends CreateTaskRequest {
