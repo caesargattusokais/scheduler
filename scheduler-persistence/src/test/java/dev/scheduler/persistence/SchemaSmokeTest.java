@@ -52,6 +52,18 @@ class SchemaSmokeTest {
     assertEquals(7, n, "V4 must create all 7 dag tables");
   }
 
+  @Test void progressHeartbeatColumnsExist() {
+    var jdbc = jdbc();
+    assertEquals("timestamp with time zone",
+        jdbc.queryForObject("SELECT data_type FROM information_schema.columns"
+            + " WHERE table_schema='public' AND table_name='execution_shard' AND column_name='last_progress_at'",
+            String.class));
+    assertEquals("integer",
+        jdbc.queryForObject("SELECT data_type FROM information_schema.columns"
+            + " WHERE table_schema='public' AND table_name='app_task' AND column_name='progress_timeout_seconds'",
+            String.class));
+  }
+
   private void assertColumnType(String column) {
     String dataType = jdbc().queryForObject(
         "SELECT data_type FROM information_schema.columns"
