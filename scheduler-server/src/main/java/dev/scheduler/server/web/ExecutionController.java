@@ -53,7 +53,8 @@ public class ExecutionController {
   /** E2-B 卡死视图行(persistence StuckShard + task 名/handlerRef + 派生超龄秒)。 */
   public record StuckView(long shardId, long executionId, int shardIndex, String taskName,
                           String handlerRef, String workerId, int attempt, Instant startedAt,
-                          long ageSeconds, long timeoutSeconds) {}
+                          long ageSeconds, long timeoutSeconds, Instant lastProgressAt,
+                          long progressAgeSeconds) {}
 
   public ExecutionController(ExecutionRepository executions, ShardRepository shards,
                              WorkerRepository workers, JdbcTemplate jdbc, AuditRecorder auditor,
@@ -176,9 +177,12 @@ public class ExecutionController {
     List<StuckView> all = ss.stream().map(x -> {
       TaskRef r = refs.get(x.id());
       long age = Duration.between(x.startedAt(), Instant.now()).getSeconds();
+      Instant anchor = x.lastProgressAt() != null ? x.lastProgressAt() : x.startedAt();
+      long progressAge = anchor == null ? age : Duration.between(anchor, Instant.now()).getSeconds();
       return new StuckView(x.id(), x.executionId(), x.shardIndex(),
           r == null ? null : r.name(), r == null ? null : r.handlerRef(),
-          x.workerId(), x.attempt(), x.startedAt(), age, x.timeoutSeconds());
+          x.workerId(), x.attempt(), x.startedAt(), age, x.timeoutSeconds(),
+          x.lastProgressAt(), progressAge);
     }).toList();
     List<StuckView> items = all.stream().skip(p.offset()).limit(p.limit()).toList();
     return new Page<>(items, all.size(), p.offset(), p.limit());

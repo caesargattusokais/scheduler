@@ -1830,6 +1830,21 @@ class ApiIntegrationTest {
         .andExpect(jsonPath("$.items[0].shardId").value((int) shardLive));
   }
 
+  /** E3:/stuck 响应带 lastProgressAt + progressAgeSeconds(未 touch → lastProgressAt null,progressAge 回退 started_at)。 */
+  @Test void stuckView_optInCarriesProgressColumns() throws Exception {
+    long id = postTask("stuck-progress-task");
+    jdbc.update("UPDATE app_task SET progress_timeout_seconds=60 WHERE id=?", id);
+    long shardId = seedRunningShard(id, "w-prog"); // started_at 10 min ago, last_progress_at NULL
+    jdbc.update("INSERT INTO worker (id, refs, last_seen, status) VALUES ('w-prog','',now(),'ALIVE')");
+
+    mvc.perform(get("/api/v1/executions/stuck").param("taskId", String.valueOf(id)))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.total").value(1))
+        .andExpect(jsonPath("$.items[0].shardId").value((int) shardId))
+        .andExpect(jsonPath("$.items[0].lastProgressAt").value(org.hamcrest.Matchers.nullValue()))
+        .andExpect(jsonPath("$.items[0].progressAgeSeconds").isNumber());
+  }
+
   @Test void abandon_aliveOwner_returnsConflict() throws Exception {
     long id = postTask("abandon-alive-task");
     long shardId = seedRunningShard(id, "w-live");
