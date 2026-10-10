@@ -17,7 +17,7 @@ class MyJobHandlerTest {
   @Test void ref_isMyJob() { assertEquals("myjob", new MyJobHandler(CLOCK).ref()); }
 
   @Test void resultPayload_recordsJobWorkerShardAndEcho() {
-    var ctx = new HandlerContext(1L, 2L, 3, 5, "data", "hello", "worker-a", new CancellationToken(false), null);
+    var ctx = new HandlerContext(1L, 2L, 3, 5, "data", "hello", "worker-a", new CancellationToken(false), null, 1);
     String p = new MyJobHandler(CLOCK).resultPayload(ctx);
     assertTrue(p.contains("\"job\":\"myjob\""));
     assertTrue(p.contains("\"workerId\":\"worker-a\""));
@@ -27,7 +27,7 @@ class MyJobHandlerTest {
   }
 
   @Test void handle_onCancelRequested_throwsCancellation() {
-    var ctx = new HandlerContext(1L, 2L, 0, 1, null, null, "worker-a", new CancellationToken(true), null);
+    var ctx = new HandlerContext(1L, 2L, 0, 1, null, null, "worker-a", new CancellationToken(true), null, 1);
     assertThrows(CancellationException.class, () -> new MyJobHandler(CLOCK).handle(ctx));
   }
 }

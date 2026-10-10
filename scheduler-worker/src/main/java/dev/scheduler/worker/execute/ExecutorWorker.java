@@ -119,7 +119,8 @@ public class ExecutorWorker {
         }
         CancellationToken token = new CancellationToken(shards.isCancelRequested(shard.id()));
         HandlerContext ctx = new HandlerContext(shard.executionId(), shard.id(), shard.shardIndex(),
-            parent.shardCount(), shard.shardData(), parent.args(), workerId, token, progress);
+            parent.shardCount(), shard.shardData(), parent.args(), workerId, token, progress,
+            shard.attempt() + 1);
         try {
           h.handle(ctx);
           // 正常返回后:若期间被请求取消,落 CANCELED;否则 SUCCESS。
