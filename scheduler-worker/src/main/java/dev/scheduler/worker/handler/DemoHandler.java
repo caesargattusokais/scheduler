@@ -12,5 +12,12 @@ public class DemoHandler implements ExecutionHandler {
     }
     // no-op demo handler
     ctx.touch(); // E3 契约示范:推进边界上报(本 handler 即时返回,touch 对短跑无实际效果)。
+    // E3#2 契约示范:对下游做幂等时,以 ctx.idempotencyKey() 为锚点、ctx.redelivery() 判重投递;
+    // 重投递时只需保证下游按该锚点幂等(如 INSERT ... ON CONFLICT DO NOTHING),平台不替 handler 消重。
+  }
+
+  @Override public String resultPayload(HandlerContext ctx) {
+    return "{\"idempotencyKey\":\"" + ctx.idempotencyKey() + "\",\"attempt\":" + ctx.attempt()
+        + ",\"redelivery\":" + ctx.redelivery() + "}";
   }
 }
