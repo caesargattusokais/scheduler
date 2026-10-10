@@ -2,7 +2,7 @@
 
 > **规划路径**:E 系列(调度纵深)第三件第二题,接在 E3#1(progress-heartbeat)之后。
 > **前置**:E1 统一幂等(`IdempotencyKeys` + 唯一约束 + attempt 栅栏)、E2B stuck-alive、E3#1(已给 `HandlerContext` 加 `progress`/`touch()` 九组件)。
-> **状态**:设计中
+> **状态**:已实现(2026-10-10)
 > **更新日期**:2026-10-10
 
 ---
