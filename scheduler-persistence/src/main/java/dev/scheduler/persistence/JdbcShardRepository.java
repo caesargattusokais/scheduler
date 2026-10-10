@@ -269,7 +269,7 @@ public class JdbcShardRepository implements ShardRepository {
   @Override public List<ShardRepository.StuckShard> findStuckAliveRunning(Long taskId, int staleAfterSeconds) {
     // E3 渐进谓词(spec §3):未 opt-in → 复用 E2B timeout/started_at;opt-in(progress_timeout>0)→ 改按 COALESCE(last_progress_at, started_at)。
     String base = "SELECT s.id, s.execution_id, s.shard_index, s.worker_id, s.attempt, s.started_at,"
-        + " t.timeout_seconds, s.last_progress_at"
+        + " t.timeout_seconds, s.last_progress_at, t.progress_timeout_seconds"
         + " FROM execution_shard s JOIN execution e ON e.id = s.execution_id"
         + " JOIN app_task t ON t.id = e.task_id";
     String cond = " s.status='RUNNING' AND s.worker_id IS NOT NULL"
@@ -289,7 +289,8 @@ public class JdbcShardRepository implements ShardRepository {
         rs.getLong("id"), rs.getLong("execution_id"), rs.getInt("shard_index"),
         rs.getString("worker_id"), rs.getInt("attempt"),
         rs.getTimestamp("started_at").toInstant(), rs.getLong("timeout_seconds"),
-        rs.getTimestamp("last_progress_at") != null ? rs.getTimestamp("last_progress_at").toInstant() : null);
+        rs.getTimestamp("last_progress_at") != null ? rs.getTimestamp("last_progress_at").toInstant() : null,
+        rs.getObject("progress_timeout_seconds", Integer.class));
     if (taskId != null) {
       return jdbc.query(base + " WHERE e.task_id = ? AND" + cond, map, taskId, (double) staleAfterSeconds);
     }

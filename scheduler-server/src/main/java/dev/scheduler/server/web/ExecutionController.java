@@ -54,7 +54,7 @@ public class ExecutionController {
   public record StuckView(long shardId, long executionId, int shardIndex, String taskName,
                           String handlerRef, String workerId, int attempt, Instant startedAt,
                           long ageSeconds, long timeoutSeconds, Instant lastProgressAt,
-                          long progressAgeSeconds) {}
+                          long progressAgeSeconds, Integer progressTimeoutSeconds) {}
 
   public ExecutionController(ExecutionRepository executions, ShardRepository shards,
                              WorkerRepository workers, JdbcTemplate jdbc, AuditRecorder auditor,
@@ -182,7 +182,7 @@ public class ExecutionController {
       return new StuckView(x.id(), x.executionId(), x.shardIndex(),
           r == null ? null : r.name(), r == null ? null : r.handlerRef(),
           x.workerId(), x.attempt(), x.startedAt(), age, x.timeoutSeconds(),
-          x.lastProgressAt(), progressAge);
+          x.lastProgressAt(), progressAge, x.progressTimeoutSeconds());
     }).toList();
     List<StuckView> items = all.stream().skip(p.offset()).limit(p.limit()).toList();
     return new Page<>(items, all.size(), p.offset(), p.limit());

@@ -82,6 +82,8 @@ export interface StuckRow {
   /** E3:最近推进时间(null = 从未 touch)与进度年龄秒。 */
   lastProgressAt: string | null;
   progressAgeSeconds: number;
+  /** E3:进度预算秒(null = 未 opt-in,按 timeoutSeconds 预算)。 */
+  progressTimeoutSeconds: number | null;
 }
 
 export interface ExecutionDetail {

@@ -73,6 +73,7 @@ export default function StuckPage() {
                 <th className="num">进度年龄</th>
                 <th className="num">最近推进</th>
                 <th className="num">预算</th>
+                <th className="num">进度预算</th>
                 <th className="text-right">操作</th>
               </tr>
             </thead>
@@ -91,6 +92,7 @@ export default function StuckPage() {
                   <td className="num">{s.progressAgeSeconds}s</td>
                   <td className="text-xs font-mono">{s.lastProgressAt ?? '—'}</td>
                   <td className="num">{s.timeoutSeconds}s</td>
+                  <td className="num">{s.progressTimeoutSeconds != null ? `${s.progressTimeoutSeconds}s` : '—'}</td>
                   <td className="text-right">
                     {confirmId === s.shardId ? (
                       <>

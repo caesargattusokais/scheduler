@@ -76,7 +76,8 @@ public interface ShardRepository {
   /** E2-B stuck-alive 视图投影:属主 worker 仍 ALIVE 但已超过其所属 task 运行预算的 RUNNING 分片。
    *  纯观测/只读,不改状态。timeoutSeconds 取自该分片所属 task。 */
   record StuckShard(long id, long executionId, int shardIndex, String workerId, int attempt,
-                   Instant startedAt, long timeoutSeconds, Instant lastProgressAt) {}
+                   Instant startedAt, long timeoutSeconds, Instant lastProgressAt,
+                   Integer progressTimeoutSeconds) {}
 
   /** E2-B 卡死视图:某任务下(或全部,taskId=null)属主 ALIVE 且已超运行预算的 RUNNING 分片。
    *  活性门 = E1 统一判据的取反(要求属性 ALIVE);超时经 execution→task JOIN 取 task.timeout_seconds。 */
