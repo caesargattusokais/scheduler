@@ -146,6 +146,9 @@ class ExecutorWorkerTest extends AbstractExecutorWorkerTest {
     assertEquals(shardId, ctx.shardId());
     assertEquals(0, ctx.shardIndex(), "单 shard 任务收 shardIndex=0");
     assertEquals(1, ctx.shardCount(), "单 shard 任务收 shardCount=1");
+    assertEquals(1, ctx.attempt(), "首次投递 attempt=1");
+    assertFalse(ctx.redelivery(), "首次投递 redelivery=false");
+    assertEquals(parentId + ":0", ctx.idempotencyKey(), "幂等键 = executionId:shardIndex");
 
     Shard s = shards.findShard(shardId).orElseThrow();
     assertEquals(ExecutionStatus.SUCCESS, s.status(), "shard 回写成 SUCCESS");
@@ -371,6 +374,34 @@ class ExecutorWorkerTest extends AbstractExecutorWorkerTest {
     assertEquals(2, rec.calls.get(1).shardCount());
     assertEquals(parentId, rec.calls.get(0).executionId(), "两个 shard 同属同一父 execution");
     assertEquals(parentId, rec.calls.get(1).executionId());
+  }
+
+  /** E3#2 投递坐标:重试驱动的第二次投递 attempt 递增到 2、幂等键稳定不变(同 executionId:shardIndex)。 */
+  @Test void handlerReceivesInFlightAttempt_andStableIdempotencyKey_acrossRetry() {
+    var attempts = new ArrayList<Integer>();
+    var keys = new ArrayList<String>();
+    var oneShot = new ExecutionHandler() {
+      boolean failNext = true;
+      @Override public String ref() { return "rec"; }
+      @Override public void handle(HandlerContext ctx) {
+        attempts.add(ctx.attempt());
+        keys.add(ctx.idempotencyKey());
+        if (failNext) { failNext = false; throw new RuntimeException("first fail"); }
+      }
+    };
+    var registry = new MapHandlerRegistry(List.of(() -> oneShot));
+    long taskId = createTask("rec", 1, 1000, null, 1, 1); // maxRetries=1 → 可重试一次
+    long parentId = seedParentAndShards(taskId, 1);
+    long shardId = shard(parentId, 0).id();
+
+    assertTrue(worker(registry).workOne(), "首调 attempt=1,抛错 → 调度重试(DUE)");
+    jdbc.update("UPDATE execution_shard SET next_retry_at = now() - interval '1 second' WHERE id=?", shardId);
+    assertTrue(worker(registry).workOne(), "次调 attempt=2,成功");
+
+    assertEquals(List.of(1, 2), attempts, "两次投递的在途 attempt 依次为 1、2");
+    assertEquals(parentId + ":0", keys.get(0), "幂等键 = executionId:shardIndex");
+    assertEquals(keys.get(0), keys.get(1), "幂等键跨投递稳定不变");
+    assertEquals(ExecutionStatus.SUCCESS, shards.findShard(shardId).orElseThrow().status(), "次调成功 → SUCCESS");
   }
 
   @Test void staleOwnerShard_cannotClobberReownedShard_guardSuppressesWritebackAndRetry() {
