@@ -8,16 +8,19 @@ import dev.scheduler.core.Execution;
 import dev.scheduler.core.ExecutionStatus;
 import dev.scheduler.core.Shard;
 import dev.scheduler.core.Task;
+import dev.scheduler.persistence.JdbcReconcileDecisionRepository;
 import dev.scheduler.persistence.JdbcShardRepository;
 import dev.scheduler.persistence.JdbcTaskRepository;
 import dev.scheduler.persistence.NotificationRepository;
 import dev.scheduler.persistence.OutboundNotification;
+import dev.scheduler.persistence.ReconcileDecision;
 import dev.scheduler.persistence.ShardRepository;
 import dev.scheduler.persistence.TaskRepository;
 import dev.scheduler.persistence.retry.FailureResolver;
 import dev.scheduler.persistence.retry.RetryPolicy;
 import dev.scheduler.server.service.NotificationFirer;
 import dev.scheduler.server.service.NotificationHub;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
@@ -47,6 +50,8 @@ class ReconcilerTest {
   private TaskRepository tasks;
   private ShardRepository shards;
   private final List<Fired> fired = new ArrayList<>();
+  private JdbcReconcileDecisionRepository decisions;
+  private ReconcileTelemetry telemetry;
 
   @BeforeAll static void setUp() {
     Flyway.configure()
@@ -58,10 +63,12 @@ class ReconcilerTest {
 
   @BeforeEach void clearTables() {
     jdbc.execute("TRUNCATE app_task, execution, execution_shard, execution_shard_outcome,"
-        + " execution_outcome RESTART IDENTITY CASCADE");
+        + " execution_outcome, reconcile_decision RESTART IDENTITY CASCADE");
     tasks = new JdbcTaskRepository(jdbc);
     shards = new JdbcShardRepository(jdbc);
-    fired.clear(); // 通知事件捕获(内存 fake repo,不落 outbox 表)。
+    decisions = new JdbcReconcileDecisionRepository(jdbc);
+    telemetry = new ReconcileTelemetry(decisions, new SimpleMeterRegistry());
+    fired.clear();
   }
 
   private long createTask(int shardCount, int maxRetries, long backoffMs, String pattern) {
@@ -124,11 +131,17 @@ class ReconcilerTest {
         Long.class, parentId, status);
   }
 
+  private List<ReconcileDecision> shardDecisions(long shardId) {
+    return decisions.findRecent(1000, 0).stream()
+        .filter(d -> d.targetType().equals("shard") && d.targetId() == shardId)
+        .toList();
+  }
+
   private Reconciler reconciler() {
     return new Reconciler(tasks, shards,
         new FailureResolver(shards, new RetryPolicy(), CLOCK),
         new NotificationFirer(new NotificationHub(new CapturingRepo(fired), new ObjectMapper())),
-        "reconciler", 30);
+        telemetry, "reconciler", 30);
   }
 
   /** 事件捕获:把 fire 到的 kind/targetType/targetId/idempotencyKey 记入共享列表,供断言点火点。 */
@@ -511,6 +524,28 @@ class ReconcilerTest {
     reconciler().scanOnce();
     assertEquals(ExecutionStatus.FAILED, shards.findParent(koParent).orElseThrow().status(),
         "容忍数超限 → 父 FAILED");
+  }
+
+  /** E3:每次回收落 reconcile_decision 行(phase/outcome/from/to/attempt 精确);near-miss 落 SKIPPED 行。 */
+  @Test void reclaim_recordsDecisionAndNearMiss() {
+    long taskId = createTask(1, 0, 1000, null); // maxRetries=0 → DEAD_LETTER
+    long parentId = seedParentWithShards(taskId, 1);
+    long sid = shard(parentId, 0).id();
+    setDeadOwnedShard(shard(parentId, 0), "w-dec", "now() - interval '1 hour'");
+
+    int n = reconciler().scanOnce();
+    assertEquals(1, n);
+
+    var rows = shardDecisions(sid);
+    assertEquals(1, rows.size(), "一次孤儿回收 → 一条决策");
+    ReconcileDecision d = rows.get(0);
+    assertEquals("orphan_reclaim", d.phase());
+    assertEquals("shard", d.targetType());
+    assertEquals("DEAD_LETTER", d.outcome(), "maxRetries=0 → 死信");
+    assertEquals("RUNNING", d.fromStatus());
+    assertEquals("FAILED", d.toStatus());
+    assertEquals(1, d.attempt());
+    assertEquals("owner unresponsive", d.reason());
   }
 }
 

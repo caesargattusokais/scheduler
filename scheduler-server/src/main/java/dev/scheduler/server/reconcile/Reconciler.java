@@ -4,9 +4,11 @@ import dev.scheduler.core.ExecutionStatus;
 import dev.scheduler.core.Shard;
 import dev.scheduler.core.SuccessPolicy;
 import dev.scheduler.core.Task;
+import dev.scheduler.persistence.ReconcileDecision;
 import dev.scheduler.persistence.ShardRepository;
 import dev.scheduler.persistence.ShardRepository.ExpiredShard;
 import dev.scheduler.persistence.TaskRepository;
+import dev.scheduler.persistence.retry.FailureOutcome;
 import dev.scheduler.persistence.retry.FailureResolver;
 import dev.scheduler.server.service.NotificationFirer;
 import java.util.List;
@@ -18,31 +20,38 @@ import java.util.List;
  *       「落 FAILED + 重试/死信/FAIL_FAST」的统一判定——与 worker 共用同一套判定,避免两套漂移。
  *   (2) 父级汇聚——对待汇聚的父级(parentsNeedingAggregation)按兄弟终态结果推导父终态(SUCCESS/FAILED/CANCELED)。
  * leader 门控不在此处(由 ReconcileLoop.tick 在 scan 前把关),这里只做回收/汇聚。
+ * E3:每次回收/汇聚/竞态裁决经 ReconcileTelemetry 落 reconcile_decision 行(append-only,纯观测,不改恢复语义)。
  */
 public class Reconciler {
   private final TaskRepository tasks;
   private final ShardRepository shards;
   private final FailureResolver failureResolver;
   private final NotificationFirer firer;
+  private final ReconcileTelemetry telemetry;
   private final String workerId;
   private final int staleAfterSeconds;
 
   public Reconciler(TaskRepository tasks, ShardRepository shards,
                     FailureResolver failureResolver, NotificationFirer firer,
-                    String workerId, int staleAfterSeconds) {
+                    ReconcileTelemetry telemetry, String workerId, int staleAfterSeconds) {
     this.tasks = tasks;
     this.shards = shards;
     this.failureResolver = failureResolver;
     this.firer = firer;
+    this.telemetry = telemetry;
     this.workerId = workerId;
     this.staleAfterSeconds = staleAfterSeconds;
   }
 
   /**
    * 对账扫描一次,返回本趟回收的孤儿 shard 数。两趟固定顺序:先孤儿回收,再父级终态汇聚。
-   * 租约判定用 DB now()(服务器时钟一致,与本机墙钟无关)。
+   * 租约判定用 DB now()(服务器时钟一致,与本机墙钟无关)。E3:本体由 telemetry 计时 + 失败计数兜底。
    */
   public int scanOnce() {
+    return telemetry.timedScan(this::doScan);
+  }
+
+  private int doScan() {
     int reclaimed = 0;
     for (Task task : tasks.findAll()) {
       // 阶段 1 — §3 分布式执行超时:timeoutSeconds>0 的任务,已认领且运行超限的 RUNNING 分片走失败路径
@@ -51,29 +60,17 @@ public class Reconciler {
       // (worker_id 已被改写)→ 硬超时语义。
       if (task.timeoutSeconds() > 0) {
         for (ExpiredShard run : shards.findOverRuntime(task.id(), task.timeoutSeconds(), staleAfterSeconds)) {
-          try {
-            if (shards.markStatus(run.id(), ExecutionStatus.FAILED, workerId, "runtime timeout")) {
-              failureResolver.handle(task, run.id(), run.attempt(), "runtime timeout");
-              firer.shardTimedOut(run.id(), task.id(), run.attempt(), task.timeoutSeconds());
-              reclaimed++;
-            }
-          } catch (IllegalStateException alreadyMovedOn) {
-            // 快照后已终态/已迁移 → 跳过,不中止整批。
+          if (reclaim(task, run, "timeout_reclaim", "runtime timeout")) {
+            firer.shardTimedOut(run.id(), task.id(), run.attempt(), task.timeoutSeconds());
+            reclaimed++;
           }
         }
       }
       // 阶段 2 — 活性回收:对上阶段未收的孤儿(dead-owner 且未超时)走同一条失败路径,detail 'owner unresponsive'。
       // 阶段 1 已 FAILED 的片因 findExpiredRunning 要求 status='RUNNING' 而不再命中,两阶段互不重叠/不重复计数。
       for (ExpiredShard run : shards.findExpiredRunning(task.id(), staleAfterSeconds)) {
-        try {
-          if (shards.markStatus(run.id(), ExecutionStatus.FAILED, workerId,
-                  "owner unresponsive")) {
-            failureResolver.handle(task, run.id(), run.attempt(),
-                "owner unresponsive");
-            reclaimed++;
-          }
-        } catch (IllegalStateException alreadyMovedOn) {
-          // 快照后该行已被 owner 抢先完成/被超时阶段回收(或已非法迁移)→ 已迁移,跳过这一行,不中止整批回收。
+        if (reclaim(task, run, "orphan_reclaim", "owner unresponsive")) {
+          reclaimed++;
         }
       }
     }
@@ -81,8 +78,29 @@ public class Reconciler {
     return reclaimed;
   }
 
+  /** 单条回收 + 决策留痕:markStatus 成功 → handle 返回 outcome 落 phase 决策;CAS 失手/非法迁移 → near_miss SKIPPED。 */
+  private boolean reclaim(Task task, ExpiredShard run, String phase, String reason) {
+    try {
+      if (shards.markStatus(run.id(), ExecutionStatus.FAILED, workerId, reason)) {
+        FailureOutcome outcome = failureResolver.handle(task, run.id(), run.attempt(), reason);
+        telemetry.record(ReconcileDecision.of(phase, "shard", run.id(), task.id(), reason,
+            outcome.name(), "RUNNING", "FAILED", run.attempt(), null));
+        return true;
+      }
+      telemetry.record(ReconcileDecision.of("near_miss", "shard", run.id(), task.id(), reason,
+          "SKIPPED", "RUNNING", "RUNNING", run.attempt(), "markStatus CAS lost race"));
+      return false;
+    } catch (IllegalStateException alreadyMovedOn) {
+      // 快照后该行已被 owner 抢先完成/被超时阶段回收(或已非法迁移)→ 已迁移,跳过这一行,不中止整批回收。
+      telemetry.record(ReconcileDecision.of("near_miss", "shard", run.id(), task.id(), reason,
+          "SKIPPED", "RUNNING", "RUNNING", run.attempt(), "illegal transition / already moved on"));
+      return false;
+    }
+  }
+
   /** 父级汇聚:对每个有待汇聚的父,全部兄弟终态后才推导父终态并落库。finalizeParent CAS-0 → 已推进,幂等跳过。
-   *  3c 部分成功:父终态由任务成功策略(经 ParentAgg.taskId 取 Task)推导——失败片可被容忍(达标)→ PARTIAL_SUCCESS。 */
+   *  3c 部分成功:父终态由任务成功策略(经 ParentAgg.taskId 取 Task)推导——失败片可被容忍(达标)→ PARTIAL_SUCCESS。
+   *  E3:仅 finalizeParent 成功才落 parent_aggregate 决策(finalizeParent false = 幂等 CAS skip,明确排除为噪声)。 */
   private void aggregateParents() {
     for (var agg : shards.parentsNeedingAggregation()) {
       long pid = agg.executionId();
@@ -103,8 +121,12 @@ public class Reconciler {
         case CANCELED -> "shard cancelled";
         default -> "all shards ok";
       };
-      shards.finalizeParent(pid, parentTerminal, detail);
-      // 事件点火(次序:先死信、再父终态;均在父收敛落库后,幂等由 key 保证只发一次)。
+      boolean finalized = shards.finalizeParent(pid, parentTerminal, detail);
+      if (finalized) {
+        telemetry.record(ReconcileDecision.of("parent_aggregate", "execution", pid, agg.taskId(),
+            "parent aggregate", parentTerminal.name(), "DUE", parentTerminal.name(), null, detail));
+      }
+      // 事件点火(次序:先死信、再父终态;均在父收敛落库后,幂等由 key 保证只发一次)——与最终化返回值无关,保持原语义。
       for (Shard s : parent) {
         if (s.deadLetter()) firer.shardDeadLettered(pid, s.id(), s.attempt());
       }

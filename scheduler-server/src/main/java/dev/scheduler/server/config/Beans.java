@@ -20,6 +20,8 @@ import dev.scheduler.persistence.EventRepository;
 import dev.scheduler.persistence.JdbcShardRepository;
 import dev.scheduler.persistence.JdbcTaskRepository;
 import dev.scheduler.persistence.JdbcWorkerRepository;
+import dev.scheduler.persistence.JdbcReconcileDecisionRepository;
+import dev.scheduler.persistence.ReconcileDecisionRepository;
 import dev.scheduler.persistence.JdbcRuntimeConfigRepository;
 import dev.scheduler.persistence.RuntimeConfigRepository;
 import dev.scheduler.persistence.NotificationRepository;
@@ -31,6 +33,7 @@ import dev.scheduler.persistence.WorkerRepository;
 import dev.scheduler.server.dag.DagEngine;
 import dev.scheduler.server.leader.AdvisoryLockLeaderElection;
 import dev.scheduler.server.leader.LeaderElection;
+import dev.scheduler.server.reconcile.ReconcileTelemetry;
 import dev.scheduler.server.reconcile.Reconciler;
 import dev.scheduler.server.service.AlertEngine;
 import dev.scheduler.server.service.AuditRecorder;
@@ -48,6 +51,7 @@ import dev.scheduler.persistence.retry.RetryPolicy;
 import dev.scheduler.server.trigger.EventEngine;
 import dev.scheduler.server.trigger.TriggerEngine;
 import io.micrometer.core.instrument.Gauge;
+import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.binder.MeterBinder;
 import java.time.Clock;
 import javax.sql.DataSource;
@@ -155,6 +159,18 @@ public class Beans {
   @Bean
   ShardRepository shardRepository(JdbcTemplate jdbc) {
     return new JdbcShardRepository(jdbc);
+  }
+
+  /** E3 对账决策原子仓存(append-only reconcile_decision)。 */
+  @Bean
+  ReconcileDecisionRepository reconcileDecisionRepository(JdbcTemplate jdbc) {
+    return new JdbcReconcileDecisionRepository(jdbc);
+  }
+
+  /** E3 对账器可观测接缝:决策落库 + scan 计时(Timer)/失败计数(Counter)。 */
+  @Bean
+  ReconcileTelemetry reconcileTelemetry(ReconcileDecisionRepository decisions, MeterRegistry registry) {
+    return new ReconcileTelemetry(decisions, registry);
   }
 
   @Bean
@@ -321,8 +337,9 @@ public class Beans {
   @Bean
   Reconciler reconciler(TaskRepository tasks, ShardRepository shards,
                         FailureResolver failureResolver, NotificationFirer firer,
+                        ReconcileTelemetry telemetry,
                         @Value("${scheduler.worker.stale-after-seconds:30}") int staleAfterSeconds) {
-    return new Reconciler(tasks, shards, failureResolver, firer, "reconciler", staleAfterSeconds);
+    return new Reconciler(tasks, shards, failureResolver, firer, telemetry, "reconciler", staleAfterSeconds);
   }
 
   @Bean
