@@ -1159,4 +1159,59 @@ class JdbcShardRepositoryTest extends AbstractPostgresTest {
     shardRepo.markStatusOwned(sid, ExecutionStatus.SUCCESS, "w1", 1, "ok");
     assertFalse(shardRepo.recordProgress(sid, "w1", 1), "终态后 recordProgress 0 行");
   }
+
+  // ---- E3 对账可观测:待回收积压(countReclaimableRunning / maxReclaimableAgeSeconds / findReclaimableRunning)----
+  // 积压语义:属主已死(非 ALIVE)且仍 RUNNING 的已认领分片;积压龄锚属主 last_seen,属主行缺失锚 lease_until。
+
+  @Test void reclaimableBacklog_deadOwnerCounted_aliveExcluded() {
+    long taskId = newTask(2, 8);
+    long parentId = seedParentAndShards(taskId, 2);
+    long dead = shard(parentId, 0).id();
+    long alive = shard(parentId, 1).id();
+    claimShard(dead, taskId, "w-e3-dead", 8);
+    claimShard(alive, taskId, "w-alive", 8);
+    seedWorker("w-e3-dead", 120);  // last_seen 120s 前 > stale(30) → 判死
+    seedWorker("w-alive", 5);   // fresh → 存活
+
+    assertEquals(1L, shardRepo.countReclaimableRunning(taskId, 30));
+    assertEquals(1L, shardRepo.countReclaimableRunning(null, 30), "全局口径=任务口径");
+
+    var list = shardRepo.findReclaimableRunning(null, 30, 10, 0);
+    assertEquals(1, list.size());
+    assertEquals(dead, list.get(0).id());
+    assertEquals(taskId, list.get(0).taskId());
+    assertEquals("w-e3-dead", list.get(0).workerId());
+    assertEquals(1, list.get(0).attempt());
+    assertTrue(list.get(0).ageSeconds() >= 120, "积压龄锚 last_seen(120s 前)");
+  }
+
+  @Test void reclaimableAge_noWorkerRow_fallsBackToLeaseUntil() {
+    long taskId = newTask(1, 8);
+    long parentId = seedParentAndShards(taskId, 1);
+    long sid = shard(parentId, 0).id();
+    claimShard(sid, taskId, "w-no-row", 8); // RUNNING, worker_id='w-no-row'
+    jdbc.update("UPDATE execution_shard SET lease_until=now() - interval '90 seconds' WHERE id=?", sid);
+    // 不插 worker 行 → 属主行缺失 → 判死 + age 锚 lease_until(90s 前)
+
+    var list = shardRepo.findReclaimableRunning(null, 30, 10, 0);
+    assertEquals(1, list.size());
+    assertTrue(list.get(0).ageSeconds() >= 90, "属主行缺失 → 锚 lease_until");
+    assertTrue(shardRepo.maxReclaimableAgeSeconds(30) >= 90, "最老龄同源");
+  }
+
+  @Test void reclaimableBacklog_paginatedByAgeDesc() {
+    long taskId = newTask(3, 8);
+    long parentId = seedParentAndShards(taskId, 3);
+    long a = shard(parentId, 0).id();
+    long b = shard(parentId, 1).id();
+    long c = shard(parentId, 2).id();
+    claimShard(a, taskId, "w-a", 8); seedWorker("w-a", 200);
+    claimShard(b, taskId, "w-b", 8); seedWorker("w-b", 150);
+    claimShard(c, taskId, "w-c", 8); seedWorker("w-c", 100);
+
+    var page = shardRepo.findReclaimableRunning(null, 30, 2, 0);
+    assertEquals(2, page.size());
+    assertEquals(a, page.get(0).id(), "最老(200s)在前,按积压龄倒序");
+    assertEquals(3L, shardRepo.countReclaimableRunning(null, 30));
+  }
 }

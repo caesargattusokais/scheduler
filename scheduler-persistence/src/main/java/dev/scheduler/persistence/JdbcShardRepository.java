@@ -318,6 +318,55 @@ public class JdbcShardRepository implements ShardRepository {
     return n == null ? 0L : n;
   }
 
+  @Override public long countReclaimableRunning(Long taskId, int staleAfterSeconds) {
+    StringBuilder sql = new StringBuilder(
+        "SELECT count(*) FROM execution_shard s JOIN execution e ON e.id = s.execution_id"
+        + " WHERE s.status='RUNNING' AND s.worker_id IS NOT NULL"
+        + " AND NOT EXISTS (SELECT 1 FROM worker w2"
+        + "                  WHERE w2.id = s.worker_id AND w2.status = 'ALIVE'"
+        + "                    AND w2.last_seen >= now() - make_interval(secs => ?))");
+    java.util.List<Object> args = new java.util.ArrayList<>();
+    args.add((double) staleAfterSeconds);
+    if (taskId != null) { sql.append(" AND e.task_id=?"); args.add(taskId); }
+    Long c = jdbc.queryForObject(sql.toString(), Long.class, args.toArray());
+    return c == null ? 0 : c;
+  }
+
+  @Override public long maxReclaimableAgeSeconds(int staleAfterSeconds) {
+    Long v = jdbc.queryForObject(
+        "SELECT COALESCE(MAX(GREATEST(EXTRACT(EPOCH FROM now() - COALESCE(w.last_seen, s.lease_until))::bigint, 0)), 0)"
+            + " FROM execution_shard s LEFT JOIN worker w ON w.id = s.worker_id"
+            + " WHERE s.status='RUNNING' AND s.worker_id IS NOT NULL"
+            + " AND NOT EXISTS (SELECT 1 FROM worker w2"
+            + "                  WHERE w2.id = s.worker_id AND w2.status = 'ALIVE'"
+            + "                    AND w2.last_seen >= now() - make_interval(secs => ?))",
+        Long.class, (double) staleAfterSeconds);
+    return v == null ? 0 : v;
+  }
+
+  @Override public List<ReclaimableShard> findReclaimableRunning(Long taskId, int staleAfterSeconds,
+                                                                 int limit, int offset) {
+    StringBuilder sql = new StringBuilder(
+        "SELECT s.id, s.execution_id, e.task_id, s.worker_id, s.attempt,"
+        + " COALESCE(GREATEST(EXTRACT(EPOCH FROM now() - COALESCE(w.last_seen, s.lease_until))::bigint, 0), 0) AS age"
+        + " FROM execution_shard s JOIN execution e ON e.id = s.execution_id"
+        + " LEFT JOIN worker w ON w.id = s.worker_id"
+        + " WHERE s.status='RUNNING' AND s.worker_id IS NOT NULL"
+        + " AND NOT EXISTS (SELECT 1 FROM worker w2"
+        + "                  WHERE w2.id = s.worker_id AND w2.status = 'ALIVE'"
+        + "                    AND w2.last_seen >= now() - make_interval(secs => ?))");
+    java.util.List<Object> args = new java.util.ArrayList<>();
+    args.add((double) staleAfterSeconds);
+    if (taskId != null) { sql.append(" AND e.task_id=?"); args.add(taskId); }
+    sql.append(" ORDER BY age DESC, s.id LIMIT ? OFFSET ?");
+    args.add(limit); args.add(offset);
+    return jdbc.query(sql.toString(),
+        (rs, i) -> new ReclaimableShard(rs.getLong("id"), rs.getLong("execution_id"),
+            rs.getLong("task_id"), rs.getString("worker_id"), rs.getInt("attempt"),
+            rs.getLong("age")),
+        args.toArray());
+  }
+
   @Override public boolean markStatus(long shardId, ExecutionStatus to, String workerId, String detail) {
     Shard cur = findShard(shardId).orElseThrow(() -> new IllegalStateException("no shard " + shardId));
     if (!ExecutionTransitions.canTransition(cur.status(), to)) {

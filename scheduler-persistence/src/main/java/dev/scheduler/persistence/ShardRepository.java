@@ -73,6 +73,19 @@ public interface ShardRepository {
    *  且属主 worker 非 ALIVE(B1 同一活性门——活体 worker 慢/超时绝不回收)。返回对账所需的 id 与 attempt。 */
   List<ExpiredShard> findOverRuntime(long taskId, int timeoutSeconds, int staleAfterSeconds);
 
+  /** E3 待回收积压分片投影:属主已死(非 ALIVE)且仍 RUNNING 的已认领分片(B1 活性门下一趟会回收的集合)。
+   *  ageSeconds = 该片自「进入可回收」以来的秒数,锚属主 last_seen;属主行缺失锚 lease_until。 */
+  record ReclaimableShard(long id, long executionId, long taskId, String workerId, int attempt, long ageSeconds) {}
+
+  /** 待回收积压计数(taskId=null=全局;告警/gauge/视图 total 同源)。 */
+  long countReclaimableRunning(Long taskId, int staleAfterSeconds);
+
+  /** 全局最老待回收分片的积压龄(秒):无积压→0。 */
+  long maxReclaimableAgeSeconds(int staleAfterSeconds);
+
+  /** 待回收积压明细分页(taskId 过滤 + limit/offset),按积压龄倒序。 */
+  List<ReclaimableShard> findReclaimableRunning(Long taskId, int staleAfterSeconds, int limit, int offset);
+
   /** E2-B stuck-alive 视图投影:属主 worker 仍 ALIVE 但已超过其所属 task 运行预算的 RUNNING 分片。
    *  纯观测/只读,不改状态。timeoutSeconds 取自该分片所属 task。 */
   record StuckShard(long id, long executionId, int shardIndex, String workerId, int attempt,
