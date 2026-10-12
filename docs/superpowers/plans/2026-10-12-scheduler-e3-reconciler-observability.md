@@ -83,7 +83,7 @@ class JdbcReconcileDecisionRepositoryTest extends AbstractPostgresTest {
     // 拨旧 2h 的 near_miss:落在 1h 窗外,不计入。
     jdbc.update("UPDATE reconcile_decision SET created_at = now() - interval '2 hours' WHERE phase='near_miss'");
 
-    assertEquals(1L, repo.countPhaseLastHour("near_miss"), "1h 窗外的行不计入");
+    assertEquals(0L, repo.countPhaseLastHour("near_miss"), "1h 窗外的行不计入");
     assertEquals(1L, repo.countPhaseLastHour("parent_aggregate"));
     assertEquals(0L, repo.countPhaseLastHour("timeout_reclaim"));
   }
