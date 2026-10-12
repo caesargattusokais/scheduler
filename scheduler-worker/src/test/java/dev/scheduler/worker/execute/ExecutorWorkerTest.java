@@ -8,12 +8,14 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import dev.scheduler.core.ExecutionStatus;
 import dev.scheduler.core.Shard;
 import dev.scheduler.core.Task;
+import dev.scheduler.persistence.JdbcReconcileDecisionRepository;
 import dev.scheduler.persistence.JdbcShardRepository;
 import dev.scheduler.persistence.JdbcTaskRepository;
 import dev.scheduler.persistence.JdbcWorkerRepository;
 import dev.scheduler.persistence.ShardRepository;
 import dev.scheduler.persistence.TaskRepository;
 import dev.scheduler.server.reconcile.Reconciler;
+import dev.scheduler.server.reconcile.ReconcileTelemetry;
 import dev.scheduler.worker.handler.ExecutionHandler;
 import dev.scheduler.worker.handler.HandlerContext;
 import dev.scheduler.worker.handler.HandlerRegistry;
@@ -26,6 +28,7 @@ import dev.scheduler.persistence.OutboundNotification;
 import dev.scheduler.server.service.NotificationFirer;
 import dev.scheduler.server.service.NotificationHub;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneId;
@@ -603,7 +606,9 @@ class ExecutorWorkerTest extends AbstractExecutorWorkerTest {
     try {
       // 主线程(线程 3):在 handler 仍阻塞、owner 心跳新鲜时跑 server Reconciler,stale 窗口极小(1s)。
       Reconciler rc = new Reconciler(tasks, shards,
-          new FailureResolver(shards, new RetryPolicy(), CLOCK), noopFirer(), "reconciler", 1);
+          new FailureResolver(shards, new RetryPolicy(), CLOCK), noopFirer(),
+          new ReconcileTelemetry(new JdbcReconcileDecisionRepository(jdbc), new SimpleMeterRegistry()),
+          "reconciler", 1);
       int n = rc.scanOnce();
 
       assertEquals(0, n, "心跳新鲜的健康长运行分片不得被活性优先回收");
@@ -637,7 +642,9 @@ class ExecutorWorkerTest extends AbstractExecutorWorkerTest {
         + " VALUES (?, '', now() - interval '2 minutes', 'ALIVE')", owner);
 
     Reconciler rc = new Reconciler(tasks, shards,
-        new FailureResolver(shards, new RetryPolicy(), CLOCK), noopFirer(), "reconciler", 1);
+        new FailureResolver(shards, new RetryPolicy(), CLOCK), noopFirer(),
+        new ReconcileTelemetry(new JdbcReconcileDecisionRepository(jdbc), new SimpleMeterRegistry()),
+        "reconciler", 1);
     int n = rc.scanOnce();
 
     assertEquals(1, n, "心跳失联 owner → 租约未到期前即被活性优先回收");

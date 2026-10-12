@@ -2,6 +2,8 @@ package dev.scheduler.server.reconcile;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.spy;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.scheduler.core.Execution;
@@ -546,6 +548,36 @@ class ReconcilerTest {
     assertEquals("FAILED", d.toStatus());
     assertEquals(1, d.attempt());
     assertEquals("owner unresponsive", d.reason());
+  }
+
+  /** E3:near-miss 竞态——markStatus CAS 输掉(被 worker 先手)落 SKIPPED 决策,且不点火、不计入回收数。 */
+  @Test void nearMiss_markStatusLostRace_recordsSkipped() {
+    long taskId = createTask(1, 0, 1000, null);
+    long parentId = seedParentWithShards(taskId, 1);
+    long sid = shard(parentId, 0).id();
+    setDeadOwnedShard(shard(parentId, 0), "w-nm", "now() - interval '1 hour'");
+
+    // spy 令 markStatus 对目标片返回 false(模拟 worker 在 findExpiredRunning 之后、markStatus 之前抢先改走)。
+    ShardRepository spyShards = spy(shards);
+    doReturn(false).when(spyShards).markStatus(sid, ExecutionStatus.FAILED, "reconciler", "owner unresponsive");
+
+    Reconciler rc = new Reconciler(tasks, spyShards,
+        new FailureResolver(spyShards, new RetryPolicy(), CLOCK),
+        new NotificationFirer(new NotificationHub(new CapturingRepo(fired), new ObjectMapper())),
+        telemetry, "reconciler", 30);
+
+    int n = rc.scanOnce();
+    assertEquals(0, n, "near-miss 不计入回收数");
+
+    var rows = shardDecisions(sid);
+    assertEquals(1, rows.size(), "near-miss → 一条 SKIPPED 决策");
+    ReconcileDecision d = rows.get(0);
+    assertEquals("near_miss", d.phase());
+    assertEquals("SKIPPED", d.outcome());
+    assertEquals("RUNNING", d.fromStatus());
+    assertEquals("RUNNING", d.toStatus());
+    assertEquals("owner unresponsive", d.reason());
+    assertTrue(fired.isEmpty(), "near-miss 不点火任何事件");
   }
 }
 
