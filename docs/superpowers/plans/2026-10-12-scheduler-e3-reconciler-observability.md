@@ -533,6 +533,7 @@ git commit -m "feat(e3): reclaimable backlog query on ShardRepository (count/max
 - Create: `scheduler-server/src/main/java/dev/scheduler/server/reconcile/ReconcileTelemetry.java`
 - Modify: `scheduler-server/src/main/java/dev/scheduler/server/reconcile/Reconciler.java`
 - Modify: `scheduler-server/src/main/java/dev/scheduler/server/config/Beans.java`(加 `reconcileDecisionRepository`/`reconcileTelemetry` bean + 更新 `reconciler` bean)
+- Modify: `scheduler-worker/src/test/java/dev/scheduler/worker/execute/ExecutorWorkerTest.java`(两处 `new Reconciler(...)` 调用点改为注入 `ReconcileTelemetry`——worker 以 test 作用域依赖 server,构造签名变更会连带破坏 worker test-compile)
 - Test: `scheduler-server/src/test/java/dev/scheduler/server/reconcile/ReconcilerTest.java`
 
 **Interfaces:**
@@ -1397,4 +1398,4 @@ git commit -m "feat(e3): reconcile backlog/activity console views + metrics card
 - 端点:Task 6 覆盖 backlog/activity 分页 + Page 信封 + 只读(Mockito)。
 - 回归:离线 `mvn -o test -Dsurefire.failIfNoSpecifiedTests=false` 全绿 + 前端 `npm run build` 常绿。
 
-> 说明:Task 4 的 near-miss SKIPPED 分支当前无独立播种测试,可在 Step 1 追加——把某 shard 在 `scanOnce` 前已由另一路径改为非 RUNNING,断言 `shardDecisions(sid)` 含一条 `phase=near_miss, outcome=SKIPPED, from=RUNNING, to=RUNNING` 行。若在实现期发现 near-miss 难以稳定播种(竞态时序),记录为 ruling 并在任务 review 中确认覆盖归属。
+> 说明:Task 4 的 near-miss SKIPPED 分支已加确定性播种测试 `nearMiss_markStatusLostRace_recordsSkipped`。单线程真实 CAS 无法稳定播种(新返回的 RUNNING 片 `markStatus` 必成功,竞态需并发突变),故用 Mockito `spy(shards)` 把 `markStatus` 对目标片 stub 为 `false`(模拟 worker 在 `findExpiredRunning` 之后抢先改走),断言落 `phase=near_miss, outcome=SKIPPED, from=RUNNING, to=RUNNING` 行且 `fired.isEmpty()`(不点火)、`n==0`(不计入回收数)。
