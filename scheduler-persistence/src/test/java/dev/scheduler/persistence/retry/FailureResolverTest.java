@@ -62,7 +62,8 @@ class FailureResolverTest extends AbstractPostgresTest {
     jdbc.update("UPDATE execution_shard SET retry_budget_until=now() - interval '1 second' WHERE id=?",
         fx.shardId);
 
-    resolver().handle(fx.task, fx.shardId, 1, "boom");
+    FailureOutcome outcome = resolver().handle(fx.task, fx.shardId, 1, "boom");
+    assertEquals(FailureOutcome.DEAD_LETTER, outcome, "预算 W 耗尽 → 返回 DEAD_LETTER");
 
     assertEquals(ExecutionStatus.FAILED, shardRepo.findShard(fx.shardId).orElseThrow().status());
     assertTrue(deadLetterFlag(fx.shardId), "预算 W 耗尽 → 即便 maxRetries 有余也转死信");
@@ -73,7 +74,8 @@ class FailureResolverTest extends AbstractPostgresTest {
   @Test void budgetNotExhausted_retriesByCount() {
     Fixture fx = seed(300_000L, 3);
 
-    resolver().handle(fx.task, fx.shardId, 1, "boom");
+    FailureOutcome outcome = resolver().handle(fx.task, fx.shardId, 1, "boom");
+    assertEquals(FailureOutcome.REQUEUED, outcome, "窗口未耗尽 → 返回 REQUEUED");
 
     assertEquals(ExecutionStatus.DUE, shardRepo.findShard(fx.shardId).orElseThrow().status(),
         "窗口未耗尽 → 按次数重试");
@@ -96,7 +98,8 @@ class FailureResolverTest extends AbstractPostgresTest {
   @Test void maxRetriesExceeded_goesDeadLetter() {
     Fixture fx = seed(null, 1);
 
-    resolver().handle(fx.task, fx.shardId, 2, "boom");
+    FailureOutcome outcome = resolver().handle(fx.task, fx.shardId, 2, "boom");
+    assertEquals(FailureOutcome.DEAD_LETTER, outcome, "attempt 超 maxRetries → 返回 DEAD_LETTER");
 
     assertTrue(deadLetterFlag(fx.shardId), "attempt 超 maxRetries → 死信");
   }

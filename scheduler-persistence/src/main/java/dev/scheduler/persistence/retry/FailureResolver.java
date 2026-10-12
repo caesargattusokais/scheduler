@@ -29,17 +29,19 @@ public class FailureResolver {
    *  @param attempt 本次失败的尝试号:>=1
    *  @param detail  失败原因描述,兼作重试/死信 outcome 的 reason
    */
-  public void handle(Task task, long shardId, int attempt, String detail) {
+  public FailureOutcome handle(Task task, long shardId, int attempt, String detail) {
     if (shards.retryBudgetExhausted(shardId)) {
       // 整轮重试预算 W 已耗尽 → 即使 maxRetries 有余也直接死信(第二终止条件)。
       deadLetter(shardId, detail);
-      return;
+      return FailureOutcome.DEAD_LETTER;
     }
     if (retryPolicy.shouldRetry(task, attempt, detail)) {
       shards.scheduleRetry(shardId,
           clock.instant().plusMillis(retryPolicy.delayMs(task, attempt)), task.retryBudgetMs(), detail);
+      return FailureOutcome.REQUEUED;
     } else {
       deadLetter(shardId, detail);
+      return FailureOutcome.DEAD_LETTER;
     }
   }
 
