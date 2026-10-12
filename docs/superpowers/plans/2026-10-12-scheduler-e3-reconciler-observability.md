@@ -298,11 +298,11 @@ git commit -m "feat(e3): reconcile_decision append-only store + repository (V33)
     assertEquals(FailureOutcome.REQUEUED, outcome, "窗口未耗尽 → 返回 REQUEUED");
 ```
 
-在 `maxRetriesExceeded_goesDeadLetter` 测试体(现 `resolver().handle(...)` 后)追加:
+在 `maxRetriesExceeded_goesDeadLetter` 测试体把 `resolver().handle(...)` 改为(替换原调用,勿重复调用 handle):
 
 ```java
-    assertEquals(FailureOutcome.DEAD_LETTER, resolver().handle(fx.task, fx.shardId, 2, "boom"),
-        "attempt 超 maxRetries → 返回 DEAD_LETTER");
+    FailureOutcome outcome = resolver().handle(fx.task, fx.shardId, 2, "boom");
+    assertEquals(FailureOutcome.DEAD_LETTER, outcome, "attempt 超 maxRetries → 返回 DEAD_LETTER");
 ```
 
 并在文件 import 区追加 `import dev.scheduler.persistence.retry.FailureOutcome;`(若同包可不加——该测试类已在 `dev.scheduler.persistence.retry` 包,无需 import)。
