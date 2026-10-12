@@ -285,6 +285,31 @@ public class Beans {
     };
   }
 
+  /** E3 对账观测 gauge:决策计数(1h 滚动)读 reconcile_decision;积压/积压龄读 execution_shard(活体门 stale=30)。
+   *  全部 lazy 查 DB(scrape 时求值),与既有 scheduler_* gauge 同款。 */
+  private static final int RECONCILE_STALE_SECONDS = 30;
+
+  @Bean
+  MeterBinder reconcileMetrics(ReconcileDecisionRepository decisions, ShardRepository shards) {
+    return registry -> {
+      Gauge.builder("scheduler_reconcile_reclaimed_1h",
+          () -> (double) (decisions.countPhaseLastHour("timeout_reclaim")
+              + decisions.countPhaseLastHour("orphan_reclaim"))).register(registry);
+      Gauge.builder("scheduler_reconcile_timeout_reclaimed_1h",
+          () -> (double) decisions.countPhaseLastHour("timeout_reclaim")).register(registry);
+      Gauge.builder("scheduler_reconcile_orphan_reclaimed_1h",
+          () -> (double) decisions.countPhaseLastHour("orphan_reclaim")).register(registry);
+      Gauge.builder("scheduler_reconcile_aggregated_1h",
+          () -> (double) decisions.countPhaseLastHour("parent_aggregate")).register(registry);
+      Gauge.builder("scheduler_reconcile_near_miss_1h",
+          () -> (double) decisions.countPhaseLastHour("near_miss")).register(registry);
+      Gauge.builder("scheduler_reconcile_backlog",
+          () -> (double) shards.countReclaimableRunning(null, RECONCILE_STALE_SECONDS)).register(registry);
+      Gauge.builder("scheduler_reconcile_backlog_max_age_seconds",
+          () -> (double) shards.maxReclaimableAgeSeconds(RECONCILE_STALE_SECONDS)).register(registry);
+    };
+  }
+
   /** worker 存活判定窗口:last_seen 距今 ≤ 30s 视为存活(与 AvailableHandlerRefs 同窗)。 */
   private static final java.time.Duration WORKER_LIVE_WINDOW = java.time.Duration.ofSeconds(30);
 

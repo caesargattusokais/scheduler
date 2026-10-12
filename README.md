@@ -153,6 +153,13 @@ cd web && npm run dev                     # 开发，/api 与 /actuator 代理�
 | `scheduler_dag_runs_active` | 活跃 DAG 批次数：全部 `PENDING` 的 `dag_run` |
 | `scheduler_dlq_depth` | 死信队列深度：`FAILED AND dead_letter` 的 shard 数 |
 | `scheduler_worker_active` | 存活 worker 数：`worker` 表 `last_seen` 距今 ≤30s 且 `ALIVE` 的进程数（读心跳表，非选主锁） |
+| `scheduler_reconcile_reclaimed_1h` | 近 1h 对账回收分片数(`timeout_reclaim` + `orphan_reclaim` 计数,读 `reconcile_decision`) |
+| `scheduler_reconcile_timeout_reclaimed_1h` | 近 1h 超时回收计数 |
+| `scheduler_reconcile_orphan_reclaimed_1h` | 近 1h 孤儿回收计数 |
+| `scheduler_reconcile_aggregated_1h` | 近 1h 父级汇聚计数 |
+| `scheduler_reconcile_near_miss_1h` | 近 1h CAS 失手/near-miss 计数 |
+| `scheduler_reconcile_backlog` | 当前待回收积压分片数(属主已死且仍 RUNNING) |
+| `scheduler_reconcile_backlog_max_age_seconds` | 最老待回收分片的积压龄(秒) |
 
 ## 开发方式
 

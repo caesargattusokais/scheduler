@@ -177,6 +177,13 @@ public class AlertEngine {
       out.add(new Signal("stuck-alive", null, null, "medium", Long.toString(n), n >= stuckThr));
     }
 
+    // reconcile-backlog(全局, high):存在待回收积压(对账器滞后)。
+    long rThr = settings.getLong(RuntimeConfigKeys.ALERT_RECONCILE_BACKLOG, 3L);
+    if (rThr > 0) {
+      long n = shards.countReclaimableRunning(null, STUCK_ALIVE_STALE_SECONDS);
+      out.add(new Signal("reconcile-backlog", null, null, "high", Long.toString(n), n >= rThr));
+    }
+
     return out;
   }
 

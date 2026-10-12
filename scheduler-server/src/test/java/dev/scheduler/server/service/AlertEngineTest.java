@@ -72,7 +72,8 @@ class AlertEngineTest {
         .put(RuntimeConfigKeys.ALERT_WORKER_OFFLINE, "0")
         .put(RuntimeConfigKeys.ALERT_TASK_FAILURE_RATE, "0.0")
         .put(RuntimeConfigKeys.ALERT_DAG_RUN_FAILED, "0")
-        .put(RuntimeConfigKeys.ALERT_STUCK_ALIVE, "0");
+        .put(RuntimeConfigKeys.ALERT_STUCK_ALIVE, "0")
+        .put(RuntimeConfigKeys.ALERT_RECONCILE_BACKLOG, "0");
   }
 
   /** 内存 AlertRepository:记录 insert/update/delete/prune 序列,维护活跃/已解决存储。 */
@@ -265,6 +266,36 @@ class AlertEngineTest {
   @Test void stuckAlive_thresholdZero_disabled() {
     Harness h = new Harness(base(3, 3, 0).put(RuntimeConfigKeys.ALERT_STUCK_ALIVE, "0"));
     when(h.shards.countStuckAliveRunning(anyInt())).thenReturn(5L); // 即便有卡死也因阈=0 不产出
+    h.engine.evaluateOnce();
+    assertTrue(h.alerts.active.isEmpty(), "阈=0 → 规则停用");
+  }
+
+  // ---- E3:reconcile-backlog 全局规则(镜像 stuck-alive)----
+
+  @Test void reconcileBacklog_aboveThreshold_opensEpisode() {
+    Harness h = new Harness(base(3, 3, 0).put(RuntimeConfigKeys.ALERT_RECONCILE_BACKLOG, "3"));
+    when(h.shards.countReclaimableRunning(any(), anyInt())).thenReturn(5L);
+    h.engine.evaluateOnce();
+    h.engine.evaluateOnce();
+    h.engine.evaluateOnce(); // 3 连续 active → OPEN
+    AlertEpisode e = h.episode("reconcile-backlog");
+    assertEquals("OPEN", e.status());
+    assertEquals(3, e.sampleCount());
+    assertEquals("5", e.openedValue());
+    assertEquals("high", e.severity());
+    assertNull(e.targetType(), "全局规则无 target");
+  }
+
+  @Test void reconcileBacklog_belowThreshold_noSignal() {
+    Harness h = new Harness(base(3, 3, 0).put(RuntimeConfigKeys.ALERT_RECONCILE_BACKLOG, "3"));
+    when(h.shards.countReclaimableRunning(any(), anyInt())).thenReturn(1L);
+    h.engine.evaluateOnce();
+    assertTrue(h.alerts.active.isEmpty(), "count(1) < 阈值(3) → 不产出信号");
+  }
+
+  @Test void reconcileBacklog_thresholdZero_disabled() {
+    Harness h = new Harness(base(3, 3, 0).put(RuntimeConfigKeys.ALERT_RECONCILE_BACKLOG, "0"));
+    when(h.shards.countReclaimableRunning(any(), anyInt())).thenReturn(5L);
     h.engine.evaluateOnce();
     assertTrue(h.alerts.active.isEmpty(), "阈=0 → 规则停用");
   }
