@@ -1,0 +1,18 @@
+package dev.scheduler.persistence;
+
+import java.util.List;
+
+/** reconcile_decision 决策原子仓库:append-only 写入 + 只读查询(指标 gauge + 活动视图)。 */
+public interface ReconcileDecisionRepository {
+  /** 追加一条决策(id/created_at 由 DB 生成)。 */
+  void record(ReconcileDecision d);
+
+  /** 近 1h 某 phase 的决策计数(DB now() - interval '1 hour',单一时钟,勿传 JVM 时钟)。 */
+  long countPhaseLastHour(String phase);
+
+  /** 活动视图:按 created_at DESC, id DESC 倒序分页。 */
+  List<ReconcileDecision> findRecent(int limit, int offset);
+
+  /** 活动全量计数(分页 total)。 */
+  long count();
+}
