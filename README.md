@@ -126,6 +126,13 @@ cd web && npm run dev                     # 开发，/api 与 /actuator 代理�
 | `GET` | `/api/v1/executions/dlq` | 死信 shard 列表（`Page<DlqRow>`，行含 `taskName`/`handlerRef` 与 `failureDetail` 最近一次失败日志）；query：`taskId` |
 | `POST` | `/api/v1/executions/shards/{shardId}/requeue` | 死信出队重跑 → `200 Shard` |
 
+### Reconcile（对账，E3 对账行为可观测化）
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `GET` | `/api/v1/reconcile/backlog` | 当前待回收积压明细（`Page<ReclaimableShard>`：`id/executionId/taskId/workerId/attempt/ageSeconds`）；query：`taskId` |
+| `GET` | `/api/v1/reconcile/activity` | 最近决策流水（`Page<ReconcileDecision>`，`reconcile_decision` 按 `created_at DESC, id DESC` 倒序） |
+
 ### Dags（工作流，M5.3）
 
 | 方法 | 路径 | 说明 |
