@@ -583,12 +583,13 @@ import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
   }
 ```
 
-新增一个决策断言助手(置于 `parentOutcomeCount` 之后):
+新增一个决策断言助手(置于 `parentOutcomeCount` 之后)。**必须按 `targetType` 消歧**:`RESTART IDENTITY` 后父 execution id == shard id == 1,`parent_aggregate`(target=父)与 `orphan_reclaim`(target=shard)会同 id 撞车。
 
 ```java
-  private List<ReconcileDecision> decisionsWhere(long targetId) {
+  private List<ReconcileDecision> shardDecisions(long shardId) {
     return decisions.findRecent(1000, 0).stream()
-        .filter(d -> d.targetId() == targetId).toList();
+        .filter(d -> d.targetType().equals("shard") && d.targetId() == shardId)
+        .toList();
   }
 ```
 
@@ -605,7 +606,7 @@ import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
     int n = reconciler().scanOnce();
     assertEquals(1, n);
 
-    var rows = decisionsWhere(sid);
+    var rows = shardDecisions(sid);
     assertEquals(1, rows.size(), "一次孤儿回收 → 一条决策");
     ReconcileDecision d = rows.get(0);
     assertEquals("orphan_reclaim", d.phase());
@@ -1396,4 +1397,4 @@ git commit -m "feat(e3): reconcile backlog/activity console views + metrics card
 - 端点:Task 6 覆盖 backlog/activity 分页 + Page 信封 + 只读(Mockito)。
 - 回归:离线 `mvn -o test -Dsurefire.failIfNoSpecifiedTests=false` 全绿 + 前端 `npm run build` 常绿。
 
-> 说明:Task 4 的 near-miss SKIPPED 分支当前无独立播种测试,可在 Step 1 追加——把某 shard 在 `scanOnce` 前已由另一路径改为非 RUNNING,断言 `decisionsWhere(sid)` 含一条 `phase=near_miss, outcome=SKIPPED, from=RUNNING, to=RUNNING` 行。若在实现期发现 near-miss 难以稳定播种(竞态时序),记录为 ruling 并在任务 review 中确认覆盖归属。
+> 说明:Task 4 的 near-miss SKIPPED 分支当前无独立播种测试,可在 Step 1 追加——把某 shard 在 `scanOnce` 前已由另一路径改为非 RUNNING,断言 `shardDecisions(sid)` 含一条 `phase=near_miss, outcome=SKIPPED, from=RUNNING, to=RUNNING` 行。若在实现期发现 near-miss 难以稳定播种(竞态时序),记录为 ruling 并在任务 review 中确认覆盖归属。
