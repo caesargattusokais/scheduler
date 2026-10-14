@@ -86,6 +86,32 @@ export interface StuckRow {
   progressTimeoutSeconds: number | null;
 }
 
+/** 待回收积压分片行(对账积压视图):属主已死仍 RUNNING 的已认领分片。 */
+export interface ReclaimableShard {
+  id: number;
+  executionId: number;
+  taskId: number;
+  workerId: string | null;
+  attempt: number;
+  ageSeconds: number;
+}
+
+/** 对账决策原子行(reconcile_decision,append-only):一次回收/汇聚/竞态裁决。 */
+export interface ReconcileDecision {
+  id: number;
+  createdAt: string | null;
+  phase: string;
+  targetType: string;
+  targetId: number;
+  taskId: number | null;
+  reason: string;
+  outcome: string | null;
+  fromStatus: string | null;
+  toStatus: string | null;
+  attempt: number | null;
+  detail: string | null;
+}
+
 export interface ExecutionDetail {
   id: number;
   taskId: number;

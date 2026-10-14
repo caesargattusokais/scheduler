@@ -28,6 +28,8 @@ import type {
   SessionsRevokeResult,
   Shard,
   StuckRow,
+  ReclaimableShard,
+  ReconcileDecision,
   Task,
   UpdateTaskRequest,
   UpsertOperatorRequest,
@@ -169,6 +171,15 @@ export const getStuck = (p: { taskId?: number; limit?: number; offset?: number }
 /** E2-B 强制放弃:属主必须已非 ALIVE(后端 409 兜底);需先停 worker。 */
 export const forceAbandonShard = (shardId: number) =>
   req<Shard>(`/api/v1/executions/shards/${shardId}/abandon`, { method: 'POST' });
+
+// ---- E3 对账可观测(只读)----
+export interface ListReconcileBacklogParams { taskId?: number; limit?: number; offset?: number; }
+/** 待回收积压明细(对账积压页)。 */
+export const getReconcileBacklog = (p: ListReconcileBacklogParams = {}): Promise<Page<ReclaimableShard>> =>
+  req<Page<ReclaimableShard>>(`/api/v1/reconcile/backlog${qstr(p)}`);
+/** 最近决策流水(对账流水页)。 */
+export const getReconcileActivity = (p: { limit?: number; offset?: number } = {}): Promise<Page<ReconcileDecision>> =>
+  req<Page<ReconcileDecision>>(`/api/v1/reconcile/activity${qstr(p)}`);
 
 // ---- DAG ----
 export interface ListDagsParams {

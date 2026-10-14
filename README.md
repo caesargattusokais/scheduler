@@ -91,6 +91,7 @@ cd web && npm run dev                     # 开发，/api 与 /actuator 代理�
 | `/tasks` | 任务列表 | 任务 CRUD、编辑、暂停/恢复、手动触发、重跑；5s 轮询 |
 | `/executions` | 执行列表 | 按 任务/状态/时间窗 过滤 + 分页；查看执行明细；取消执行 |
 | `/dlq` | 死信队列 | 列出 `dead_letter` shard；单条 requeue 回队 |
+| `/reconcile` | 对账 | 待回收积压明细 + 最近决策流水（append-only reconcile_decision） |
 | `/dags` | 工作流 (DAG) | 工作流列表（启停/分页）+ 新建工作流可视化构建器（添加步骤、每步勾选上游）+ run 批次/详情 + 单节点重跑、终止批次；5s 轮询 |
 | `/metrics` | 指标面板 | 5 核心指标卡 + 内联 SVG sparkline；5s 轮询 |
 
