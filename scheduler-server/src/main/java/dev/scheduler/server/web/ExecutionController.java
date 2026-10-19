@@ -206,7 +206,10 @@ public class ExecutionController {
       throw new ResponseStatusException(HttpStatus.CONFLICT,
           "owner worker " + s.workerId() + " is still ALIVE; stop it before force-abandon");
     }
-    workers.markOffline(s.workerId(), Instant.now().minusSeconds(600)); // 防御性摘活(即便守卫已过仍兜底)
+    // 防御性摘活(即便守卫已过仍兜底):回拨量必须严格超出**配置**窗,否则窗被调大(≥600s)时
+    // 这个"极早"的时间戳落回窗内 → 刚判死的属主立刻复活,与刚通过的活性门自相矛盾。600s 为下限(保持原有
+    // "久远到不会立刻复归"的语义),窗更大时随之放大。
+    workers.markOffline(s.workerId(), Instant.now().minusSeconds(Math.max(600L, 2L * staleAfterSeconds)));
     shards.markStatus(shardId, ExecutionStatus.FAILED, s.workerId(), "operator force-abandon");
     shards.requeueShard(shardId);
     auditor.record(current.get(), "shard.force-abandon", TargetType.SHARD, shardId, Map.of(), null, shardBefore(s));

@@ -1,6 +1,8 @@
 package dev.scheduler.server.web;
 
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -12,8 +14,11 @@ import dev.scheduler.persistence.ShardRepository;
 import dev.scheduler.persistence.WorkerRepository;
 import dev.scheduler.server.security.CurrentOperator;
 import dev.scheduler.server.service.AuditRecorder;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.Optional;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.web.server.ResponseStatusException;
 
@@ -43,5 +48,29 @@ class ExecutionControllerAbandonWindowTest {
     assertThrows(ResponseStatusException.class, () -> c.abandon(7L),
         "配置窗内属主仍 ALIVE → 409 拒绝(不得按 30s 判死放行)");
     verify(workers).isAlive("w", 60);
+  }
+
+  /** 放行后的防御性摘活必须把属主推离**配置**窗:窗 ≥ 600s 时,固定 600s 的回拨落回窗内 →
+   *  刚被摘活的 worker 立刻复活,与刚通过的活性门自相矛盾(门说死、摘活说活)。回拨量须随窗放大。 */
+  @Test void abandon_backdatesOwnerOutsideConfiguredWindow() {
+    ExecutionRepository executions = mock(ExecutionRepository.class);
+    ShardRepository shards = mock(ShardRepository.class);
+    WorkerRepository workers = mock(WorkerRepository.class);
+    AuditRecorder auditor = mock(AuditRecorder.class);
+    CurrentOperator current = mock(CurrentOperator.class);
+    Shard running = new Shard(7L, 1L, 0, null, ExecutionStatus.RUNNING, 1, "w", null, null,
+        false, false, null, null, null);
+    when(shards.findShard(7L)).thenReturn(Optional.of(running));
+    when(workers.isAlive("w", 600)).thenReturn(false); // 门放行:600s 窗内判死
+    ExecutionController c = new ExecutionController(executions, shards, workers,
+        mock(JdbcTemplate.class), auditor, current, 600);
+
+    c.abandon(7L);
+
+    ArgumentCaptor<Instant> markedAt = ArgumentCaptor.forClass(Instant.class);
+    verify(workers).markOffline(eq("w"), markedAt.capture());
+    long backdated = Duration.between(markedAt.getValue(), Instant.now()).getSeconds();
+    assertTrue(backdated > 600,
+        "摘活回拨须严格超出配置窗(600s),否则 worker 立刻复活;实际回拨 " + backdated + "s");
   }
 }
