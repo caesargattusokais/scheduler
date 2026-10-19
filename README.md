@@ -32,7 +32,7 @@ mvn spring-boot:run -pl scheduler-server
 | `DB_USER` / `DB_PASSWORD` | `scheduler` / `scheduler` | 数据库账号 |
 | `SCHEDULER_WORKER_ID` | 空 | 节点 workerId；空则用 hostname 派生 |
 | `SCHEDULER_LOOP_SCAN_DELAY_MS` | `5000` | 引擎扫描周期 |
-| `SCHEDULER_WORKER_STALE_AFTER_SECONDS` | `30` | owner worker 心跳失联判定窗口(活性优先接管) |
+| `SCHEDULER_WORKER_STALE_AFTER_SECONDS` | `30` | owner worker 心跳失联判定窗口(活性优先接管)。**实际有效上限 60s**：worker 侧自清把 `last_seen` 早于 60s 的行删除，而回收判据把「行缺失」视为死亡，故调至 >60s 不再延长回收窗 |
 | `SCHEDULER_RECONCILE_DELAY_MS` | `15000` | 对账回收/终态汇聚周期 |
 
 Flyway 自动迁移 schema。多节点实例共享同一数据库，经 advisory lock 选主协调。

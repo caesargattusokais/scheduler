@@ -23,8 +23,11 @@ public class WorkerRegistrar {
   public void heartbeat() {
     Instant now = clock.instant();
     repo.upsertHeartbeat(new WorkerRegistration(workerId, registry.refs(), now, "ALIVE"));
-    // 自清死行:存活判断全靠读时 30s 窗口(findAllAlive),故 last_seen 早于 60s 的必定非活，
-    // 删之零误伤。60s = 2× 读侧 LIVE_WINDOW(AvailableHandlerRefs) + 余量,活行(心跳 ≤10s)永不误删。
+    // 自清死行:存活判断全靠读时窗口(findAllAlive),故 last_seen 早于 60s 的必定非活,删之零误伤。
+    // 60s = 2× 读侧 LIVE_WINDOW(AvailableHandlerRefs) + 余量,活行(心跳 ≤10s)永不误删。
+    // ⚠ 已知边界:这个硬编码 60s 实际上封顶了活性窗——回收侧 findExpiredRunning 把「worker 行缺失」判为死,
+    //   故把 scheduler.worker.stale-after-seconds 调到 >60s 不会真的延长回收窗(行先被本清理删掉,孤儿提前被回收)。
+    //   调窗上限按 60s 计;要真正放开需让清理阈值随该属性放大。
     repo.purgeStale(now.minusSeconds(60));
   }
 
