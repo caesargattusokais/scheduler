@@ -1,10 +1,7 @@
 package dev.scheduler.persistence;
 
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.jdbc.core.RowCallbackHandler;
 import org.springframework.jdbc.core.RowMapper;
 
 public class JdbcReconcileDecisionRepository implements ReconcileDecisionRepository {
@@ -37,14 +34,11 @@ public class JdbcReconcileDecisionRepository implements ReconcileDecisionReposit
         d.outcome(), d.fromStatus(), d.toStatus(), d.attempt(), d.detail());
   }
 
-  @Override public Map<String, Long> countPhasesLastHour() {
-    Map<String, Long> out = new HashMap<>();
-    jdbc.query("""
-        SELECT phase, count(*) AS c FROM reconcile_decision
-        WHERE created_at >= now() - interval '1 hour'
-        GROUP BY phase""",
-        (RowCallbackHandler) rs -> out.put(rs.getString("phase"), rs.getLong("c")));
-    return out;
+  @Override public long countPhaseLastHour(String phase) {
+    Long c = jdbc.queryForObject(
+        "SELECT count(*) FROM reconcile_decision WHERE phase=? AND created_at >= now() - interval '1 hour'",
+        Long.class, phase);
+    return c == null ? 0 : c;
   }
 
   @Override public List<ReconcileDecision> findRecent(int limit, int offset) {

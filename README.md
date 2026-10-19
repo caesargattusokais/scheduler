@@ -93,7 +93,7 @@ cd web && npm run dev                     # 开发，/api 与 /actuator 代理�
 | `/dlq` | 死信队列 | 列出 `dead_letter` shard；单条 requeue 回队 |
 | `/reconcile` | 对账 | 待回收积压明细 + 最近决策流水（append-only reconcile_decision） |
 | `/dags` | 工作流 (DAG) | 工作流列表（启停/分页）+ 新建工作流可视化构建器（添加步骤、每步勾选上游）+ run 批次/详情 + 单节点重跑、终止批次；5s 轮询 |
-| `/metrics` | 指标面板 | 16 张指标卡 + 内联 SVG sparkline + 执行 SLO 快照；5s 轮询 |
+| `/metrics` | 指标面板 | 15 张指标卡 + 内联 SVG sparkline + 执行 SLO 快照；5s 轮询 |
 
 ## REST API
 
@@ -152,7 +152,7 @@ cd web && npm run dev                     # 开发，/api 与 /actuator 代理�
 
 ## 指标（Prometheus）
 
-后端暴露 `/actuator/prometheus`（`management.endpoints.web.exposure.include: health,info,prometheus`）。控制台 `/metrics` 页聚合为 16 张 gauge 卡（另有执行 SLO 快照卡，取自 `/api/v1/metrics/executions`，非 Prometheus）。除表末两行外**均为全局懒查询 gauge**（scrape 时实读 DB，不带任何标签）：新建任务/DAG 无需重启即计入。
+后端暴露 `/actuator/prometheus`（`management.endpoints.web.exposure.include: health,info,prometheus`）。控制台 `/metrics` 页聚合为 15 张 gauge 卡（另有执行 SLO 快照卡，取自 `/api/v1/metrics/executions`，非 Prometheus）。除表末两行外**均为全局懒查询 gauge**（scrape 时实读 DB，不带任何标签）：新建任务/DAG 无需重启即计入。
 
 | 指标 | 含义 |
 |------|------|
@@ -165,7 +165,6 @@ cd web && npm run dev                     # 开发，/api 与 /actuator 代理�
 | `scheduler_execution_failed_1h` | 近 1h 失败执行数 |
 | `scheduler_execution_failure_rate_1h` | 近 1h 失败率 = 失败 /(完成+失败)，无样本 → 0 |
 | `scheduler_execution_latency_p95_ms` | 近 24h 完成延迟 p95（毫秒） |
-| `scheduler_reconcile_reclaimed_1h` | 近 1h 对账回收分片数(`timeout_reclaim` + `orphan_reclaim` 计数,读 `reconcile_decision`) |
 | `scheduler_reconcile_timeout_reclaimed_1h` | 近 1h 超时回收计数 |
 | `scheduler_reconcile_orphan_reclaimed_1h` | 近 1h 孤儿回收计数 |
 | `scheduler_reconcile_aggregated_1h` | 近 1h 父级汇聚计数 |
