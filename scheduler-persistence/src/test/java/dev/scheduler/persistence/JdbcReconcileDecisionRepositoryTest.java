@@ -30,17 +30,21 @@ class JdbcReconcileDecisionRepositoryTest extends AbstractPostgresTest {
     assertNotNull(d.createdAt(), "DB now() 盖章 created_at");
   }
 
-  @Test void countPhaseLastHour_onlyCountsMatchingPhaseWithinWindow() {
+  @Test void countPhasesLastHour_groupsByPhaseWithinWindow() {
     repo.record(ReconcileDecision.of("near_miss", "shard", 1L, null, "r", "SKIPPED",
         "RUNNING", "RUNNING", 1, null));
-    repo.record(ReconcileDecision.of("parent_aggregate", "execution", 2L, null, "all ok",
+    repo.record(ReconcileDecision.of("near_miss", "shard", 2L, null, "r", "SKIPPED",
+        "RUNNING", "RUNNING", 1, null));
+    repo.record(ReconcileDecision.of("parent_aggregate", "execution", 3L, null, "all ok",
         "SUCCESS", "DUE", "SUCCESS", null, null));
     // 拨旧 2h 的 near_miss:落在 1h 窗外,不计入。
-    jdbc.update("UPDATE reconcile_decision SET created_at = now() - interval '2 hours' WHERE phase='near_miss'");
+    jdbc.update("UPDATE reconcile_decision SET created_at = now() - interval '2 hours' WHERE target_id=1");
 
-    assertEquals(0L, repo.countPhaseLastHour("near_miss"), "1h 窗外的行不计入");
-    assertEquals(1L, repo.countPhaseLastHour("parent_aggregate"));
-    assertEquals(0L, repo.countPhaseLastHour("timeout_reclaim"));
+    var counts = repo.countPhasesLastHour();
+
+    assertEquals(1L, counts.get("near_miss"), "窗内 1 条(窗外的 target_id=1 被拨旧)");
+    assertEquals(1L, counts.get("parent_aggregate"));
+    assertNull(counts.get("timeout_reclaim"), "无该 phase → 不出现在结果里(调用方按 0 处理)");
   }
 
   @Test void findRecent_ordersByCreatedAtDescThenIdDesc_andCounts() {

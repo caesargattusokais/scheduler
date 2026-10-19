@@ -2,12 +2,14 @@ package dev.scheduler.server.config;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import dev.scheduler.persistence.ReconcileDecisionRepository;
 import dev.scheduler.persistence.ShardRepository;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import java.util.Map;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -35,5 +37,24 @@ class ReconcileMetricsWiringTest {
 
     verify(shards).countReclaimableRunning(null, 60);
     verify(shards).maxReclaimableAgeSeconds(60);
+  }
+
+  /** 单次 scrape 内 5 个 phase gauge 共享一次 GROUP BY:同一份 1h 计数不重复打库。
+   *  曾为 6 次 count 查询(聚合 gauge 与两个分量 gauge 各打一遍)。 */
+  @Test void phaseGauges_shareOneCountQueryPerScrape() {
+    ReconcileDecisionRepository decisions = mock(ReconcileDecisionRepository.class);
+    ShardRepository shards = mock(ShardRepository.class);
+    when(decisions.countPhasesLastHour()).thenReturn(Map.of(
+        "timeout_reclaim", 2L, "orphan_reclaim", 3L, "parent_aggregate", 4L, "near_miss", 5L));
+    SimpleMeterRegistry registry = new SimpleMeterRegistry();
+    new Beans().reconcileMetrics(decisions, shards, 30).bindTo(registry);
+
+    assertEquals(5.0, registry.get("scheduler_reconcile_reclaimed_1h").gauge().value(), "timeout+orphan");
+    assertEquals(2.0, registry.get("scheduler_reconcile_timeout_reclaimed_1h").gauge().value());
+    assertEquals(3.0, registry.get("scheduler_reconcile_orphan_reclaimed_1h").gauge().value());
+    assertEquals(4.0, registry.get("scheduler_reconcile_aggregated_1h").gauge().value());
+    assertEquals(5.0, registry.get("scheduler_reconcile_near_miss_1h").gauge().value());
+
+    verify(decisions, times(1)).countPhasesLastHour();
   }
 }

@@ -291,23 +291,47 @@ public class Beans {
   @Bean
   MeterBinder reconcileMetrics(ReconcileDecisionRepository decisions, ShardRepository shards,
                                @Value("${scheduler.worker.stale-after-seconds:30}") int staleAfterSeconds) {
+    // 5 个 phase gauge 共用一份 1h 计数快照:一次 GROUP BY 而非每 gauge 各打一遍(聚合 gauge 曾与其两个分量重复)。
+    PhaseCounts counts = new PhaseCounts(decisions);
     return registry -> {
       Gauge.builder("scheduler_reconcile_reclaimed_1h",
-          () -> (double) (decisions.countPhaseLastHour("timeout_reclaim")
-              + decisions.countPhaseLastHour("orphan_reclaim"))).register(registry);
+          () -> (double) (counts.get("timeout_reclaim") + counts.get("orphan_reclaim"))).register(registry);
       Gauge.builder("scheduler_reconcile_timeout_reclaimed_1h",
-          () -> (double) decisions.countPhaseLastHour("timeout_reclaim")).register(registry);
+          () -> (double) counts.get("timeout_reclaim")).register(registry);
       Gauge.builder("scheduler_reconcile_orphan_reclaimed_1h",
-          () -> (double) decisions.countPhaseLastHour("orphan_reclaim")).register(registry);
+          () -> (double) counts.get("orphan_reclaim")).register(registry);
       Gauge.builder("scheduler_reconcile_aggregated_1h",
-          () -> (double) decisions.countPhaseLastHour("parent_aggregate")).register(registry);
+          () -> (double) counts.get("parent_aggregate")).register(registry);
       Gauge.builder("scheduler_reconcile_near_miss_1h",
-          () -> (double) decisions.countPhaseLastHour("near_miss")).register(registry);
+          () -> (double) counts.get("near_miss")).register(registry);
       Gauge.builder("scheduler_reconcile_backlog",
           () -> (double) shards.countReclaimableRunning(null, staleAfterSeconds)).register(registry);
       Gauge.builder("scheduler_reconcile_backlog_max_age_seconds",
           () -> (double) shards.maxReclaimableAgeSeconds(staleAfterSeconds)).register(registry);
     };
+  }
+
+  /** 单次 scrape 内共享的 1h phase 计数快照:一次 GROUP BY 取回全部 phase,TTL 窗口内的重复求值复用同一份。
+   *  Micrometer 逐个求值 gauge,故共享必须靠短期缓存;Prometheus 默认 15s 抓一次,1s TTL 足以让同一 scrape
+   *  的各 gauge 命中同一快照,又不会跨 scrape 供旧值。仍保持 lazy(首个读值才查库)。 */
+  private static final class PhaseCounts {
+    private static final long TTL_NANOS = java.time.Duration.ofSeconds(1).toNanos();
+    private final ReconcileDecisionRepository decisions;
+    private java.util.Map<String, Long> snapshot = java.util.Map.of();
+    private long expiresAtNanos;
+
+    PhaseCounts(ReconcileDecisionRepository decisions) {
+      this.decisions = decisions;
+    }
+
+    synchronized long get(String phase) {
+      long now = System.nanoTime();
+      if (now - expiresAtNanos >= 0) { // 首次(0)或已过期 → 重取
+        snapshot = decisions.countPhasesLastHour();
+        expiresAtNanos = now + TTL_NANOS;
+      }
+      return snapshot.getOrDefault(phase, 0L);
+    }
   }
 
   /** worker 存活判定窗口:last_seen 距今 ≤ 30s 视为存活(与 AvailableHandlerRefs 同窗)。 */
