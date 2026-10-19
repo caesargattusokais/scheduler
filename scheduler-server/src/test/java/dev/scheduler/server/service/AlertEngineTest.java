@@ -8,6 +8,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import dev.scheduler.core.AlertEpisode;
@@ -137,8 +138,13 @@ class AlertEngineTest {
     final AlertEngine engine;
 
     Harness(Config cfg) {
+      this(cfg, 30);
+    }
+
+    Harness(Config cfg, int staleAfterSeconds) {
       this.settings = cfg.service();
-      this.engine = new AlertEngine(metrics, shards, notifs, audits, workers, dags, settings, alerts);
+      this.engine = new AlertEngine(metrics, shards, notifs, audits, workers, dags, settings, alerts,
+          staleAfterSeconds);
     }
     Harness slo(ExecutionSlo s) { when(metrics.snapshots(any())).thenReturn(s); return this; }
     AlertEpisode episode(String key) { return alerts.findActiveByKey(key).orElseThrow(); }
@@ -298,6 +304,21 @@ class AlertEngineTest {
     when(h.shards.countReclaimableRunning(any(), anyInt())).thenReturn(5L);
     h.engine.evaluateOnce();
     assertTrue(h.alerts.active.isEmpty(), "阈=0 → 规则停用");
+  }
+
+  /** §12 同源:活性窗来自注入配置(与 Reconciler 同值),stuck-alive 与 reconcile-backlog 共用同一值——
+   *  硬编码 30 会让告警对「对账器有意保留 RUNNING」的分片误报。 */
+  @Test void livenessWindow_configuredValueUsedByBothRules() {
+    Harness h = new Harness(base(3, 3, 0)
+        .put(RuntimeConfigKeys.ALERT_STUCK_ALIVE, "1")
+        .put(RuntimeConfigKeys.ALERT_RECONCILE_BACKLOG, "1"), 60);
+    when(h.shards.countStuckAliveRunning(60)).thenReturn(0L);
+    when(h.shards.countReclaimableRunning(null, 60)).thenReturn(0L);
+
+    h.engine.evaluateOnce();
+
+    verify(h.shards).countStuckAliveRunning(60);
+    verify(h.shards).countReclaimableRunning(null, 60);
   }
 
   // ---- per-task / per-dag 独立键 ----

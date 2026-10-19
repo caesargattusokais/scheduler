@@ -285,12 +285,12 @@ public class Beans {
     };
   }
 
-  /** E3 对账观测 gauge:决策计数(1h 滚动)读 reconcile_decision;积压/积压龄读 execution_shard(活体门 stale=30)。
+  /** E3 对账观测 gauge:决策计数(1h 滚动)读 reconcile_decision;积压/积压龄读 execution_shard。
+   *  活性窗与 Reconciler 同源(scheduler.worker.stale-after-seconds,spec §12),避免观测面与回收面漂移。
    *  全部 lazy 查 DB(scrape 时求值),与既有 scheduler_* gauge 同款。 */
-  private static final int RECONCILE_STALE_SECONDS = 30;
-
   @Bean
-  MeterBinder reconcileMetrics(ReconcileDecisionRepository decisions, ShardRepository shards) {
+  MeterBinder reconcileMetrics(ReconcileDecisionRepository decisions, ShardRepository shards,
+                               @Value("${scheduler.worker.stale-after-seconds:30}") int staleAfterSeconds) {
     return registry -> {
       Gauge.builder("scheduler_reconcile_reclaimed_1h",
           () -> (double) (decisions.countPhaseLastHour("timeout_reclaim")
@@ -304,9 +304,9 @@ public class Beans {
       Gauge.builder("scheduler_reconcile_near_miss_1h",
           () -> (double) decisions.countPhaseLastHour("near_miss")).register(registry);
       Gauge.builder("scheduler_reconcile_backlog",
-          () -> (double) shards.countReclaimableRunning(null, RECONCILE_STALE_SECONDS)).register(registry);
+          () -> (double) shards.countReclaimableRunning(null, staleAfterSeconds)).register(registry);
       Gauge.builder("scheduler_reconcile_backlog_max_age_seconds",
-          () -> (double) shards.maxReclaimableAgeSeconds(RECONCILE_STALE_SECONDS)).register(registry);
+          () -> (double) shards.maxReclaimableAgeSeconds(staleAfterSeconds)).register(registry);
     };
   }
 
@@ -480,12 +480,16 @@ public class Beans {
     return new JdbcAlertRepository(jdbc);
   }
 
-  /** 告警引擎:消费 ExecutionMetrics/各仓储/runtime 热键,支持 8 条规则的状态机;由 AlertLoop 每拍驱动。 */
+  /** 告警引擎:消费 ExecutionMetrics/各仓储/runtime 热键,支持 10 条规则的状态机;由 AlertLoop 每拍驱动。
+   *  活性窗与 Reconciler 同源(scheduler.worker.stale-after-seconds),否则 stuck-alive / reconcile-backlog
+   *  会对「对账器有意保留 RUNNING」的分片误报。 */
   @Bean
   AlertEngine alertEngine(ExecutionMetrics metrics, ShardRepository shards,
       NotificationRepository notifs, AuditRepository audits, WorkerRepository workers,
-      DagRepository dags, RuntimeConfigService settings, AlertRepository alertRepo) {
-    return new AlertEngine(metrics, shards, notifs, audits, workers, dags, settings, alertRepo);
+      DagRepository dags, RuntimeConfigService settings, AlertRepository alertRepo,
+      @Value("${scheduler.worker.stale-after-seconds:30}") int staleAfterSeconds) {
+    return new AlertEngine(metrics, shards, notifs, audits, workers, dags, settings, alertRepo,
+        staleAfterSeconds);
   }
 
   /** AlertLoop bean(循环实现与语义见下方内嵌类)。 */
