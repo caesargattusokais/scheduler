@@ -12,6 +12,8 @@ import dev.scheduler.persistence.retry.FailureOutcome;
 import dev.scheduler.persistence.retry.FailureResolver;
 import dev.scheduler.server.service.NotificationFirer;
 import java.util.List;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * 对账器:回收租约过期的孤儿 RUNNING shard(id 已认领却迟迟未回写),并对已收敛的父级做终态汇聚。
@@ -23,6 +25,8 @@ import java.util.List;
  * E3:每次回收/汇聚/竞态裁决经 ReconcileTelemetry 落 reconcile_decision 行(append-only,纯观测,不改恢复语义)。
  */
 public class Reconciler {
+  private static final Logger log = LoggerFactory.getLogger(Reconciler.class);
+
   private final TaskRepository tasks;
   private final ShardRepository shards;
   private final FailureResolver failureResolver;
@@ -61,7 +65,8 @@ public class Reconciler {
       if (task.timeoutSeconds() > 0) {
         for (ExpiredShard run : shards.findOverRuntime(task.id(), task.timeoutSeconds(), staleAfterSeconds)) {
           if (reclaim(task, run, "timeout_reclaim", "runtime timeout")) {
-            firer.shardTimedOut(run.id(), task.id(), run.attempt(), task.timeoutSeconds());
+            fireQuietly("execution.timeout for shard " + run.id(),
+                () -> firer.shardTimedOut(run.id(), task.id(), run.attempt(), task.timeoutSeconds()));
             reclaimed++;
           }
         }
@@ -76,6 +81,16 @@ public class Reconciler {
     }
     aggregateParents();
     return reclaimed;
+  }
+
+  /** 点火隔离:通知属观测面,底座抖动只丢这一条通知,不得中止对账推进(回收/汇聚已落库)。
+   *  否则一条通知异常会把剩余分片与父级汇聚一起跳过,恢复语义被观测面带下水。 */
+  private void fireQuietly(String what, Runnable firing) {
+    try {
+      firing.run();
+    } catch (RuntimeException firingFailed) {
+      log.warn("reconcile: fire {} failed (reconcile step already applied)", what, firingFailed);
+    }
   }
 
   /** 单条回收 + 决策留痕:markStatus 成功 → handle 返回 outcome 落 phase 决策;CAS 失手/非法迁移 → near_miss SKIPPED。 */
@@ -128,9 +143,13 @@ public class Reconciler {
       }
       // 事件点火(次序:先死信、再父终态;均在父收敛落库后,幂等由 key 保证只发一次)——与最终化返回值无关,保持原语义。
       for (Shard s : parent) {
-        if (s.deadLetter()) firer.shardDeadLettered(pid, s.id(), s.attempt());
+        if (s.deadLetter()) {
+          fireQuietly("execution.dead_letter for shard " + s.id(),
+              () -> firer.shardDeadLettered(pid, s.id(), s.attempt()));
+        }
       }
-      firer.parentTerminal(pid, parentTerminal, parent);
+      fireQuietly("parent terminal for execution " + pid,
+          () -> firer.parentTerminal(pid, parentTerminal, parent));
     }
   }
 }

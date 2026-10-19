@@ -2,8 +2,15 @@ package dev.scheduler.server.reconcile;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.scheduler.core.Execution;
@@ -578,6 +585,79 @@ class ReconcilerTest {
     assertEquals("RUNNING", d.toStatus());
     assertEquals("owner unresponsive", d.reason());
     assertTrue(fired.isEmpty(), "near-miss 不点火任何事件");
+  }
+
+  /** 点火失败隔离:某片发 execution.timeout 抛异常,不得中止整趟扫描——该片已回收,后续片与父级汇聚仍完成。
+   *  观测面(通知底座)抖动不应把对账回收(恢复语义)带下水。 */
+  @Test void firerThrows_shardStillReclaimedAndScanContinues() {
+    long taskId = createTaskTimed(3);
+    long parentId = seedParentWithShards(taskId, 2);
+    long first = shard(parentId, 0).id();
+    long second = shard(parentId, 1).id();
+    // 两片同为「死属主 + 运行超限」→ 阶段 1 超时回收路径(回收后点火 execution.timeout)。
+    for (long sid : List.of(first, second)) {
+      jdbc.update("UPDATE execution_shard SET status='RUNNING', worker_id=?,"
+          + " lease_until=now()+interval '60 seconds', attempt=1,"
+          + " started_at=now() - interval '10 minutes' WHERE id=?", "w-" + sid, sid);
+      jdbc.update("INSERT INTO worker (id, refs, last_seen, status)"
+          + " VALUES (?, '', now() - interval '2 minutes', 'ALIVE')", "w-" + sid);
+    }
+    // 点火整体不可用:每次 shardTimedOut 都抛。
+    NotificationFirer firer = mock(NotificationFirer.class);
+    doThrow(new IllegalStateException("notification hub down"))
+        .when(firer).shardTimedOut(anyLong(), anyLong(), anyInt(), anyInt());
+    Reconciler rc = new Reconciler(tasks, shards,
+        new FailureResolver(shards, new RetryPolicy(), CLOCK), firer, telemetry, "reconciler", 30);
+
+    int n = rc.scanOnce();
+
+    assertEquals(2, n, "点火抛异常仍回收两片(回收先于点火,失败只影响通知)");
+    assertEquals(ExecutionStatus.FAILED, shards.findShard(first).orElseThrow().status());
+    assertEquals(ExecutionStatus.FAILED, shards.findShard(second).orElseThrow().status(),
+        "首片点火异常不得中止后续片回收");
+    assertEquals(ExecutionStatus.FAILED, shards.findParent(parentId).orElseThrow().status(),
+        "异常不得跳过父级终态汇聚");
+    assertEquals(1L, parentOutcomeCount(parentId, "FAILED"), "父级 outcome 正常落库");
+  }
+
+  /** 父级汇聚路径的点火同样隔离:parentTerminal 抛异常不得中止其余父级的汇聚(与回收路径同一失败隔离)。 */
+  @Test void firerThrows_onParentTerminal_otherParentsStillAggregated() {
+    long taskId = createTask(1, 0, 1000, null);
+    long first = seedParentWithShards(taskId, 1);
+    long second = seedParentWithShards(taskId, 1);
+    setShard(shard(first, 0), "SUCCESS", null);
+    setShard(shard(second, 0), "SUCCESS", null);
+    NotificationFirer firer = mock(NotificationFirer.class);
+    doThrow(new IllegalStateException("notification hub down"))
+        .when(firer).parentTerminal(anyLong(), any(), any());
+    Reconciler rc = new Reconciler(tasks, shards,
+        new FailureResolver(shards, new RetryPolicy(), CLOCK), firer, telemetry, "reconciler", 30);
+
+    rc.scanOnce();
+
+    assertEquals(ExecutionStatus.SUCCESS, shards.findParent(first).orElseThrow().status());
+    assertEquals(ExecutionStatus.SUCCESS, shards.findParent(second).orElseThrow().status(),
+        "首个父级点火异常不得跳过后续父级汇聚");
+  }
+
+  /** 同一父级下多个死信片的点火隔离:fireQuietly 的 catch 在循环体内 → 每片各自隔离,首片抛异常
+   *  不得吞掉后续兄弟片的事件(死信片事件只在父级汇聚这一趟发一次,漏发即永久丢失)。 */
+  @Test void firerThrows_onDeadLetter_everySiblingStillFires() {
+    long taskId = createTask(1, 0, 1000, null);
+    long parentId = seedParentWithShards(taskId, 3);
+    for (int i = 0; i < 3; i++) {
+      jdbc.update("UPDATE execution_shard SET status='FAILED', dead_letter=true WHERE id=?",
+          shard(parentId, i).id());
+    }
+    NotificationFirer firer = mock(NotificationFirer.class);
+    doThrow(new IllegalStateException("notification hub down"))
+        .when(firer).shardDeadLettered(anyLong(), anyLong(), anyInt());
+    Reconciler rc = new Reconciler(tasks, shards,
+        new FailureResolver(shards, new RetryPolicy(), CLOCK), firer, telemetry, "reconciler", 30);
+
+    rc.scanOnce();
+
+    verify(firer, times(3)).shardDeadLettered(anyLong(), anyLong(), anyInt());
   }
 }
 

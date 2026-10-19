@@ -21,8 +21,10 @@ import java.util.Optional;
 import java.util.Set;
 
 /**
- * 告警引擎(五方向·2):每评估拍读热键阈值,跨 8 条规则(全局 + per-task + per-DAG)汇聚信号,
+ * 告警引擎(五方向·2):每评估拍读热键阈值,跨 10 条规则(全局 + per-task + per-DAG)汇聚信号,
  * 并把每条 {@code alert_episode} 按键推进 PENDING→OPEN→RESOLVED 状态机。
+ * 规则清单:audit-tamper / dlq-depth / delivery-failed / failure-rate / p95-latency / worker-offline /
+ * task-failure-rate / dag-run-failed / stuck-alive / reconcile-backlog。
  *
  * 纯类 + 构造器注入(镜像 {@link RuntimeConfigService}/{@link ExecutionMetrics}),不加 @Component;
  * 由 Task 6 作为 @Bean 装配,每拍调 {@link #evaluateOnce()}。
@@ -32,7 +34,6 @@ public class AlertEngine {
   private static final int MIN_TOTAL = 3;
   private static final int DAG_FAIL_WINDOW_SECONDS = 3600;
   private static final int WORKER_OFFLINE_WINDOW_SECONDS = 30;
-  private static final int STUCK_ALIVE_STALE_SECONDS = 30;
 
   private final ExecutionMetrics metrics;
   private final ShardRepository shards;
@@ -42,11 +43,14 @@ public class AlertEngine {
   private final DagRepository dags;
   private final RuntimeConfigService settings;
   private final AlertRepository repo;
+  /** 活性窗(秒):与 Reconciler 的回收判据同源(scheduler.worker.stale-after-seconds,spec §12)。 */
+  private final int staleAfterSeconds;
 
   public AlertEngine(ExecutionMetrics metrics, ShardRepository shards,
                      NotificationRepository notifications, AuditRepository audits,
                      WorkerRepository workers, DagRepository dags,
-                     RuntimeConfigService settings, AlertRepository repo) {
+                     RuntimeConfigService settings, AlertRepository repo,
+                     int staleAfterSeconds) {
     this.metrics = metrics;
     this.shards = shards;
     this.notifications = notifications;
@@ -55,6 +59,7 @@ public class AlertEngine {
     this.dags = dags;
     this.settings = settings;
     this.repo = repo;
+    this.staleAfterSeconds = staleAfterSeconds;
   }
 
   /** 一个告警信号:规则归属(rule/target) + 严重级 + 观测值 + 是否超阈(active)。 */
@@ -95,7 +100,7 @@ public class AlertEngine {
     return (int) Math.min(Math.max(v, 1L), 10000L);
   }
 
-  /** 组装 8 条规则信号(阈=0/停用即跳过该规则)。 */
+  /** 组装 10 条规则信号(阈=0/停用即跳过该规则)。 */
   private List<Signal> collectSignals() {
     List<Signal> out = new ArrayList<>();
     ExecutionSlo slo = metrics.snapshots(null);
@@ -173,14 +178,14 @@ public class AlertEngine {
     // stuck-alive(全局, medium):存在属主仍 ALIVE 但已超其运行预算的 RUNNING 分片(自观测;B1 不改活体)。
     long stuckThr = settings.getLong(RuntimeConfigKeys.ALERT_STUCK_ALIVE, 1L);
     if (stuckThr > 0) {
-      long n = shards.countStuckAliveRunning(STUCK_ALIVE_STALE_SECONDS);
+      long n = shards.countStuckAliveRunning(staleAfterSeconds);
       out.add(new Signal("stuck-alive", null, null, "medium", Long.toString(n), n >= stuckThr));
     }
 
     // reconcile-backlog(全局, high):存在待回收积压(对账器滞后)。
     long rThr = settings.getLong(RuntimeConfigKeys.ALERT_RECONCILE_BACKLOG, 3L);
     if (rThr > 0) {
-      long n = shards.countReclaimableRunning(null, STUCK_ALIVE_STALE_SECONDS);
+      long n = shards.countReclaimableRunning(null, staleAfterSeconds);
       out.add(new Signal("reconcile-backlog", null, null, "high", Long.toString(n), n >= rThr));
     }
 

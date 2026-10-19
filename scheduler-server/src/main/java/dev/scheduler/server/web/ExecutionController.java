@@ -22,6 +22,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -47,8 +48,8 @@ public class ExecutionController {
   private final ExecutionQueryService queryService;
   private final AuditRecorder auditor;
   private final CurrentOperator current;
-
-  private static final int STUCK_ALIVE_STALE_SECONDS = 30;
+  /** 活性窗(秒):卡死视图与强制放弃的活体门与 Reconciler 同源(scheduler.worker.stale-after-seconds,spec §12)。 */
+  private final int staleAfterSeconds;
 
   /** E2-B 卡死视图行(persistence StuckShard + task 名/handlerRef + 派生超龄秒)。 */
   public record StuckView(long shardId, long executionId, int shardIndex, String taskName,
@@ -58,13 +59,15 @@ public class ExecutionController {
 
   public ExecutionController(ExecutionRepository executions, ShardRepository shards,
                              WorkerRepository workers, JdbcTemplate jdbc, AuditRecorder auditor,
-                             CurrentOperator current) {
+                             CurrentOperator current,
+                             @Value("${scheduler.worker.stale-after-seconds:30}") int staleAfterSeconds) {
     this.executions = executions;
     this.shards = shards;
     this.workers = workers;
     this.queryService = new ExecutionQueryService(jdbc, executions, shards);
     this.auditor = auditor;
     this.current = current;
+    this.staleAfterSeconds = staleAfterSeconds;
   }
 
   @GetMapping
@@ -171,7 +174,7 @@ public class ExecutionController {
       @RequestParam(required = false) Integer limit,
       @RequestParam(required = false) Integer offset) {
     Paging p = Paging.of(limit, offset);
-    List<ShardRepository.StuckShard> ss = shards.findStuckAliveRunning(taskId, STUCK_ALIVE_STALE_SECONDS);
+    List<ShardRepository.StuckShard> ss = shards.findStuckAliveRunning(taskId, staleAfterSeconds);
     List<Long> ids = ss.stream().map(ShardRepository.StuckShard::id).toList();
     Map<Long, TaskRef> refs = shards.findTaskRefsByShardIds(ids);
     List<StuckView> all = ss.stream().map(x -> {
@@ -199,11 +202,14 @@ public class ExecutionController {
       throw new ResponseStatusException(HttpStatus.CONFLICT,
           "shard " + shardId + " is " + s.status() + " and cannot be force-abandoned (only RUNNING with an owner)");
     }
-    if (workers.isAlive(s.workerId(), STUCK_ALIVE_STALE_SECONDS)) {
+    if (workers.isAlive(s.workerId(), staleAfterSeconds)) {
       throw new ResponseStatusException(HttpStatus.CONFLICT,
           "owner worker " + s.workerId() + " is still ALIVE; stop it before force-abandon");
     }
-    workers.markOffline(s.workerId(), Instant.now().minusSeconds(600)); // 防御性摘活(即便守卫已过仍兜底)
+    // 防御性摘活(即便守卫已过仍兜底):回拨量必须严格超出**配置**窗,否则窗被调大(≥600s)时
+    // 这个"极早"的时间戳落回窗内 → 刚判死的属主立刻复活,与刚通过的活性门自相矛盾。600s 为下限(保持原有
+    // "久远到不会立刻复归"的语义),窗更大时随之放大。
+    workers.markOffline(s.workerId(), Instant.now().minusSeconds(Math.max(600L, 2L * staleAfterSeconds)));
     shards.markStatus(shardId, ExecutionStatus.FAILED, s.workerId(), "operator force-abandon");
     shards.requeueShard(shardId);
     auditor.record(current.get(), "shard.force-abandon", TargetType.SHARD, shardId, Map.of(), null, shardBefore(s));

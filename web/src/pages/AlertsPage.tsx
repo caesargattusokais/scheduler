@@ -18,6 +18,7 @@ const RULE_LABELS: Record<string, { text: string; cls: string }> = {
   'task-failure-rate': { text: '任务失败聚集', cls: 'bg-fuchsia-100 text-fuchsia-700' },
   'dag-run-failed': { text: 'DAG 批次失败', cls: 'bg-emerald-100 text-emerald-700' },
   'stuck-alive': { text: '运行卡死', cls: 'bg-slate-100 text-slate-700' },
+  'reconcile-backlog': { text: '对账积压', cls: 'bg-teal-100 text-teal-700' },
 };
 
 /** 规则 id → 下钻所属页(镜像旧 AlertsPage 的 href 映射;未知回落 /alerts)。 */
@@ -31,6 +32,7 @@ const RULE_DRILLDOWN: Record<string, string> = {
   'task-failure-rate': '/tasks',
   'dag-run-failed': '/dags',
   'stuck-alive': '/stuck',
+  'reconcile-backlog': '/reconcile',
 };
 
 /** 三档严重度外观(沿用旧页)。 */

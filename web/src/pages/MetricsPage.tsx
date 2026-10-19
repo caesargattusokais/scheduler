@@ -16,7 +16,6 @@ const CARDS: CardDef[] = [
   { key: 'scheduler_execution_failed_1h', label: '1h 失败', agg: 'sum', nice: (v) => String(Math.round(v)) },
   { key: 'scheduler_execution_failure_rate_1h', label: '失败率', agg: 'raw', nice: (v) => `${(v * 100).toFixed(1)}%` },
   { key: 'scheduler_execution_latency_p95_ms', label: 'p95 延迟', unit: 'ms', agg: 'raw', nice: (v) => `${v >= 1000 ? (v / 1000).toFixed(2) + 's' : Math.round(v) + 'ms'}` },
-  { key: 'scheduler_reconcile_reclaimed_1h', label: '对账 1h 回收', agg: 'sum', nice: (v) => String(Math.round(v)) },
   { key: 'scheduler_reconcile_timeout_reclaimed_1h', label: '超时回收', agg: 'sum', nice: (v) => String(Math.round(v)) },
   { key: 'scheduler_reconcile_orphan_reclaimed_1h', label: '孤儿回收', agg: 'sum', nice: (v) => String(Math.round(v)) },
   { key: 'scheduler_reconcile_aggregated_1h', label: '父级汇聚', agg: 'sum', nice: (v) => String(Math.round(v)) },
@@ -83,7 +82,7 @@ export default function MetricsPage() {
       <div className="page-head">
         <div>
           <h1 className="page-title">指标</h1>
-          <p className="page-sub">16 个运维 + SLI gauge · 每 5s 刷新（数据源 /actuator/prometheus）+ 执行 SLO 快照（/api/v1/metrics/executions）</p>
+          <p className="page-sub">15 个运维 + SLI gauge · 每 5s 刷新（数据源 /actuator/prometheus）+ 执行 SLO 快照（/api/v1/metrics/executions）</p>
         </div>
       </div>
 

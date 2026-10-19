@@ -32,7 +32,7 @@ mvn spring-boot:run -pl scheduler-server
 | `DB_USER` / `DB_PASSWORD` | `scheduler` / `scheduler` | 数据库账号 |
 | `SCHEDULER_WORKER_ID` | 空 | 节点 workerId；空则用 hostname 派生 |
 | `SCHEDULER_LOOP_SCAN_DELAY_MS` | `5000` | 引擎扫描周期 |
-| `SCHEDULER_WORKER_STALE_AFTER_SECONDS` | `30` | owner worker 心跳失联判定窗口(活性优先接管) |
+| `SCHEDULER_WORKER_STALE_AFTER_SECONDS` | `30` | owner worker 心跳失联判定窗口(活性优先接管)。**实际有效上限 60s**：worker 侧自清把 `last_seen` 早于 60s 的行删除，而回收判据把「行缺失」视为死亡，故调至 >60s 不再延长回收窗 |
 | `SCHEDULER_RECONCILE_DELAY_MS` | `15000` | 对账回收/终态汇聚周期 |
 
 Flyway 自动迁移 schema。多节点实例共享同一数据库，经 advisory lock 选主协调。
@@ -93,7 +93,7 @@ cd web && npm run dev                     # 开发，/api 与 /actuator 代理�
 | `/dlq` | 死信队列 | 列出 `dead_letter` shard；单条 requeue 回队 |
 | `/reconcile` | 对账 | 待回收积压明细 + 最近决策流水（append-only reconcile_decision） |
 | `/dags` | 工作流 (DAG) | 工作流列表（启停/分页）+ 新建工作流可视化构建器（添加步骤、每步勾选上游）+ run 批次/详情 + 单节点重跑、终止批次；5s 轮询 |
-| `/metrics` | 指标面板 | 5 核心指标卡 + 内联 SVG sparkline；5s 轮询 |
+| `/metrics` | 指标面板 | 15 张指标卡 + 内联 SVG sparkline + 执行 SLO 快照；5s 轮询 |
 
 ## REST API
 
@@ -152,7 +152,7 @@ cd web && npm run dev                     # 开发，/api 与 /actuator 代理�
 
 ## 指标（Prometheus）
 
-后端暴露 `/actuator/prometheus`（`management.endpoints.web.exposure.include: health,info,prometheus`）。控制台 `/metrics` 页聚合为 5 张卡。**全部为全局懒查询 gauge**（scrape 时实读 DB，不带任何标签）：新建任务/DAG 无需重启即计入。
+后端暴露 `/actuator/prometheus`（`management.endpoints.web.exposure.include: health,info,prometheus`）。控制台 `/metrics` 页聚合为 15 张 gauge 卡（另有执行 SLO 快照卡，取自 `/api/v1/metrics/executions`，非 Prometheus）。除表末两行外**均为全局懒查询 gauge**（scrape 时实读 DB，不带任何标签）：新建任务/DAG 无需重启即计入。
 
 | 指标 | 含义 |
 |------|------|
@@ -161,13 +161,18 @@ cd web && npm run dev                     # 开发，/api 与 /actuator 代理�
 | `scheduler_dag_runs_active` | 活跃 DAG 批次数：全部 `PENDING` 的 `dag_run` |
 | `scheduler_dlq_depth` | 死信队列深度：`FAILED AND dead_letter` 的 shard 数 |
 | `scheduler_worker_active` | 存活 worker 数：`worker` 表 `last_seen` 距今 ≤30s 且 `ALIVE` 的进程数（读心跳表，非选主锁） |
-| `scheduler_reconcile_reclaimed_1h` | 近 1h 对账回收分片数(`timeout_reclaim` + `orphan_reclaim` 计数,读 `reconcile_decision`) |
+| `scheduler_execution_completed_1h` | 近 1h 完成执行数 |
+| `scheduler_execution_failed_1h` | 近 1h 失败执行数 |
+| `scheduler_execution_failure_rate_1h` | 近 1h 失败率 = 失败 /(完成+失败)，无样本 → 0 |
+| `scheduler_execution_latency_p95_ms` | 近 24h 完成延迟 p95（毫秒） |
 | `scheduler_reconcile_timeout_reclaimed_1h` | 近 1h 超时回收计数 |
 | `scheduler_reconcile_orphan_reclaimed_1h` | 近 1h 孤儿回收计数 |
 | `scheduler_reconcile_aggregated_1h` | 近 1h 父级汇聚计数 |
 | `scheduler_reconcile_near_miss_1h` | 近 1h CAS 失手/near-miss 计数 |
 | `scheduler_reconcile_backlog` | 当前待回收积压分片数(属主已死且仍 RUNNING) |
 | `scheduler_reconcile_backlog_max_age_seconds` | 最老待回收分片的积压龄(秒) |
+| `scheduler_reconcile_scan_duration` | **Timer（进程内）**：`Reconciler.scanOnce()` 耗时分布，非 DB gauge |
+| `scheduler_reconcile_scan_failures_total` | **Counter（进程内）**：`scanOnce()` 抛异常次数（`ConfigurableLoop` 兜底不杀线程），非 DB gauge |
 
 ## 开发方式
 
