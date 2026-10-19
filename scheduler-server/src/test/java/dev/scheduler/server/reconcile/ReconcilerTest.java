@@ -2,6 +2,7 @@ package dev.scheduler.server.reconcile;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.doReturn;
@@ -615,6 +616,26 @@ class ReconcilerTest {
     assertEquals(ExecutionStatus.FAILED, shards.findParent(parentId).orElseThrow().status(),
         "异常不得跳过父级终态汇聚");
     assertEquals(1L, parentOutcomeCount(parentId, "FAILED"), "父级 outcome 正常落库");
+  }
+
+  /** 父级汇聚路径的点火同样隔离:parentTerminal 抛异常不得中止其余父级的汇聚(与回收路径同一失败隔离)。 */
+  @Test void firerThrows_onParentTerminal_otherParentsStillAggregated() {
+    long taskId = createTask(1, 0, 1000, null);
+    long first = seedParentWithShards(taskId, 1);
+    long second = seedParentWithShards(taskId, 1);
+    setShard(shard(first, 0), "SUCCESS", null);
+    setShard(shard(second, 0), "SUCCESS", null);
+    NotificationFirer firer = mock(NotificationFirer.class);
+    doThrow(new IllegalStateException("notification hub down"))
+        .when(firer).parentTerminal(anyLong(), any(), any());
+    Reconciler rc = new Reconciler(tasks, shards,
+        new FailureResolver(shards, new RetryPolicy(), CLOCK), firer, telemetry, "reconciler", 30);
+
+    rc.scanOnce();
+
+    assertEquals(ExecutionStatus.SUCCESS, shards.findParent(first).orElseThrow().status());
+    assertEquals(ExecutionStatus.SUCCESS, shards.findParent(second).orElseThrow().status(),
+        "首个父级点火异常不得跳过后续父级汇聚");
   }
 }
 

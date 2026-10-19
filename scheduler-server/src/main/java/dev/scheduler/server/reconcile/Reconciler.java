@@ -65,14 +65,8 @@ public class Reconciler {
       if (task.timeoutSeconds() > 0) {
         for (ExpiredShard run : shards.findOverRuntime(task.id(), task.timeoutSeconds(), staleAfterSeconds)) {
           if (reclaim(task, run, "timeout_reclaim", "runtime timeout")) {
-            // 点火隔离:回收已落库,通知属观测面——底座抖动只丢这一条通知,不得中止整趟扫描(否则剩余分片
-            // 与父级汇聚都被跳过,恢复语义被观测面带下水)。
-            try {
-              firer.shardTimedOut(run.id(), task.id(), run.attempt(), task.timeoutSeconds());
-            } catch (RuntimeException firingFailed) {
-              log.warn("reconcile: fire execution.timeout failed for shard {} (reclaim already applied)",
-                  run.id(), firingFailed);
-            }
+            fireQuietly("execution.timeout for shard " + run.id(),
+                () -> firer.shardTimedOut(run.id(), task.id(), run.attempt(), task.timeoutSeconds()));
             reclaimed++;
           }
         }
@@ -87,6 +81,16 @@ public class Reconciler {
     }
     aggregateParents();
     return reclaimed;
+  }
+
+  /** 点火隔离:通知属观测面,底座抖动只丢这一条通知,不得中止对账推进(回收/汇聚已落库)。
+   *  否则一条通知异常会把剩余分片与父级汇聚一起跳过,恢复语义被观测面带下水。 */
+  private void fireQuietly(String what, Runnable firing) {
+    try {
+      firing.run();
+    } catch (RuntimeException firingFailed) {
+      log.warn("reconcile: fire {} failed (reconcile step already applied)", what, firingFailed);
+    }
   }
 
   /** 单条回收 + 决策留痕:markStatus 成功 → handle 返回 outcome 落 phase 决策;CAS 失手/非法迁移 → near_miss SKIPPED。 */
@@ -139,9 +143,13 @@ public class Reconciler {
       }
       // 事件点火(次序:先死信、再父终态;均在父收敛落库后,幂等由 key 保证只发一次)——与最终化返回值无关,保持原语义。
       for (Shard s : parent) {
-        if (s.deadLetter()) firer.shardDeadLettered(pid, s.id(), s.attempt());
+        if (s.deadLetter()) {
+          fireQuietly("execution.dead_letter for shard " + s.id(),
+              () -> firer.shardDeadLettered(pid, s.id(), s.attempt()));
+        }
       }
-      firer.parentTerminal(pid, parentTerminal, parent);
+      fireQuietly("parent terminal for execution " + pid,
+          () -> firer.parentTerminal(pid, parentTerminal, parent));
     }
   }
 }
