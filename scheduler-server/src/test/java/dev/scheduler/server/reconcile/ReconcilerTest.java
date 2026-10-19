@@ -2,7 +2,11 @@ package dev.scheduler.server.reconcile;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -578,6 +582,39 @@ class ReconcilerTest {
     assertEquals("RUNNING", d.toStatus());
     assertEquals("owner unresponsive", d.reason());
     assertTrue(fired.isEmpty(), "near-miss 不点火任何事件");
+  }
+
+  /** 点火失败隔离:某片发 execution.timeout 抛异常,不得中止整趟扫描——该片已回收,后续片与父级汇聚仍完成。
+   *  观测面(通知底座)抖动不应把对账回收(恢复语义)带下水。 */
+  @Test void firerThrows_shardStillReclaimedAndScanContinues() {
+    long taskId = createTaskTimed(3);
+    long parentId = seedParentWithShards(taskId, 2);
+    long first = shard(parentId, 0).id();
+    long second = shard(parentId, 1).id();
+    // 两片同为「死属主 + 运行超限」→ 阶段 1 超时回收路径(回收后点火 execution.timeout)。
+    for (long sid : List.of(first, second)) {
+      jdbc.update("UPDATE execution_shard SET status='RUNNING', worker_id=?,"
+          + " lease_until=now()+interval '60 seconds', attempt=1,"
+          + " started_at=now() - interval '10 minutes' WHERE id=?", "w-" + sid, sid);
+      jdbc.update("INSERT INTO worker (id, refs, last_seen, status)"
+          + " VALUES (?, '', now() - interval '2 minutes', 'ALIVE')", "w-" + sid);
+    }
+    // 点火整体不可用:每次 shardTimedOut 都抛。
+    NotificationFirer firer = mock(NotificationFirer.class);
+    doThrow(new IllegalStateException("notification hub down"))
+        .when(firer).shardTimedOut(anyLong(), anyLong(), anyInt(), anyInt());
+    Reconciler rc = new Reconciler(tasks, shards,
+        new FailureResolver(shards, new RetryPolicy(), CLOCK), firer, telemetry, "reconciler", 30);
+
+    int n = rc.scanOnce();
+
+    assertEquals(2, n, "点火抛异常仍回收两片(回收先于点火,失败只影响通知)");
+    assertEquals(ExecutionStatus.FAILED, shards.findShard(first).orElseThrow().status());
+    assertEquals(ExecutionStatus.FAILED, shards.findShard(second).orElseThrow().status(),
+        "首片点火异常不得中止后续片回收");
+    assertEquals(ExecutionStatus.FAILED, shards.findParent(parentId).orElseThrow().status(),
+        "异常不得跳过父级终态汇聚");
+    assertEquals(1L, parentOutcomeCount(parentId, "FAILED"), "父级 outcome 正常落库");
   }
 }
 

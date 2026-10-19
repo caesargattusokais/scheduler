@@ -12,6 +12,8 @@ import dev.scheduler.persistence.retry.FailureOutcome;
 import dev.scheduler.persistence.retry.FailureResolver;
 import dev.scheduler.server.service.NotificationFirer;
 import java.util.List;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * 对账器:回收租约过期的孤儿 RUNNING shard(id 已认领却迟迟未回写),并对已收敛的父级做终态汇聚。
@@ -23,6 +25,8 @@ import java.util.List;
  * E3:每次回收/汇聚/竞态裁决经 ReconcileTelemetry 落 reconcile_decision 行(append-only,纯观测,不改恢复语义)。
  */
 public class Reconciler {
+  private static final Logger log = LoggerFactory.getLogger(Reconciler.class);
+
   private final TaskRepository tasks;
   private final ShardRepository shards;
   private final FailureResolver failureResolver;
@@ -61,7 +65,14 @@ public class Reconciler {
       if (task.timeoutSeconds() > 0) {
         for (ExpiredShard run : shards.findOverRuntime(task.id(), task.timeoutSeconds(), staleAfterSeconds)) {
           if (reclaim(task, run, "timeout_reclaim", "runtime timeout")) {
-            firer.shardTimedOut(run.id(), task.id(), run.attempt(), task.timeoutSeconds());
+            // 点火隔离:回收已落库,通知属观测面——底座抖动只丢这一条通知,不得中止整趟扫描(否则剩余分片
+            // 与父级汇聚都被跳过,恢复语义被观测面带下水)。
+            try {
+              firer.shardTimedOut(run.id(), task.id(), run.attempt(), task.timeoutSeconds());
+            } catch (RuntimeException firingFailed) {
+              log.warn("reconcile: fire execution.timeout failed for shard {} (reclaim already applied)",
+                  run.id(), firingFailed);
+            }
             reclaimed++;
           }
         }
