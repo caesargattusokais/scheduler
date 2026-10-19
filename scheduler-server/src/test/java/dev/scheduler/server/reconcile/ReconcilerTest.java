@@ -9,6 +9,8 @@ import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.scheduler.core.Execution;
@@ -636,6 +638,26 @@ class ReconcilerTest {
     assertEquals(ExecutionStatus.SUCCESS, shards.findParent(first).orElseThrow().status());
     assertEquals(ExecutionStatus.SUCCESS, shards.findParent(second).orElseThrow().status(),
         "首个父级点火异常不得跳过后续父级汇聚");
+  }
+
+  /** 同一父级下多个死信片的点火隔离:fireQuietly 的 catch 在循环体内 → 每片各自隔离,首片抛异常
+   *  不得吞掉后续兄弟片的事件(死信片事件只在父级汇聚这一趟发一次,漏发即永久丢失)。 */
+  @Test void firerThrows_onDeadLetter_everySiblingStillFires() {
+    long taskId = createTask(1, 0, 1000, null);
+    long parentId = seedParentWithShards(taskId, 3);
+    for (int i = 0; i < 3; i++) {
+      jdbc.update("UPDATE execution_shard SET status='FAILED', dead_letter=true WHERE id=?",
+          shard(parentId, i).id());
+    }
+    NotificationFirer firer = mock(NotificationFirer.class);
+    doThrow(new IllegalStateException("notification hub down"))
+        .when(firer).shardDeadLettered(anyLong(), anyLong(), anyInt());
+    Reconciler rc = new Reconciler(tasks, shards,
+        new FailureResolver(shards, new RetryPolicy(), CLOCK), firer, telemetry, "reconciler", 30);
+
+    rc.scanOnce();
+
+    verify(firer, times(3)).shardDeadLettered(anyLong(), anyLong(), anyInt());
   }
 }
 
